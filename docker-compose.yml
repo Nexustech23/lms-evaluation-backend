@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  lms-backend-fastapi:
+    build: .
+    container_name: lms-backend-fastapi
+    ports:
+      # Host 5051 -> container 5050, so this runs alongside Flask's
+      # lms-backend (which owns host port 5050) without colliding.
+      # Once you're confident in it, flip the frontend's API_URL to point
+      # here — or, for a full cutover, swap this to "5050:5050" after
+      # stopping the Flask container.
+      - "5051:5050"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - lms-shared
+
+networks:
+  lms-shared:
+    external: true
