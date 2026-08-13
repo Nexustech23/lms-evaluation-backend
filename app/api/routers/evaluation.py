@@ -62,6 +62,22 @@ async def save_evaluation_details(
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e) or "questionEvaluationDetails is invalid")
 
+    exam = await db["newsavedDocs"].find_one({"_id": exam_object_id}, {"covered_cos": 1})
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    covered_cos = set(exam.get("covered_cos") or [])
+    used_cos = {co["co_code"] for q in validated_details for co in q["cos"]}
+    unknown_cos = sorted(used_cos - covered_cos)
+    if unknown_cos:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"These COs are used in the rubric but not declared in the exam's covered COs: "
+                f"{', '.join(unknown_cos)}. Edit the exam's covered COs first, or remove them from the rubric."
+            ),
+        )
+
     now = datetime.now(timezone.utc)
     existing_eval = await db["evaluationDetails"].find_one(
         {"exam_id": exam_object_id, "faculty_id": faculty_object_id}
