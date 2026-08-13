@@ -65,6 +65,23 @@ async def find_document_by_hash(db: AsyncIOMotorDatabase, content_hash: str) -> 
     return _to_document_record(doc)
 
 
+async def find_document_by_id(db: AsyncIOMotorDatabase, doc_id: str) -> Optional[DocumentRecord]:
+    """
+    Precise lookup by _id — lets a roadmap's stored `grounded_doc_id` be
+    trusted directly instead of re-doing a subject-text match on every
+    generation call (see roadmap.py's `_resolve_grounding`). Returning None
+    here (not raising) also serves as the staleness check: if the material
+    was deleted since the roadmap was created, callers fall back to the
+    subject-match path automatically.
+    """
+    if not doc_id:
+        return None
+    doc = await db.courseMaterials.find_one({"_id": doc_id})
+    if not doc:
+        return None
+    return _to_document_record(doc)
+
+
 async def find_document_for_subject(db: AsyncIOMotorDatabase, subject: str) -> Optional[DocumentRecord]:
     """
     Called before roadmap/notes generation: given the user-typed `subject`,

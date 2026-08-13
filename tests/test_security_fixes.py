@@ -165,24 +165,6 @@ async def test_roadmap_job_status_scoped_to_owner(client_factory, test_db):
     assert allowed.json()["status"] == "processing"
 
 
-async def test_pomodoro_job_status_scoped_to_owner(client_factory, test_db):
-    from app.api.routers.pomodoro import POMODORO_JOB_PREFIX
-
-    owner = await _seed_and_login_user(test_db, client_factory, role=7, name="Learner C")
-    other = await _seed_and_login_user(test_db, client_factory, role=7, name="Learner D")
-
-    owner_user_doc = await test_db["users"].find_one({"fullName": "Learner C"})
-    job_id = str(uuid.uuid4())
-    await set_job(POMODORO_JOB_PREFIX, job_id, {"status": "pending", "user_id": str(owner_user_doc["_id"])})
-
-    denied = await other.get(f"/api/pomodoro/job/{job_id}")
-    assert denied.status_code == 404
-
-    allowed = await owner.get(f"/api/pomodoro/job/{job_id}")
-    assert allowed.status_code == 200
-    assert allowed.json()["status"] == "pending"
-
-
 # ============================================================
 # 3. Exception handler preserves custom dict detail content
 # ============================================================

@@ -1,9 +1,18 @@
 # ============================================================
-# MOCK TESTS ROUTER
+# MOCK TESTS ROUTER (Test Engine)
 # Ported from routes/institute/mock_test_routes.py +
 # controllers/institute/mock_test_controller.py +
-# controllers/institute/test_attempt_controller.py +
-# controllers/institute/analytics_controller.py (GET /mock-tests/analytics)
+# controllers/institute/test_attempt_controller.py
+#
+# Two creation modes: "subject" (practice tests, original flow, this file's
+# only concern originally) and "roadmap" (week-range tests reusing the
+# roadmap module's Auto Test machinery — see _create_roadmap_test /
+# _submit_roadmap_test / _review_roadmap_test).
+#
+# Analytics (GET .../analytics, POST .../attempts/.../insight) used to live
+# here too but has moved to self_learner_analytics.py, mounted at
+# /self-learner/analytics/* — see that file for the merged-across-sources
+# dashboard and "Get Detailed Feedback" logic.
 #
 # Deviation from Flask: GET /mock-tests/{id} (used to fetch a test for the
 # student to take) redacts correct_answer/explanation from each question —
@@ -12,58 +21,35 @@
 # ============================================================
 
 import asyncio
-import base64
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple
 
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity
+from app.api.routers.roadmap import _resolve_grounding
 from app.db.mongodb import get_database
-from app.models.mock_test import build_create_document, serialize_mock_test, serialize_question
+from app.models.mock_test import (
+    build_create_document,
+    build_roadmap_test_document,
+    serialize_mock_test,
+    serialize_question,
+    serialize_roadmap_test_question,
+)
 from app.schemas.mock_test import MockTestCreateRequest, MockTestSubmitRequest
-from app.services.attempt_insight import generate_attempt_insight
 from app.services.mock_test_generation import build_mock_test_prompt, generate_mock_test_questions
+from app.services.roadmap_ai import (
+    build_auto_test_prompt,
+    build_open_ended_grading_prompt,
+    generate_gemini_json,
+    increment_student_gemini_tokens,
+    _split_question_counts,
+)
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["mock-tests"])
-
-
-def _quiz_attempt_id(roadmap_id: Any, week: Any, submitted_at: datetime) -> str:
-    # base64url instead of a raw "quiz:<id>:<week>:<iso timestamp>" string —
-    # the timestamp itself contains colons, and those get mangled somewhere
-    # in the browser -> Next.js rewrite -> backend round trip (colons are
-    # exactly the kind of "special but not always re-escaped" character that
-    # breaks across that many encode/decode layers). base64url's alphabet
-    # (A-Za-z0-9-_) needs zero percent-encoding anywhere in that chain.
-    raw = f"{roadmap_id}:{week}:{submitted_at.isoformat()}"
-    token = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-    return f"q_{token}"
-
-
-def _parse_quiz_attempt_id(attempt_id: str) -> Optional[Tuple[str, int, datetime]]:
-    if not attempt_id.startswith("q_"):
-        return None
-    token = attempt_id[2:]
-    padded = token + "=" * (-len(token) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(padded.encode()).decode()
-    except Exception:
-        return None
-    parts = raw.split(":", 2)
-    if len(parts) != 3:
-        return None
-    roadmap_id, week_str, ts = parts
-    try:
-        week = int(week_str)
-        submitted_at = datetime.fromisoformat(ts)
-    except ValueError:
-        return None
-    if not ObjectId.is_valid(roadmap_id):
-        return None
-    return roadmap_id, week, submitted_at
 
 
 def _serialize_attempt(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -117,21 +103,6 @@ def _evaluate_answers(
     return correct, wrong, skipped, max(0, round(scored, 2)), qwise
 
 
-def _date_filter(time_range: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if time_range == "week":
-        return {"submitted_at": {"$gte": now - timedelta(days=7)}}
-    if time_range == "month":
-        return {"submitted_at": {"$gte": now - timedelta(days=30)}}
-    return {}
-
-
-def _safe_pct(num: float, den: float) -> float:
-    if not den:
-        return 0
-    return round((num / den) * 100, 1)
-
-
 # ============================================================
 # BACKGROUND GENERATION
 # ============================================================
@@ -151,6 +122,29 @@ async def _run_generation(test_id: ObjectId, prompt: str) -> None:
         await db["mockTests"].update_one({"_id": test_id}, {"$set": {"generationError": str(e), "updated_at": now}})
 
 
+async def _run_roadmap_generation(test_id: ObjectId, prompt: str, user_id: str) -> None:
+    """Roadmap-mode counterpart of _run_generation — reuses Auto Test's
+    question generation (Gemini, same as every other roadmap quiz/practice
+    call site) instead of subject-mode's own prompt/schema."""
+    db = get_database()
+    now = datetime.now(timezone.utc)
+    try:
+        questions, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+        await increment_student_gemini_tokens(db, user_id, usage)
+
+        if truncated or not isinstance(questions, list) or not questions:
+            raise ValueError("AI did not return valid questions (truncated or empty response)")
+
+        await db["mockTests"].update_one(
+            {"_id": test_id},
+            {"$set": {"questions": questions, "questionCount": len(questions), "updated_at": now}},
+        )
+        logging.info("[roadmap-test:%s] generation completed — %d questions.", test_id, len(questions))
+    except Exception as e:
+        logging.error("[roadmap-test:%s] generation failed: %s", test_id, e, exc_info=True)
+        await db["mockTests"].update_one({"_id": test_id}, {"$set": {"generationError": str(e), "updated_at": now}})
+
+
 # ============================================================
 # ROUTES
 # ============================================================
@@ -163,6 +157,9 @@ async def create_mock_test(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     student_id = ObjectId(identity["user_id"])
+
+    if payload.mode == "roadmap":
+        return await _create_roadmap_test(background_tasks, payload, student_id, identity["user_id"], db)
 
     try:
         doc = build_create_document(payload.model_dump(exclude_unset=True), student_id)
@@ -187,380 +184,79 @@ async def create_mock_test(
     }
 
 
+async def _create_roadmap_test(
+    background_tasks: BackgroundTasks, payload: MockTestCreateRequest,
+    student_id: ObjectId, user_id: str, db: AsyncIOMotorDatabase,
+) -> Dict[str, Any]:
+    if not payload.roadmap_id or not ObjectId.is_valid(payload.roadmap_id):
+        raise HTTPException(status_code=400, detail="A valid roadmap_id is required for roadmap-mode tests")
+    if not payload.week_start or not payload.week_end:
+        raise HTTPException(status_code=400, detail="week_start and week_end are required for roadmap-mode tests")
+    if payload.week_start > payload.week_end:
+        raise HTTPException(status_code=400, detail="week_start must be <= week_end")
+
+    roadmap_object_id = ObjectId(payload.roadmap_id)
+    roadmap_doc = await db["selfLearnerRoadmaps"].find_one({"_id": roadmap_object_id, "user_id": student_id})
+    if not roadmap_doc:
+        raise HTTPException(status_code=404, detail="Roadmap not found")
+
+    weeks_in_range = [w for w in roadmap_doc.get("weeks", []) if payload.week_start <= w.get("week", 0) <= payload.week_end]
+    if len(weeks_in_range) != (payload.week_end - payload.week_start + 1):
+        raise HTTPException(status_code=400, detail="One or more weeks in that range don't exist on this roadmap")
+
+    unlocked = set(roadmap_doc.get("unlockedWeeks", [1]))
+    if not all(w.get("week") in unlocked for w in weeks_in_range):
+        raise HTTPException(status_code=403, detail="One or more weeks in that range are locked")
+
+    mcq_pct = payload.mcq_percent if payload.mcq_percent is not None else 100
+    subj_pct = payload.subjective_percent if payload.subjective_percent is not None else 0
+    prac_pct = payload.practical_percent if payload.practical_percent is not None else 0
+    if round(mcq_pct + subj_pct + prac_pct) != 100:
+        raise HTTPException(status_code=400, detail="mcq_percent + subjective_percent + practical_percent must sum to 100")
+
+    question_count = max(1, min(50, payload.questionCount or 10))
+    config = {
+        "mcqPercent": mcq_pct, "subjectivePercent": subj_pct, "practicalPercent": prac_pct,
+        "questionCount": question_count, "customPrompt": payload.custom_prompt,
+    }
+
+    subject = roadmap_doc.get("subject", "")
+    doc = build_roadmap_test_document(
+        student_id, roadmap_object_id, subject, payload.week_start, payload.week_end, config,
+    )
+    result = await db["mockTests"].insert_one(doc)
+    test_id = result.inserted_id
+
+    counts = _split_question_counts(mcq_pct, subj_pct, prac_pct, question_count)
+    week_title = (
+        f"Weeks {payload.week_start}-{payload.week_end}"
+        if payload.week_end != payload.week_start else f"Week {payload.week_start}"
+    )
+    subtopic_names = [s.get("title", "") for w in weeks_in_range for s in w.get("subtopics", [])]
+
+    grounding_context = await _resolve_grounding(
+        db, roadmap_doc, subject, f"Assessment questions for {week_title}: {', '.join(subtopic_names)}", user_id,
+    )
+    prompt = build_auto_test_prompt(
+        subject, week_title, subtopic_names, counts, payload.custom_prompt, grounding_context=grounding_context,
+    )
+    background_tasks.add_task(_run_roadmap_generation, test_id, prompt, user_id)
+
+    return {
+        "success": True,
+        "message": "Roadmap test created. Questions are being generated…",
+        "testId": str(test_id),
+        "mockTest": {"_id": str(test_id)},
+        "test": {"_id": str(test_id)},
+    }
+
+
 @router.get("/mock-tests")
 async def list_mock_tests(identity: dict = Depends(get_current_identity), db: AsyncIOMotorDatabase = Depends(get_database)):
     student_id = ObjectId(identity["user_id"])
     cursor = db["mockTests"].find({"student_id": student_id}, {"questions": 0}).sort("created_at", -1)
     tests = [serialize_mock_test(doc) async for doc in cursor]
     return {"success": True, "tests": tests}
-
-
-@router.get("/mock-tests/analytics")
-async def get_mock_test_analytics(
-    range: str = "all",
-    identity: dict = Depends(get_current_identity),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Declared before /mock-tests/{test_id} so FastAPI doesn't match
-    "analytics" as a test_id path param (same ordering Flask relies on)."""
-    student_id = ObjectId(identity["user_id"])
-    date_filter = _date_filter(range)
-    base_filter: Dict[str, Any] = {"student_id": student_id, **date_filter}
-
-    # testAttempts (Practice Tests) — kept as raw DB docs since topic/
-    # difficulty/question-type breakdowns below need the real test_id join;
-    # weekly-quiz entries have no equivalent per-question tagging to offer
-    # there, same limitation the Flask analytics module has.
-    attempts = await db["testAttempts"].find(base_filter).sort("submitted_at", -1).to_list(length=None)
-
-    # Weekly Quiz history — lives embedded per-roadmap
-    # (selfLearnerRoadmaps.progress.quizHistory[]), not in its own
-    # collection, and was never part of this endpoint until now.
-    cutoff = date_filter.get("submitted_at", {}).get("$gte")
-    roadmap_docs = await db["selfLearnerRoadmaps"].find(
-        {"user_id": student_id}, {"subject": 1, "progress.quizHistory": 1},
-    ).to_list(length=None)
-
-    quiz_normalized: List[Dict[str, Any]] = []
-    for rd in roadmap_docs:
-        subject = rd.get("subject", "Roadmap")
-        for entry in rd.get("progress", {}).get("quizHistory", []):
-            submitted_at = entry.get("submittedAt")
-            if not submitted_at or (cutoff and submitted_at < cutoff):
-                continue
-            week = entry.get("week")
-            total_q = entry.get("totalQuestions", 0)
-            correct_q = entry.get("correctCount", 0)
-            quiz_normalized.append({
-                "id": _quiz_attempt_id(rd["_id"], week, submitted_at),
-                "test_id": "",
-                "sourceType": "weekly_quiz",
-                "testTitle": f"Week {week}: {subject}",
-                "subjectName": subject,
-                "scored": correct_q,
-                "totalMarks": total_q,
-                "percentage": entry.get("score", 0),
-                "correct": correct_q,
-                "wrong": max(0, total_q - correct_q),
-                "skipped": 0,
-                "accuracy": _safe_pct(correct_q, total_q),
-                "submitted_at": submitted_at,
-                "hasInsight": bool(entry.get("aiInsight")),
-            })
-
-    test_normalized: List[Dict[str, Any]] = [
-        {
-            "id": str(a["_id"]),
-            "test_id": str(a.get("test_id", "")),
-            "sourceType": "practice_test",
-            "testTitle": a.get("testTitle", ""),
-            "subjectName": a.get("subjectName", ""),
-            "scored": a.get("scored", 0),
-            "totalMarks": a.get("totalMarks", 0),
-            "percentage": a.get("percentage", 0),
-            "correct": a.get("correct", 0),
-            "wrong": a.get("wrong", 0),
-            "skipped": a.get("skipped", 0),
-            "accuracy": a.get("accuracy", 0),
-            "submitted_at": a.get("submitted_at"),
-            "hasInsight": bool(a.get("aiInsight")),
-        }
-        for a in attempts
-    ]
-
-    all_attempts = sorted(
-        test_normalized + quiz_normalized,
-        key=lambda a: a["submitted_at"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True,
-    )
-
-    if not all_attempts:
-        return {
-            "success": True,
-            "summary": {
-                "testsAttempted": 0, "totalQuestions": 0, "avgScore": 0,
-                "bestScore": 0, "avgAccuracy": 0, "totalTimeMins": 0,
-            },
-            "attempts": [],
-            "subjectPerformance": [],
-            "topicPerformance": [],
-            "difficultyBreakdown": {
-                "easy": {"correct": 0, "total": 0},
-                "medium": {"correct": 0, "total": 0},
-                "hard": {"correct": 0, "total": 0},
-            },
-            "scoreTrend": [],
-            "questionTypeBreakdown": [],
-            "strengths": [],
-            "improvements": [],
-            "improvementPct": None,
-        }
-
-    # ── Summary ──────────────────────────────────────────
-    tests_attempted = len(all_attempts)
-    total_questions = sum(a["correct"] + a["wrong"] + a["skipped"] for a in all_attempts)
-    avg_score = round(sum(a["percentage"] for a in all_attempts) / tests_attempted, 1)
-    best_score = round(max(a["percentage"] for a in all_attempts), 1)
-    avg_accuracy = round(sum(a["accuracy"] for a in all_attempts) / tests_attempted, 1)
-
-    summary = {
-        "testsAttempted": tests_attempted,
-        "totalQuestions": total_questions,
-        "avgScore": avg_score,
-        "bestScore": best_score,
-        "avgAccuracy": avg_accuracy,
-        "totalTimeMins": 0,
-    }
-
-    # ── Improvement ──────────────────────────────────────
-    improvement_pct = None
-    if tests_attempted >= 4:
-        mid = tests_attempted // 2
-        first = [a["percentage"] for a in all_attempts[mid:]]
-        second = [a["percentage"] for a in all_attempts[:mid]]
-        avg_first = sum(first) / len(first)
-        avg_second = sum(second) / len(second)
-        improvement_pct = round(avg_second - avg_first, 1)
-
-    # ── Attempt list ─────────────────────────────────────
-    attempt_list = [
-        {
-            "_id": a["id"],
-            "sourceType": a["sourceType"],
-            "test_id": a["test_id"],
-            "testTitle": a["testTitle"],
-            "subjectName": a["subjectName"],
-            "scored": a["scored"],
-            "totalMarks": a["totalMarks"],
-            "percentage": a["percentage"],
-            "date": a["submitted_at"].isoformat() if a["submitted_at"] else None,
-            "hasInsight": a["hasInsight"],
-        }
-        for a in all_attempts
-    ]
-
-    # ── Subject performance ───────────────────────────────
-    subject_map: Dict[str, Dict[str, float]] = {}
-    for a in all_attempts:
-        subj = a["subjectName"] or "Unknown"
-        entry = subject_map.setdefault(subj, {"scored": 0.0, "total": 0.0})
-        entry["scored"] += a["scored"]
-        entry["total"] += a["totalMarks"]
-
-    subject_perf = [{"subject": k, "scored": v["scored"], "total": v["total"]} for k, v in subject_map.items()]
-
-    # ── Topic + difficulty + question type ────────────────
-    test_ids = [a["test_id"] for a in attempts if a.get("test_id")]
-    test_docs: Dict[str, Dict[str, Any]] = {}
-    if test_ids:
-        cursor = db["mockTests"].find({"_id": {"$in": test_ids}}, {"topic": 1, "difficulty": 1})
-        async for t in cursor:
-            test_docs[str(t["_id"])] = t
-
-    topic_map: Dict[str, Dict[str, int]] = {}
-    diff_map = {
-        "easy": {"correct": 0, "total": 0},
-        "medium": {"correct": 0, "total": 0},
-        "hard": {"correct": 0, "total": 0},
-    }
-    qtype_map: Dict[str, Dict[str, int]] = {}
-
-    for a in attempts:
-        tid = str(a.get("test_id", ""))
-        tdoc = test_docs.get(tid, {})
-        topic = (tdoc.get("topic") or "").strip() or "General"
-        diff = tdoc.get("difficulty", "mixed")
-
-        topic_entry = topic_map.setdefault(topic, {"correct": 0, "total": 0})
-        topic_entry["correct"] += a.get("correct", 0)
-        topic_entry["total"] += a.get("correct", 0) + a.get("wrong", 0)
-
-        if diff in diff_map:
-            diff_map[diff]["correct"] += a.get("correct", 0)
-            diff_map[diff]["total"] += a.get("correct", 0) + a.get("wrong", 0)
-
-        for qw in a.get("questionwise", []):
-            qtype = qw.get("type", "mcq")
-            qtype_entry = qtype_map.setdefault(qtype, {"correct": 0, "total": 0})
-            qtype_entry["total"] += 1
-            if qw.get("status") == "correct":
-                qtype_entry["correct"] += 1
-
-    topic_perf = [
-        {"topic": k, "correct": v["correct"], "total": v["total"]}
-        for k, v in topic_map.items()
-        if v["total"] > 0
-    ]
-    qtype_breakdown = [{"type": k, "correct": v["correct"], "total": v["total"]} for k, v in qtype_map.items()]
-
-    # ── Score trend ───────────────────────────────────────
-    trend_data = [
-        {
-            "label": a["submitted_at"].strftime("%d %b") if a["submitted_at"] else f"T{i + 1}",
-            "score": a["percentage"],
-        }
-        for i, a in enumerate(reversed(all_attempts[:10]))
-    ]
-
-    # ── Strengths & Improvements ─────────────────────────
-    strengths: List[Dict[str, str]] = []
-    improvements: List[Dict[str, str]] = []
-
-    for subj, v in subject_map.items():
-        p = _safe_pct(v["scored"], v["total"])
-        entry = {"label": subj, "detail": f"{p}% avg score"}
-        if p >= 75:
-            strengths.append(entry)
-        elif p < 50:
-            improvements.append(entry)
-
-    for topic, v in topic_map.items():
-        if not v["total"]:
-            continue
-        p = _safe_pct(v["correct"], v["total"])
-        entry = {"label": topic, "detail": f"{v['correct']}/{v['total']} correct"}
-        if p >= 75:
-            strengths.append(entry)
-        elif p < 50 and topic != "General":
-            improvements.append(entry)
-
-    return {
-        "success": True,
-        "summary": summary,
-        "attempts": attempt_list,
-        "subjectPerformance": subject_perf,
-        "topicPerformance": topic_perf,
-        "difficultyBreakdown": diff_map,
-        "scoreTrend": trend_data,
-        "questionTypeBreakdown": qtype_breakdown,
-        "strengths": strengths[:5],
-        "improvements": improvements[:5],
-        "improvementPct": improvement_pct,
-    }
-
-
-# ============================================================
-# GET DETAILED FEEDBACK — per-question reasoning/feedback/improvement
-# ============================================================
-
-def _items_from_test_attempt(attempt: Dict[str, Any], test_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """questionwise only has question_id + answers; question text/options
-    live on the mockTests doc — same join /mock-tests/{id}/review already does."""
-    q_map = {str(q.get("_id")): q for q in test_doc.get("questions", []) if q.get("_id") is not None}
-    items = []
-    for qw in attempt.get("questionwise", []):
-        q = q_map.get(str(qw.get("question_id", "")), {})
-        items.append({
-            "question": q.get("questionText") or q.get("text", ""),
-            "options": q.get("options", []),
-            "studentAnswer": qw.get("student_answer"),
-            "correctAnswer": qw.get("correct_answer", ""),
-            "isCorrect": qw.get("status") == "correct",
-        })
-    return items
-
-
-def _items_from_quiz_history(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """entry["questions"] shape comes from roadmap.py's _sanitize_quiz_for_history — already self-contained."""
-    return [
-        {
-            "question": q.get("question", ""),
-            "options": q.get("options", []),
-            "studentAnswer": q.get("yourAnswer"),
-            "correctAnswer": q.get("correctAnswer", ""),
-            "isCorrect": q.get("isCorrect", False),
-        }
-        for q in entry.get("questions", [])
-    ]
-
-
-@router.post("/mock-tests/attempts/{source_type}/{attempt_id}/insight")
-async def get_attempt_insight(
-    source_type: str,
-    attempt_id: str,
-    identity: dict = Depends(get_current_identity),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Generates (or returns the cached) per-question reasoning/feedback/
-    improvement for one attempt. source_type is "practice_test" or
-    "weekly_quiz" (see _quiz_attempt_id for that id's synthetic format)."""
-    student_id = ObjectId(identity["user_id"])
-
-    if source_type == "practice_test":
-        if not ObjectId.is_valid(attempt_id):
-            raise HTTPException(status_code=400, detail="Invalid attempt id")
-        attempt = await db["testAttempts"].find_one({"_id": ObjectId(attempt_id), "student_id": student_id})
-        if not attempt:
-            raise HTTPException(status_code=404, detail="Attempt not found")
-
-        test_doc = await db["mockTests"].find_one({"_id": attempt.get("test_id")}) or {}
-        items = _items_from_test_attempt(attempt, test_doc)
-        if not items:
-            raise HTTPException(status_code=400, detail="No questions found for this attempt")
-
-        cached = attempt.get("aiInsight")
-        if not cached:
-            result = await generate_attempt_insight(items, db=db, user_id=identity["user_id"])
-            cached = result.get("insights", [])
-            await db["testAttempts"].update_one({"_id": attempt["_id"]}, {"$set": {"aiInsight": cached}})
-
-        questions = [{**item, **(cached[i] if i < len(cached) else {})} for i, item in enumerate(items)]
-        return {
-            "success": True,
-            "attempt": {
-                "testTitle": attempt.get("testTitle", ""),
-                "subjectName": attempt.get("subjectName", ""),
-                "percentage": attempt.get("percentage", 0),
-                "scored": attempt.get("scored", 0),
-                "totalMarks": attempt.get("totalMarks", 0),
-                "date": attempt["submitted_at"].isoformat() if attempt.get("submitted_at") else None,
-            },
-            "questions": questions,
-        }
-
-    if source_type == "weekly_quiz":
-        parsed = _parse_quiz_attempt_id(attempt_id)
-        if not parsed:
-            raise HTTPException(status_code=400, detail="Invalid attempt id")
-        roadmap_id, week, submitted_at = parsed
-
-        roadmap_doc = await db["selfLearnerRoadmaps"].find_one({"_id": ObjectId(roadmap_id), "user_id": student_id})
-        if not roadmap_doc:
-            raise HTTPException(status_code=404, detail="Roadmap not found")
-
-        history = roadmap_doc.get("progress", {}).get("quizHistory", [])
-        entry = next((h for h in history if h.get("week") == week and h.get("submittedAt") == submitted_at), None)
-        if not entry:
-            raise HTTPException(status_code=404, detail="Quiz attempt not found")
-
-        items = _items_from_quiz_history(entry)
-        if not items:
-            raise HTTPException(status_code=400, detail="No questions found for this attempt")
-
-        cached = entry.get("aiInsight")
-        if not cached:
-            result = await generate_attempt_insight(items, db=db, user_id=identity["user_id"])
-            cached = result.get("insights", [])
-            await db["selfLearnerRoadmaps"].update_one(
-                {"_id": roadmap_doc["_id"], "user_id": student_id},
-                {"$set": {"progress.quizHistory.$[entry].aiInsight": cached}},
-                array_filters=[{"entry.week": week, "entry.submittedAt": submitted_at}],
-            )
-
-        questions = [{**item, **(cached[i] if i < len(cached) else {})} for i, item in enumerate(items)]
-        return {
-            "success": True,
-            "attempt": {
-                "testTitle": f"Week {week}: {roadmap_doc.get('subject', 'Roadmap')}",
-                "subjectName": roadmap_doc.get("subject", ""),
-                "percentage": entry.get("score", 0),
-                "scored": entry.get("correctCount", 0),
-                "totalMarks": entry.get("totalQuestions", 0),
-                "date": submitted_at.isoformat(),
-            },
-            "questions": questions,
-        }
-
-    raise HTTPException(status_code=400, detail="Invalid sourceType")
 
 
 @router.get("/mock-tests/{test_id}")
@@ -605,6 +301,11 @@ async def submit_test(
     doc = await db["mockTests"].find_one({"_id": ObjectId(test_id), "student_id": student_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Mock test not found")
+
+    if doc.get("mode") == "roadmap":
+        return await _submit_roadmap_test(
+            ObjectId(test_id), doc, payload.answers, student_id, identity["user_id"], db,
+        )
 
     answers = payload.answers
 
@@ -652,6 +353,144 @@ async def submit_test(
     }
 
 
+async def _submit_roadmap_test(
+    test_id: ObjectId, doc: Dict[str, Any], answers: Dict[str, Any],
+    student_id: ObjectId, user_id: str, db: AsyncIOMotorDatabase,
+) -> Dict[str, Any]:
+    """Mirrors roadmap.py's submit_quiz grading exactly (MCQ exact-index
+    match; Subjective/Practical batched into one AI call) — questions here
+    are Auto-Test-shaped and identified by list index, not the _id-keyed
+    scheme subject-mode's _evaluate_answers uses, so this is a fully
+    separate path rather than a branch inside that function."""
+    questions = doc.get("questions", [])
+    if not questions:
+        raise HTTPException(status_code=400, detail="This test hasn't finished generating yet.")
+
+    per_question_score: Dict[int, float] = {}
+    per_question_feedback: Dict[int, str] = {}
+    open_ended_indices: List[int] = []
+    open_ended_items: List[Dict[str, Any]] = []
+
+    for idx, q in enumerate(questions):
+        student_answer = answers.get(str(idx))
+        if q.get("type", "mcq") == "mcq":
+            is_correct = student_answer == q.get("answer")
+            per_question_score[idx] = 100.0 if is_correct else 0.0
+            per_question_feedback[idx] = q.get("explanation", "")
+        elif student_answer is None or not str(student_answer).strip():
+            per_question_score[idx] = 0.0
+            per_question_feedback[idx] = "No answer provided."
+        else:
+            open_ended_indices.append(idx)
+            open_ended_items.append({
+                "type": q.get("type"), "question": q.get("question", ""),
+                "modelAnswer": q.get("modelAnswer", ""), "explanation": q.get("explanation", ""),
+                "studentAnswer": student_answer,
+            })
+
+    if open_ended_items:
+        prompt = build_open_ended_grading_prompt(open_ended_items)
+        try:
+            grading, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+        except Exception as e:
+            logging.error("submit_roadmap_test: open-ended grading failed: %s", e, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"AI grading failed: {e}")
+
+        await increment_student_gemini_tokens(db, user_id, usage)
+
+        if truncated or not isinstance(grading, list) or len(grading) != len(open_ended_items):
+            logging.error(
+                "submit_roadmap_test: grading response malformed/truncated (expected %d entries)",
+                len(open_ended_items),
+            )
+            raise HTTPException(status_code=502, detail="AI grading response was incomplete. Please try submitting again.")
+
+        for i, idx in enumerate(open_ended_indices):
+            entry = grading[i] if isinstance(grading[i], dict) else {}
+            try:
+                score = float(entry.get("score", 0))
+            except (TypeError, ValueError):
+                score = 0.0
+            per_question_score[idx] = max(0.0, min(100.0, score))
+            per_question_feedback[idx] = str(entry.get("feedback", "") or "")
+
+    correct = wrong = 0
+    qwise = []
+    for idx, q in enumerate(questions):
+        score = per_question_score[idx]
+        is_correct = score >= 50
+        if is_correct:
+            correct += 1
+        else:
+            wrong += 1
+        qwise.append({
+            "question_id": idx,
+            "student_answer": answers.get(str(idx)),
+            "correct_answer": q.get("answer") if q.get("type", "mcq") == "mcq" else q.get("modelAnswer"),
+            "status": "correct" if is_correct else "wrong",
+            "score": round(score),
+            "feedback": per_question_feedback.get(idx, ""),
+            "type": q.get("type", "mcq"),
+            "topic": q.get("topic", ""),
+        })
+
+    total_marks = len(questions)
+    scored = round(sum(per_question_score.values()) / 100, 2)
+    percentage = round(sum(per_question_score.values()) / total_marks, 1)
+
+    now = datetime.now(timezone.utc)
+    roadmap_object_id = doc.get("roadmapId")
+    week_range = doc.get("weekRange") or {}
+    attempt_doc = {
+        "student_id": student_id,
+        "test_id": test_id,
+        "mode": "roadmap",
+        "roadmapId": str(roadmap_object_id) if roadmap_object_id else None,
+        "weekRange": week_range,
+        "testTitle": doc.get("testTitle") or doc.get("subjectName") or "Roadmap Test",
+        "subjectName": doc.get("subjectName"),
+        "answers": answers,
+        "questionwise": qwise,
+        "correct": correct, "wrong": wrong, "skipped": 0,
+        "scored": scored, "totalMarks": total_marks,
+        "accuracy": percentage, "percentage": percentage,
+        "submitted_at": now, "created_at": now,
+    }
+    result = await db["testAttempts"].insert_one(attempt_doc)
+    attempt_id = result.inserted_id
+
+    await db["mockTests"].update_one(
+        {"_id": test_id},
+        {"$set": {"status": "submitted", "last_attempt": attempt_id, "updated_at": now}, "$inc": {"attempts_count": 1}},
+    )
+
+    # A passing attempt covering the FULL roadmap (week 1 -> the last week)
+    # marks the roadmap complete.
+    is_final_test = False
+    if percentage >= 50 and roadmap_object_id:
+        roadmap_doc = await db["selfLearnerRoadmaps"].find_one({"_id": roadmap_object_id})
+        if roadmap_doc:
+            last_week = max((w.get("week", 0) for w in roadmap_doc.get("weeks", [])), default=0)
+            if week_range.get("start") == 1 and week_range.get("end") == last_week and last_week > 0:
+                is_final_test = True
+                await db["selfLearnerRoadmaps"].update_one(
+                    {"_id": roadmap_object_id},
+                    {"$set": {"progress.roadmapCompleted": True, "updated_at": now}},
+                )
+
+    return {
+        "success": True,
+        "attemptId": str(attempt_id),
+        "result": {
+            "scored": scored, "totalMarks": total_marks,
+            "correct": correct, "wrong": wrong, "skipped": 0,
+            "accuracy": percentage, "percentage": percentage,
+            "submittedAt": now.isoformat(),
+            "isFinalTest": is_final_test,
+        },
+    }
+
+
 @router.get("/mock-tests/{test_id}/review")
 async def review_test(
     test_id: str, identity: dict = Depends(get_current_identity), db: AsyncIOMotorDatabase = Depends(get_database)
@@ -670,6 +509,9 @@ async def review_test(
     doc = await db["mockTests"].find_one({"_id": ObjectId(test_id), "student_id": student_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Mock test not found")
+
+    if doc.get("mode") == "roadmap":
+        return _review_roadmap_test(doc, attempt)
 
     questions = doc.get("questions", [])
     q_map = {str(q.get("_id")): q for q in questions}
@@ -695,8 +537,41 @@ async def review_test(
         "attempt": attempt_out,
         "questions": [serialize_question(q, include_answers=True) for q in questions],
         "testInfo": {
+            "mode": "subject",
             "testTitle": doc.get("subjectName") or doc.get("topic") or "Mock Test",
             "subjectName": doc.get("subjectName"),
             "totalMarks": doc.get("totalMarks"),
+        },
+    }
+
+
+def _review_roadmap_test(doc: Dict[str, Any], attempt: Dict[str, Any]) -> Dict[str, Any]:
+    """Roadmap-mode counterpart of review_test — questions are identified by
+    list index (question_id holds the int index, set in _submit_roadmap_test),
+    not the _id-keyed scheme subject-mode uses."""
+    questions = doc.get("questions", [])
+
+    enriched_qwise = []
+    for qw in attempt.get("questionwise", []):
+        idx = qw.get("question_id")
+        q = questions[idx] if isinstance(idx, int) and 0 <= idx < len(questions) else {}
+        enriched_qwise.append({
+            **qw,
+            "question": q.get("question"),
+            "options": q.get("options"),
+        })
+
+    attempt_out = _serialize_attempt(attempt)
+    attempt_out["questionwise"] = enriched_qwise
+
+    return {
+        "success": True,
+        "attempt": attempt_out,
+        "questions": [serialize_roadmap_test_question(q, include_answers=True) for q in questions],
+        "testInfo": {
+            "mode": "roadmap",
+            "testTitle": doc.get("testTitle") or doc.get("subjectName") or "Roadmap Test",
+            "subjectName": doc.get("subjectName"),
+            "weekRange": doc.get("weekRange"),
         },
     }

@@ -66,22 +66,27 @@ def _file_ext(filename: str) -> str:
 async def _run_ingest_job(
     job_id: str, file_bytes: bytes, filename: str, mime_type: str,
     course_title: Optional[str], course_code: Optional[str], user_id: str,
+    job_prefix: str = CM_JOB_PREFIX,
 ) -> None:
+    """job_prefix defaults to this router's own CM_JOB_PREFIX but is
+    overridable — self_learner_course_material.py reuses this exact
+    pipeline under its own SL_CM_JOB_PREFIX namespace so a self-learner's
+    upload status poll can never cross-resolve against an institute job."""
     db = get_database()
     try:
-        await update_job(CM_JOB_PREFIX, job_id, {"step": "Checking for duplicates…"})
+        await update_job(job_prefix, job_id, {"step": "Checking for duplicates…"})
 
         content_hash = hashlib.sha256(file_bytes).hexdigest()
         existing = await mongo_store.find_document_by_hash(db, content_hash)
         if existing:
             logger.info("course_material ingest: doc_id=%s is a duplicate of existing doc_id=%s (hash match)",
                         job_id, existing.id)
-            await update_job(CM_JOB_PREFIX, job_id, {
+            await update_job(job_prefix, job_id, {
                 "status": "done", "doc_id": existing.id, "duplicate": True, "step": "Already indexed",
             })
             return
 
-        await update_job(CM_JOB_PREFIX, job_id, {"step": "Extracting text…"})
+        await update_job(job_prefix, job_id, {"step": "Extracting text…"})
 
         ext = _file_ext(filename)
         source_format = _EXT_TO_FORMAT.get(ext, SourceFormat.TXT)
@@ -94,7 +99,7 @@ async def _run_ingest_job(
             text = await asyncio.to_thread(extract_text_from_file, file_bytes, filename)
 
         if not text or not text.strip():
-            await update_job(CM_JOB_PREFIX, job_id, {
+            await update_job(job_prefix, job_id, {
                 "status": "error", "error": "No text could be extracted from this file.",
             })
             return
@@ -109,7 +114,7 @@ async def _run_ingest_job(
 
         doc_id = new_id()
         doc_type = structure_parser.classify_doc_type(pages)
-        await update_job(CM_JOB_PREFIX, job_id, {"step": f"Indexing as {doc_type.value}…"})
+        await update_job(job_prefix, job_id, {"step": f"Indexing as {doc_type.value}…"})
 
         if doc_type == DocType.STRUCTURED:
             nodes = structure_parser.build_tree(pages, doc_id)
@@ -118,7 +123,7 @@ async def _run_ingest_job(
         else:
             store = await asyncio.to_thread(singletons.get_vector_store)
             if store is None:
-                await update_job(CM_JOB_PREFIX, job_id, {
+                await update_job(job_prefix, job_id, {
                     "status": "error",
                     "error": "Vector store (Qdrant) is unavailable — start it and try again, or upload a "
                              "more structured document (with numbered headings) to use the tree-index path instead.",
@@ -135,13 +140,13 @@ async def _run_ingest_job(
 
         logger.info("course_material ingest done: doc_id=%s doc_type=%s course_title=%r",
                     doc_id, doc_type.value, course_title)
-        await update_job(CM_JOB_PREFIX, job_id, {
+        await update_job(job_prefix, job_id, {
             "status": "done", "doc_id": doc_id, "doc_type": doc_type.value, "duplicate": False, "step": "Done",
         })
 
     except Exception as e:
         logger.error("course_material ingest job %s failed: %s", job_id, e, exc_info=True)
-        await update_job(CM_JOB_PREFIX, job_id, {
+        await update_job(job_prefix, job_id, {
             "status": "error", "error": "Internal server error during course material indexing.",
         })
 

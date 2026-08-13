@@ -85,8 +85,12 @@ def serialize_mock_test(doc: Dict[str, Any], include_answers: bool = False) -> O
     if not doc:
         return None
 
+    if doc.get("mode") == "roadmap":
+        return serialize_roadmap_test(doc, include_answers)
+
     out = {
         "_id": str(doc["_id"]),
+        "mode": "subject",
         "student_id": str(doc.get("student_id")) if doc.get("student_id") else None,
         "subject_id": str(doc.get("subject_id")) if doc.get("subject_id") else None,
         "subjectName": doc.get("subjectName"),
@@ -109,5 +113,84 @@ def serialize_mock_test(doc: Dict[str, Any], include_answers: bool = False) -> O
 
     if "questions" in doc:
         out["questions"] = [serialize_question(q, include_answers) for q in (doc.get("questions") or [])]
+
+    return out
+
+
+# ============================================================
+# ROADMAP MODE — week-range testing, reusing the Auto Test config/question
+# shape (question/options/answer-index/modelAnswer/type/topic) directly
+# rather than subject-mode's shape (questionText/correct_answer/marks) —
+# the two are genuinely different schemas, not just a naming difference, so
+# every function here has its own roadmap-mode counterpart rather than
+# trying to force one function to branch internally on field names.
+# ============================================================
+
+# Never send answer/modelAnswer/explanation to a student before submission
+# — same exclude-list as roadmap.py's _strip_quiz_answers, kept in sync
+# deliberately since both serve the exact same question shape.
+_ROADMAP_TEST_ANSWER_KEYS = ("answer", "modelAnswer", "explanation")
+
+
+def build_roadmap_test_document(
+    student_id: ObjectId, roadmap_id: ObjectId, subject_name: str,
+    week_start: int, week_end: int, config: Dict[str, Any],
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    question_count = max(1, int(config.get("questionCount", 10) or 10))
+
+    return {
+        "student_id": student_id,
+        "mode": "roadmap",
+        "roadmapId": roadmap_id,
+        "weekRange": {"start": week_start, "end": week_end},
+        "subjectName": subject_name,
+        "testTitle": f"{subject_name}: Week {week_start}" + (f"-{week_end}" if week_end != week_start else ""),
+        "config": {
+            "mcqPercent": config.get("mcqPercent", 100),
+            "subjectivePercent": config.get("subjectivePercent", 0),
+            "practicalPercent": config.get("practicalPercent", 0),
+            "questionCount": question_count,
+            "customPrompt": config.get("customPrompt"),
+        },
+        "questionCount": question_count,
+        "status": "pending",
+        "questions": [],
+        "attempts_count": 0,
+        "last_attempt": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def serialize_roadmap_test_question(q: Dict[str, Any], include_answers: bool) -> Dict[str, Any]:
+    if include_answers:
+        return dict(q)
+    return {k: v for k, v in q.items() if k not in _ROADMAP_TEST_ANSWER_KEYS}
+
+
+def serialize_roadmap_test(doc: Dict[str, Any], include_answers: bool = False) -> Optional[Dict[str, Any]]:
+    if not doc:
+        return None
+
+    out = {
+        "_id": str(doc["_id"]),
+        "mode": "roadmap",
+        "student_id": str(doc.get("student_id")) if doc.get("student_id") else None,
+        "roadmapId": str(doc.get("roadmapId")) if doc.get("roadmapId") else None,
+        "weekRange": doc.get("weekRange"),
+        "subjectName": doc.get("subjectName"),
+        "testTitle": doc.get("testTitle"),
+        "config": doc.get("config", {}),
+        "questionCount": doc.get("questionCount"),
+        "status": doc.get("status"),
+        "generationError": doc.get("generationError"),
+        "attempts_count": doc.get("attempts_count", 0),
+        "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+        "updated_at": doc.get("updated_at").isoformat() if doc.get("updated_at") else None,
+    }
+
+    if "questions" in doc:
+        out["questions"] = [serialize_roadmap_test_question(q, include_answers) for q in (doc.get("questions") or [])]
 
     return out

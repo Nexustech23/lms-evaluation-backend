@@ -11,6 +11,10 @@ class MockTestCreateRequest(BaseModel):
     # shapes (e.g. questionCount really is an int) before that runs.
     model_config = ConfigDict(extra="allow")
 
+    # mode: "subject" (default, original practice-test flow — untouched) |
+    # "roadmap" (reuses the Auto Test config shape across a week range).
+    mode: str = "subject"
+
     subject_id: Optional[str] = None
     subjectId: Optional[str] = None
     subjectName: Optional[str] = None
@@ -24,6 +28,15 @@ class MockTestCreateRequest(BaseModel):
     negativeMarks: Optional[float] = None
     questionTypes: Optional[Any] = None
     scheduleDate: Optional[str] = None
+
+    # roadmap mode only
+    roadmap_id: Optional[str] = None
+    week_start: Optional[int] = None
+    week_end: Optional[int] = None
+    mcq_percent: Optional[float] = None
+    subjective_percent: Optional[float] = None
+    practical_percent: Optional[float] = None
+    custom_prompt: Optional[str] = None
 
 
 class MockTestSubmitRequest(BaseModel):
