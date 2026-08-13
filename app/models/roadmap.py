@@ -1,6 +1,11 @@
 # ============================================================
 # ROADMAP MODEL
-# Ported from models/RoadmapModel.py.
+#
+# weeks[] schema (schemaVersion 2) — flat, AI-sized week count. Each week
+# holds one main topic + an intro description + 3-5 subtopics directly, with
+# no separate "topic" grouping layer in between. Replaces the earlier fixed
+# 4-"levels" -> topics -> subtopics shape (schemaVersion 1, no longer
+# produced by create_roadmap_document — see app/services/roadmap_ai.py).
 # ============================================================
 
 from datetime import datetime, timezone
@@ -20,7 +25,8 @@ def create_roadmap_document(user_id: str, data: Dict[str, Any]) -> Dict[str, Any
         "revision_frequency": data.get("revision_frequency", "Every Week"),
         "assessment_score": data.get("assessment_score"),
         "stats": data.get("stats", {}),
-        "levels": data.get("levels", []),
+        "weeks": data.get("weeks", []),
+        "schemaVersion": 2,
         "progress": {
             "overallProgress": 0,
             "completedSubtopics": [],
@@ -28,9 +34,12 @@ def create_roadmap_document(user_id: str, data: Dict[str, Any]) -> Dict[str, Any
             "quizHistory": [],
             "weakTopics": [],
             "streakDays": 0,
+            "lastActivityDate": None,
+            "activityDates": [],
         },
-        "unlockedLevels": data.get("unlockedLevels", [1]),
+        "unlockedWeeks": data.get("unlockedWeeks", [1]),
         "active": True,
+        "grounded_doc_id": data.get("grounded_doc_id"),
         "created_at": now,
         "updated_at": now,
     }

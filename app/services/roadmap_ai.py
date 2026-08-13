@@ -16,6 +16,7 @@
 # matching Flask's own ordering.
 # ============================================================
 
+import asyncio
 import json
 import logging
 import re
@@ -52,14 +53,23 @@ def _get_gemini() -> google_genai.Client:
 
 def extract_json(text: str) -> Any:
     """Robustly extract the first JSON object/array from a Claude/Gemini response.
-    Handles markdown code-fences (```json … ```) and bare JSON."""
+    Handles markdown code-fences (```json … ```) and bare JSON.
+
+    Picks whichever of "{" / "[" actually occurs FIRST in the text, rather
+    than always trying "{" first — a top-level JSON array (e.g. Auto Test's
+    "[ {...}, {...}, ... ]") has its first "{" appear INSIDE the array, so
+    always-try-"{"-first would match only that one inner object and silently
+    return a single dict instead of the whole array.
+    """
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fenced:
         text = fenced.group(1).strip()
+    candidates = []
     for start_char, end_char in [("{", "}"), ("[", "]")]:
         start = text.find(start_char)
-        if start == -1:
-            continue
+        if start != -1:
+            candidates.append((start, start_char, end_char))
+    for start, start_char, end_char in sorted(candidates, key=lambda c: c[0]):
         depth = 0
         for i, ch in enumerate(text[start:], start):
             if ch == start_char:
@@ -110,6 +120,7 @@ async def increment_student_gemini_tokens(db: AsyncIOMotorDatabase, user_id: str
 def build_curriculum_prompt(
     subject, goal, skill_level, daily_study_time, revision_frequency, assessment_score,
     grounding_context: Optional[str] = None,
+    custom_instruction: Optional[str] = None,
 ) -> str:
     score_context = (
         f"The student scored {assessment_score}% on the pre-assessment quiz, "
@@ -126,7 +137,7 @@ def build_curriculum_prompt(
         f"""
 ## Course Material (use this as the authoritative source for structure, topics, and emphasis)
 The following was retrieved from a real course document uploaded for this subject. Ground the
-roadmap's stages/topics/subtopics in what is actually here — do not invent topics that
+roadmap's weeks/subtopics in what is actually here — do not invent topics that
 contradict it, and prioritize what it emphasizes.
 
 {grounding_context}
@@ -134,8 +145,19 @@ contradict it, and prioritize what it emphasizes.
         if grounding_context
         else ""
     )
+    # Independent of grounding: applies whether or not source material was
+    # found, so "no doc + custom instruction" still reaches this block.
+    instruction_block = (
+        f"""
+## Additional Student Instructions (follow these closely when shaping weeks, topic emphasis, and pacing)
+{custom_instruction}
+"""
+        if custom_instruction
+        else ""
+    )
     return f"""You are an expert curriculum designer and senior educator.
-Your task is to create a **highly detailed, production-quality 4-Stage self-learning roadmap** for the following student profile.
+Your task is to create a **highly detailed, production-quality self-learning roadmap**, broken into
+weekly units, for the following student profile.
 
 ## Student Profile
 - Subject: {subject}
@@ -145,28 +167,27 @@ Your task is to create a **highly detailed, production-quality 4-Stage self-lear
 - Revision Frequency: {revision_frequency}
 {score_context}
 {grounding_block}
+{instruction_block}
 
 ## Roadmap Requirements
-Generate exactly **4 progressive learning Stages** that form a complete, structured curriculum.
+Decide how many weeks this roadmap needs on your own — base it on the subject's real scope, the
+student's goal, and how much they can realistically do at {daily_study_time}/day. Use as many weeks
+as the subject genuinely requires to go from {skill_level} to the stated goal; do not pad or compress
+artificially. As a sanity range, most roadmaps land between **4 and 16 weeks**, but go outside that
+range if the subject truly calls for it.
 
-### Stage naming rules (name each stage accurately based on the subject):
-- Stage 1: Foundations & Core Concepts
-- Stage 2: Intermediate Application
-- Stage 3: Advanced Techniques & Problem Solving
-- Stage 4: Expert Mastery & Real-World Projects
-
-### Topic & Subtopic Requirements
-Each stage must have **3 to 5 topics**. Each topic must have **4 to 7 subtopics**.
-Every subtopic title must be specific, actionable, and unique. Never use generic names like "Introduction" alone.
+Each week must have exactly **one main topic** plus **3 to 5 subtopics** under it. Every subtopic
+title must be specific, actionable, and unique — never a generic name like "Introduction" alone.
+Weeks must be in a logical learning order (foundations first, building toward the stated goal).
 
 ### Curriculum Stats (generate realistic estimates)
-- estimatedWeeks: realistic number of weeks to complete this stage at {daily_study_time}/day
-- totalTopics: total subtopic count for the stage
-- difficultyScore: integer 1–10
+- estimatedWeeks: the week count you chose (should equal len(weeks))
+- totalTopics: total subtopic count across all weeks
+- difficultyScore: integer 1–10 for the roadmap as a whole
 
-### Practice Questions (per Stage)
-Generate **10 MCQ practice questions** per stage that target conceptual understanding.
-Each question: {{ "question": "...", "options": ["A", "B", "C", "D"], "answer": <0-indexed int>, "explanation": "..." }}
+### Practice Questions (per week)
+Generate **5 MCQ practice questions** per week that target conceptual understanding of that week's
+main topic. Each question: {{ "question": "...", "options": ["A", "B", "C", "D"], "answer": <0-indexed int>, "explanation": "..." }}
 
 ## Output Format
 Return ONLY a valid JSON object matching this exact schema. No prose, no markdown, only JSON.
@@ -174,28 +195,21 @@ Return ONLY a valid JSON object matching this exact schema. No prose, no markdow
 {{
   "subject_display_name": "Full display name of the subject",
   "stats": {{
-    "estimatedWeeks": <total across all stages>,
+    "estimatedWeeks": <week count>,
     "totalTopics": <total subtopic count>,
     "difficultyScore": <1-10>
   }},
-  "levels": [
+  "weeks": [
     {{
-      "level": 1,
-      "title": "<Stage 1 name — tailored to {subject}>",
-      "description": "<One sentence summary of what the student masters in this stage>",
-      "estimatedWeeks": <int>,
-      "topics": [
+      "week": 1,
+      "title": "<This week's main topic — tailored to {subject}>",
+      "introDescription": "<2-3 sentence intro: what this week covers and why it matters now>",
+      "subtopics": [
         {{
-          "title": "<Topic title>",
-          "description": "<Why this topic matters>",
-          "subtopics": [
-            {{
-              "title": "<Specific subtopic — must be unique and actionable>",
-              "summary": "<2-3 sentence overview of what the student will learn in this subtopic>",
-              "keyPoints": ["<point 1>", "<point 2>", "<point 3>"],
-              "difficulty": "Beginner | Intermediate | Advanced"
-            }}
-          ]
+          "title": "<Specific subtopic — must be unique and actionable>",
+          "summary": "<2-3 sentence overview of what the student will learn in this subtopic>",
+          "keyPoints": ["<point 1>", "<point 2>", "<point 3>"],
+          "difficulty": "Beginner | Intermediate | Advanced"
         }}
       ],
       "practiceQuestions": [
@@ -208,31 +222,27 @@ Return ONLY a valid JSON object matching this exact schema. No prose, no markdow
       ]
     }},
     {{
-      "level": 2,
-      "title": "<Stage 2 name>",
-      "description": "...",
-      "estimatedWeeks": <int>,
-      "topics": [ ... ],
-      "practiceQuestions": [ ... ]
-    }},
-    {{
-      "level": 3,
-      "title": "<Stage 3 name>",
-      "description": "...",
-      "estimatedWeeks": <int>,
-      "topics": [ ... ],
-      "practiceQuestions": [ ... ]
-    }},
-    {{
-      "level": 4,
-      "title": "<Stage 4 name>",
-      "description": "...",
-      "estimatedWeeks": <int>,
-      "topics": [ ... ],
+      "week": 2,
+      "title": "...",
+      "introDescription": "...",
+      "subtopics": [ ... ],
       "practiceQuestions": [ ... ]
     }}
   ]
-}}"""
+}}
+
+Include one object per week in the "weeks" array — as many as the week count you chose."""
+
+
+def generate_claude_json(prompt: str, max_tokens: int = 4000) -> Tuple[Optional[Any], Any, bool]:
+    """Returns (parsed_json_or_None, usage, truncated). May raise anthropic.APIError."""
+    client = _get_anthropic()
+    message = client.messages.create(
+        model="claude-sonnet-4-5", max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}]
+    )
+    if message.stop_reason == "max_tokens":
+        return None, message.usage, True
+    return extract_json(message.content[0].text), message.usage, False
 
 
 def generate_curriculum(prompt: str) -> Tuple[Optional[Dict[str, Any]], Any, bool]:
@@ -240,7 +250,10 @@ def generate_curriculum(prompt: str) -> Tuple[Optional[Dict[str, Any]], Any, boo
     client = _get_anthropic()
     start_time = time.time()
     message = client.messages.create(
-        model="claude-sonnet-4-5", max_tokens=25000, messages=[{"role": "user", "content": prompt}]
+        # AI-sized week count (up to ~16 weeks x 3-5 subtopics x 5 practice
+        # questions each) can produce more output than the old fixed
+        # 4-level curriculum — bumped from 25000 to give it room.
+        model="claude-sonnet-4-5", max_tokens=32000, messages=[{"role": "user", "content": prompt}]
     )
     logger.info("Claude curriculum call took %.2fs", time.time() - start_time)
 
@@ -277,9 +290,182 @@ def generate_gemini_json(prompt: str) -> Tuple[Optional[Any], Any, bool]:
 # PROMPT BUILDERS (notes / stage quiz / pre-assessment)
 # ============================================================
 
+# ============================================================
+# VARK BLEND + DIFFICULTY HELPERS
+# ============================================================
+
+VARK_STYLES = ("visual", "auditory", "reading", "kinesthetic")
+DIFFICULTIES = ("Easy", "Moderate", "Difficult")
+
+_VARK_STYLE_GUIDANCE = {
+    "Visual": (
+        "This student learns best visually. Describe structure, relationships, and flow "
+        "explicitly in words (e.g. \"picture this as three connected stages...\"), use "
+        "spatial/structural language throughout, and organize the explanation so a reader "
+        "could sketch it as a diagram from your words alone."
+    ),
+    "Auditory": (
+        "This student learns best by hearing/discussing ideas. Write in a conversational, "
+        "narrated tone — as if explaining out loud to the student — with rhetorical "
+        "questions, verbal analogies, and a natural spoken rhythm."
+    ),
+    "Reading": (
+        "This student learns best through reading dense text. Write a thorough, "
+        "well-organized reference-style explanation with precise terminology and complete "
+        "sentences — the kind of notes someone reads closely and annotates, not skims."
+    ),
+    "Kinesthetic": (
+        "This student learns best by doing. Emphasize concrete, actionable steps and real "
+        "hands-on practice — frame explanations around \"try this\" / \"do this\" rather "
+        "than passive description, and connect every concept to something the student can "
+        "physically or practically perform."
+    ),
+}
+
+_DIFFICULTY_GUIDANCE = {
+    "Easy": "Keep language simple, add extra scaffolding and analogies, avoid unexplained jargon, assume minimal prior context.",
+    "Moderate": "Balance clarity with technical depth appropriate for someone actively learning this topic for the first time.",
+    "Difficult": "Assume strong prior context, use precise technical language, and go into advanced nuance and edge cases.",
+}
+
+
+def _normalize_vark(visual: Optional[int], auditory: Optional[int], reading: Optional[int], kinesthetic: Optional[int]) -> Dict[str, int]:
+    """Clamp each style to >= 0 (missing/negative -> 0). Does not require the
+    blend to sum to 100 — the frontend picker enforces that; the backend just
+    needs relative weights to find the dominant style."""
+    raw = {"visual": visual, "auditory": auditory, "reading": reading, "kinesthetic": kinesthetic}
+    return {k: max(0, v) if v is not None else 25 for k, v in raw.items()}
+
+
+def _dominant_vark_style(vark: Dict[str, int]) -> str:
+    """Highest % wins; ties broken by VARK_STYLES order (stable — max() keeps the first max seen)."""
+    return max(VARK_STYLES, key=lambda k: vark.get(k, 0))
+
+
+def _normalize_difficulty(difficulty: Optional[str]) -> str:
+    d = (difficulty or "Moderate").strip().title()
+    return d if d in DIFFICULTIES else "Moderate"
+
+
+# ============================================================
+# MERMAID CONCEPT DIAGRAM — generation rules + structural validation/repair
+#
+# The generation prompt only constrains the model loosely (models drift from
+# instructions), so every diagram is structurally re-validated server-side
+# BEFORE it's ever cached or served — not just prompt-tightened and trusted.
+# This is a regex-based structural check against the strict subset defined
+# by MERMAID_SYNTAX_RULES below, not a real Mermaid grammar parser (none
+# available server-side) — good enough to catch the common failure mode
+# (unquoted node labels, wrong diagram type, multi-statement lines) without
+# needing a JS parser in the request path. Extracted to one shared constant
+# so the generation prompt and the repair prompt can't drift out of sync.
+# ============================================================
+
+MERMAID_SYNTAX_RULES = """STRICT Mermaid diagram syntax rules (violating any of these breaks rendering):
+1. First line must be exactly "graph TD" or "graph LR" — no other diagram types (no mindmap, flowchart, sequenceDiagram, etc.).
+2. Every other line is a node definition and/or a chain of nodes connected by edges.
+3. EVERY node must be written as NodeId["Label text here"] — the label MUST be wrapped in double quotes inside square brackets. Never use round brackets like NodeId(Label) or unquoted square brackets like NodeId[Label].
+4. Node IDs contain only letters, numbers, and underscores — no spaces or punctuation.
+5. Edges use only: --> or --- or -.-> or ==>. An edge may have a quoted label: A -->|"Yes"| B.
+6. One statement per line. No semicolons, no subgraphs, no styling/class directives.
+7. Labels may contain any characters except double quotes (parentheses, commas, colons, etc. are fine as long as the whole label stays inside the quotes).
+
+Example of VALID syntax:
+graph TD
+    A["Start: Define the Problem"] --> B["Gather Requirements"]
+    B --> C["Design Solution"]
+    C -->|"Approved"| D["Implement"]
+    C -->|"Rejected"| B"""
+
+_MERMAID_HEADER_RE = re.compile(r"^graph\s+(TD|LR)\s*$")
+_MERMAID_NODE_DEF = r'\["[^"]*"\]'
+_MERMAID_LINE_RE = re.compile(
+    rf'^[A-Za-z0-9_]+({_MERMAID_NODE_DEF})?'
+    rf'(\s*(-->|---|-\.->|==>)\s*(\|"[^"]*"\|\s*)?[A-Za-z0-9_]+({_MERMAID_NODE_DEF})?)*$'
+)
+
+
+def _is_valid_mermaid_diagram(diagram: Any) -> bool:
+    if not diagram or not isinstance(diagram, str):
+        return False
+    lines = [ln.strip() for ln in diagram.strip().splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    if not _MERMAID_HEADER_RE.match(lines[0]):
+        return False
+    return all(_MERMAID_LINE_RE.match(ln) for ln in lines[1:])
+
+
+def build_mermaid_repair_prompt(broken_diagram: str) -> str:
+    return f"""The following Mermaid diagram has invalid syntax and failed to render. Fix it so it
+strictly follows these rules, keeping the same content and meaning:
+
+{MERMAID_SYNTAX_RULES}
+
+BROKEN DIAGRAM:
+{broken_diagram}
+
+Return ONLY the corrected Mermaid diagram source — no markdown fences, no explanation, no JSON.
+Start directly with "graph TD" or "graph LR"."""
+
+
+def generate_claude_text(prompt: str, max_tokens: int = 1500) -> Tuple[str, Any]:
+    """Returns (text, usage). May raise anthropic.APIError. Blocking — run via asyncio.to_thread()."""
+    client = _get_anthropic()
+    message = client.messages.create(
+        model="claude-sonnet-4-5", max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text.strip(), message.usage
+
+
+async def validate_and_repair_diagram(
+    diagram: Any, db: AsyncIOMotorDatabase, user_id: str,
+) -> str:
+    """Valid diagrams (or an empty/absent one) pass through untouched. Invalid
+    ones get ONE cheap, targeted repair call. If the repair also fails
+    validation, the field is dropped to "" rather than ever caching/serving
+    broken syntax — the frontend already renders nothing for an empty
+    diagram."""
+    if not diagram:
+        return ""
+    if _is_valid_mermaid_diagram(diagram):
+        return diagram
+
+    try:
+        prompt = build_mermaid_repair_prompt(diagram)
+        repaired, usage = await asyncio.to_thread(generate_claude_text, prompt, 1000)
+        await increment_student_claude_tokens(db, user_id, usage)
+    except Exception as e:
+        logger.warning("mermaid diagram repair call failed (dropping diagram): %s", e)
+        return ""
+
+    return repaired if _is_valid_mermaid_diagram(repaired) else ""
+
+
+def log_style_requirement_gaps(notes: Dict[str, Any], dominant_style: str, week: int, subtopic_idx: int) -> None:
+    """Purely for server-log visibility into how often generation under-delivers
+    against its own schema's stated per-style requirements. Logs only — never
+    modifies or retries (semantic/pedagogical quality of the content isn't
+    something this can verify, only whether the required fields are present
+    and non-trivial)."""
+    if dominant_style == "Visual" and not notes.get("conceptDiagram"):
+        logger.warning("VARK gap: Visual-dominant notes (week=%s subtopic=%s) returned with no conceptDiagram", week, subtopic_idx)
+
+    if dominant_style == "Kinesthetic":
+        task = notes.get("handsOnTask") or {}
+        steps = task.get("steps") or []
+        if len(steps) < 3 or not task.get("expectedOutcome"):
+            logger.warning(
+                "VARK gap: Kinesthetic-dominant notes (week=%s subtopic=%s) handsOnTask under-delivered (%d steps, has_outcome=%s)",
+                week, subtopic_idx, len(steps), bool(task.get("expectedOutcome")),
+            )
+
+
 def build_notes_prompt(
-    subject: str, stage_title: str, topic_title: str, sub_title: str, sub_summary: str, key_points: List[str],
+    subject: str, week_title: str, sub_title: str, sub_summary: str, key_points: List[str],
+    dominant_style: str, difficulty: str,
     grounding_context: Optional[str] = None,
+    goal: Optional[str] = None,
 ) -> str:
     grounding_block = (
         f"""
@@ -289,15 +475,37 @@ def build_notes_prompt(
         if grounding_context
         else ""
     )
-    return f"""You are a senior technical educator writing premium self-study notes.
+    style_note = _VARK_STYLE_GUIDANCE.get(dominant_style, _VARK_STYLE_GUIDANCE["Reading"])
+    difficulty_note = _DIFFICULTY_GUIDANCE.get(difficulty, _DIFFICULTY_GUIDANCE["Moderate"])
+    # Interview tips only make sense for an interview-prep goal — an Exam
+    # Preparation / Academic Learning student (who may well be a school-age
+    # class 10/12 student) has no use for "high-frequency interview
+    # question" content, so the field is omitted from the schema entirely
+    # rather than generated and then hidden client-side.
+    include_interview_tips = _is_interview_goal(goal)
+    interview_tips_field = (
+        """  "interviewTips": [
+    "<High-frequency interview question or tip related to this subtopic>",
+    "<tip 2>",
+    "<tip 3>"
+  ],
+"""
+        if include_interview_tips
+        else ""
+    )
+    return f"""You are a senior technical educator writing premium self-study notes personalized to
+this student's learning style and level.
 
 ## Context
 Subject: {subject}
-Stage: {stage_title}
-Topic: {topic_title}
+Week: {week_title}
 Subtopic: {sub_title}
 Overview: {sub_summary}
 Key Points to Cover: {json.dumps(key_points)}
+
+## Personalization (apply throughout every section below, not just the summary)
+Learning style — {dominant_style}: {style_note}
+Difficulty — {difficulty}: {difficulty_note}
 {grounding_block}
 
 ## Task
@@ -338,49 +546,138 @@ Return ONLY a valid JSON object (no prose, no markdown wrapper) with this exact 
     "<mistake 2>",
     "<mistake 3>"
   ],
-  "interviewTips": [
-    "<High-frequency interview question or tip related to this subtopic>",
-    "<tip 2>",
-    "<tip 3>"
-  ],
-  "revisionChecklist": [
+{interview_tips_field}  "revisionChecklist": [
     "<I can explain ... >",
     "<I can implement ... >",
     "<I can identify ... >"
-  ]
-}}"""
+  ],
+  "conceptDiagram": {(
+      '"<A Mermaid graph TD/LR diagram source string illustrating this subtopic'
+      ' — REQUIRED since Visual is the dominant style. Follow the STRICT syntax'
+      ' rules below exactly.>"'
+  ) if dominant_style == "Visual" else '""'},
+  "handsOnTask": {(
+      '{ "title": "<short hands-on task title>", '
+      '"steps": ["<concrete step 1>", "<step 2>", "<step 3>", "... at least 3 steps>"], '
+      '"expectedOutcome": "<what the student should observe or produce when done>" } '
+      '— REQUIRED with at least 3 concrete steps since Kinesthetic is the dominant style.'
+  ) if dominant_style == "Kinesthetic" else '{ "title": "", "steps": [], "expectedOutcome": "" }'}
+}}
+
+{MERMAID_SYNTAX_RULES if dominant_style == "Visual" else ""}"""
 
 
-def build_stage_quiz_prompt(subject: str, stage_title: str, topic_names: List[str], subtopic_names: List[str]) -> str:
-    return f"""You are an expert technical examiner designing a rigorous stage-completion quiz.
+# ============================================================
+# AUTO TEST — configurable MCQ/Subjective/Practical week evaluation.
+# Replaces the earlier flat, fixed-10-MCQ week quiz. Regenerated fresh on
+# every "Generate Test" (student reconfigures percentages/count/prompt each
+# attempt), not long-term cached like notes. Generation and grading both
+# stay on Gemini, matching every other quiz/practice-question call site in
+# this module — Claude is reserved for curriculum + VARK notes.
+# ============================================================
+
+def _split_question_counts(mcq_percent: float, subjective_percent: float, practical_percent: float, total: int) -> Dict[str, int]:
+    """Largest-remainder rounding so the 3 percentages always split into
+    integer counts summing exactly to `total` — plain truncation (int(pct/100*total))
+    can under-count by 1-2 questions whenever the percentages don't divide evenly."""
+    raw = {
+        "mcq": mcq_percent / 100 * total,
+        "subjective": subjective_percent / 100 * total,
+        "practical": practical_percent / 100 * total,
+    }
+    counts = {k: int(v) for k, v in raw.items()}
+    remainder = total - sum(counts.values())
+    by_largest_fraction = sorted(raw.keys(), key=lambda k: raw[k] - counts[k], reverse=True)
+    for i in range(remainder):
+        counts[by_largest_fraction[i % len(by_largest_fraction)]] += 1
+    return counts
+
+
+def build_auto_test_prompt(
+    subject: str, week_title: str, subtopic_names: List[str],
+    counts: Dict[str, int], custom_prompt: Optional[str] = None,
+    grounding_context: Optional[str] = None,
+) -> str:
+    custom_block = f"\n\nADDITIONAL INSTRUCTIONS FROM THE STUDENT:\n{custom_prompt}" if custom_prompt else ""
+    grounding_block = (
+        f"""
+## Course Material (ground questions in this real content where relevant)
+{grounding_context}
+"""
+        if grounding_context
+        else ""
+    )
+    total = sum(counts.values())
+    return f"""You are an expert technical examiner designing a rigorous week-completion test.
 
 ## Context
 Subject: {subject}
-Stage: {stage_title}
-Topics Covered: {json.dumps(topic_names)}
-All Subtopics: {json.dumps(subtopic_names)}
+Week: {week_title}
+Subtopics Covered: {json.dumps(subtopic_names)}
+{custom_block}
+{grounding_block}
 
 ## Task
-Create exactly **10 MCQ questions** that assess the student's understanding of the above stage.
+Create exactly **{total} questions**, split as:
+- {counts['mcq']} Multiple Choice Questions (MCQ)
+- {counts['subjective']} Subjective (short/long-form written answer) questions
+- {counts['practical']} Practical (applied, hands-on problem-solving) questions
 
 Rules:
-- Questions must vary in difficulty: 3 easy, 4 medium, 3 hard
-- Cover concepts from all topics evenly
-- Options must be plausible (no obviously wrong distractors)
-- The correct answer index is 0-based (0, 1, 2, or 3)
-- Include a clear explanation for the correct answer
+- Cover concepts from all subtopics evenly.
+- MCQ options must be plausible (no obviously wrong distractors); the correct answer index is 0-based.
+- Every Subjective/Practical question needs a detailed model answer a grader can compare a
+  student's response against — this is never shown to the student before they answer.
+- Vary difficulty roughly evenly across Easy/Medium/Hard.
 
-Return ONLY a valid JSON array (no prose, no markdown):
+Return ONLY a valid JSON array (no prose, no markdown) with exactly {total} entries, MCQ questions
+first, then Subjective, then Practical:
 
 [
   {{
+    "type": "mcq",
     "question": "<Question text>",
     "options": ["<A>", "<B>", "<C>", "<D>"],
     "answer": <0-indexed correct int>,
     "explanation": "<Why this is the correct answer>",
     "difficulty": "Easy | Medium | Hard",
-    "topic": "<Which topic this question tests>"
+    "topic": "<Which subtopic this question tests>"
+  }},
+  {{
+    "type": "subjective",
+    "question": "<Question text>",
+    "modelAnswer": "<Detailed reference answer covering every point a full-credit response needs>",
+    "explanation": "<Grading guidance — what to look for>",
+    "difficulty": "Easy | Medium | Hard",
+    "topic": "<Which subtopic this question tests>"
   }}
+]
+
+("practical" entries use the exact same shape as "subjective" — just type: "practical".)"""
+
+
+def build_open_ended_grading_prompt(items: List[Dict[str, Any]]) -> str:
+    """items: [{type, question, modelAnswer, explanation, studentAnswer}, ...]"""
+    def _format_item(i: int, item: Dict[str, Any]) -> str:
+        return (
+            f"QUESTION {i + 1} ({item.get('type', 'subjective')}): {item.get('question', '')}\n"
+            f"MODEL ANSWER: {item.get('modelAnswer', '')}\n"
+            f"GRADING GUIDANCE: {item.get('explanation', '')}\n"
+            f"STUDENT'S ANSWER: {item.get('studentAnswer') or '(no answer given)'}"
+        )
+
+    items_block = "\n\n".join(_format_item(i, item) for i, item in enumerate(items))
+    return f"""You are grading a student's written answers against model answers. For EACH question
+below, award partial credit from 0 to 100 based on the correctness, completeness, and understanding
+actually demonstrated — not keyword matching — and give brief, specific feedback.
+
+{items_block}
+
+Return ONLY a valid JSON array (no prose, no markdown), exactly one entry per question in the same
+order:
+
+[
+  {{ "score": <0-100 integer>, "feedback": "<1-2 sentence specific feedback on this answer>" }}
 ]"""
 
 
@@ -412,3 +709,152 @@ Return ONLY a valid JSON array (no prose, no markdown fences):
     "answer": <0-indexed correct option integer>
   }}
 ]"""
+
+
+# ============================================================
+# PRACTICE QUESTIONS  (per-week self-check, "think then reveal")
+# ============================================================
+# Distinct from the Auto Test: never scored, never gates week unlock — just
+# a self-check the student reveals the answer to. That means it doesn't need
+# an auto-gradable answer shape, which is what makes it safe to be genuinely
+# open-ended (theoretical) for goals where the real exam is written, not MCQ.
+
+def _is_interview_goal(goal: Optional[str]) -> bool:
+    return "interview" in (goal or "").lower()
+
+
+PRACTICE_MCQ_SCHEMA = """
+Return strict JSON with this shape:
+{
+  "questions": [
+    {"type": "MCQ", "question": "...", "options": ["...", "...", "...", "..."],
+     "answer": 0, "explanation": "..."}
+  ]
+}
+"answer" is the 0-based index into "options" of the correct choice.
+"""
+
+PRACTICE_THEORETICAL_SCHEMA = """
+Return strict JSON with this shape:
+{
+  "questions": [
+    {"type": "Theoretical", "question": "...", "modelAnswer": "...", "explanation": "..."}
+  ]
+}
+These are open-ended, written-exam-style questions — NOT multiple choice, no
+"options" field at all. "modelAnswer" is a complete, well-structured reference
+answer (several sentences, exam-quality) the student compares their own
+written answer against after thinking it through themselves.
+"""
+
+
+def build_practice_questions_prompt(
+    week_title: str, num_questions: int, grounding_context: Optional[str] = None, goal: Optional[str] = None,
+) -> str:
+    grounding_note = (
+        f"SOURCE MATERIAL:\n{grounding_context}\n\nGround questions in this material — use its "
+        "actual examples/data where possible.\n\n"
+        if grounding_context else
+        "No source material found — generate from general subject knowledge.\n\n"
+    )
+    if _is_interview_goal(goal):
+        schema = PRACTICE_MCQ_SCHEMA
+        format_note = "multiple-choice"
+    else:
+        schema = PRACTICE_THEORETICAL_SCHEMA
+        format_note = "open-ended, written-exam-style"
+    return (
+        f"Create {num_questions} {format_note} self-check practice questions covering: {week_title}\n\n"
+        f"{grounding_note}{schema}"
+    )
+
+
+# ============================================================
+# PRACTICE ANSWER EVALUATION  (theoretical questions only)
+# ============================================================
+# The student writes their own answer instead of just revealing the model
+# answer. This is a lightweight, encouraging check, not a formal grade —
+# there's no scoring number, no gate, just a verdict and feedback the way a
+# study partner would give it.
+
+ANSWER_EVALUATION_SCHEMA = """
+Return strict JSON with this shape:
+{
+  "verdict": "correct" | "partially_correct" | "incorrect",
+  "feedback": "..."
+}
+"feedback" is 2-4 sentences, addressed directly to the student:
+- If "correct": confirm what they got right, in an encouraging tone.
+- If "partially_correct": say what they got right, then what's missing or
+  imprecise, referencing the model answer's content.
+- If "incorrect": be kind but clear about what's wrong, and explain the
+  actual correct idea briefly.
+Do not repeat the full model answer verbatim in "feedback" — the student can
+already see it separately. Judge on substance and understanding, not exact
+wording or completeness of prose style.
+"""
+
+
+def build_practice_answer_evaluation_prompt(question: str, model_answer: str, student_answer: str) -> str:
+    return (
+        f"A student is self-checking their answer to a practice question.\n\n"
+        f"QUESTION:\n{question}\n\n"
+        f"MODEL ANSWER (reference — the student has not seen your evaluation of it):\n{model_answer}\n\n"
+        f"STUDENT'S WRITTEN ANSWER:\n{student_answer}\n\n"
+        "Evaluate whether the student's answer captures the substance of the model answer — "
+        "minor wording differences or omitted secondary details don't make it wrong; missing "
+        "the core concept does.\n\n"
+        f"{ANSWER_EVALUATION_SCHEMA}"
+    )
+
+
+# ============================================================
+# LEARNING RESOURCES  (index-selection over real search results)
+# ============================================================
+# Hallucination-proofing: the model only ever sees title+description per
+# candidate (never a URL) and can only respond with an index into that
+# list. The caller maps the returned index back to the original candidate
+# dict to get the real URL — the model's own output is never trusted for
+# the link itself, only for which one to pick and why.
+
+LEARNING_RESOURCES_SCHEMA = """
+Return ONLY a valid JSON object with this exact shape. No markdown, no extra text.
+{
+  "video":   [{"index": 0, "blurb": "one sentence on why this helps"}],
+  "reading": [{"index": 0, "blurb": "..."}],
+  "paper":   [{"index": 0, "blurb": "..."}]
+}
+Rules:
+- "index" MUST be one of the indices actually listed for that category below — never invent one.
+- Pick at most 3 per category. If none of a category's candidates are a good fit for the
+  topic, return an empty list for that category — do not force a weak match.
+- Never include a "url" field and never write out a URL in the blurb — you are choosing
+  WHICH listed item is best, not producing a link yourself.
+- "blurb" is one specific sentence: what the student will get from THIS item for THIS topic,
+  not a generic description.
+- Omit any category key entirely if it wasn't provided below.
+"""
+
+
+def build_learning_resources_prompt(topic: str, candidates_by_category: Dict[str, List[Dict[str, Any]]]) -> str:
+    def _format_category(name: str, items: List[Dict[str, Any]]) -> str:
+        if not items:
+            return ""
+        lines = [f"{name.upper()} CANDIDATES:"]
+        for i, item in enumerate(items):
+            desc = (item.get("description") or "").strip()
+            lines.append(f"[{i}] {item.get('title', '').strip()}" + (f" — {desc}" if desc else ""))
+        return "\n".join(lines)
+
+    blocks = [b for b in (
+        _format_category(name, items) for name, items in candidates_by_category.items()
+    ) if b]
+    candidates_block = "\n\n".join(blocks)
+
+    return (
+        f"A student is studying: {topic}\n\n"
+        "Below are REAL search results already fetched from YouTube, Wikipedia, and arXiv. "
+        "Your only job is to pick the most genuinely useful ones for a student learning this "
+        "specific topic, by index, and explain why each pick helps.\n\n"
+        f"{candidates_block}\n\n{LEARNING_RESOURCES_SCHEMA}"
+    )

@@ -1,18 +1,15 @@
 import asyncio
 import json
 import logging
-import os
 import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.api.routers import (
     ai_tutor,
-    ai_tutor_v1,
     answers,
     auth,
     contact,
@@ -24,12 +21,13 @@ from app.api.routers import (
     institute_hierarchy,
     marks_import,
     mock_tests,
-    pomodoro,
     profile,
     question_paper,
     relative_grading,
     roadmap,
     roles,
+    self_learner_analytics,
+    self_learner_course_material,
     student_subjects,
     subject_results,
     transcripts,
@@ -82,8 +80,8 @@ app.add_middleware(
 # routers, add both keys here in one place so existing frontend error
 # handling keeps showing the real backend message instead of falling back
 # to generic hardcoded text. Endpoints that already build their own
-# JSONResponse with an "error" key (e.g. ai_tutor.py, pomodoro.py) bypass
-# this handler entirely and are unaffected.
+# JSONResponse with an "error" key (e.g. ai_tutor.py) bypass this handler
+# entirely and are unaffected.
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     if isinstance(exc.detail, dict):
@@ -116,22 +114,15 @@ app.include_router(question_paper.router)
 app.include_router(grading.router)
 app.include_router(marks_import.router)
 app.include_router(mock_tests.router)
-app.include_router(pomodoro.router)
 app.include_router(relative_grading.router)
 app.include_router(roadmap.router)
+app.include_router(self_learner_analytics.router)
 app.include_router(subject_results.router)
 app.include_router(faculty_materials.router)
 app.include_router(course_material.router)
+app.include_router(self_learner_course_material.router)
 app.include_router(student_subjects.router)
 app.include_router(transcripts.router)
-app.include_router(ai_tutor_v1.router)
-
-# Serves locally-generated files (currently: AI Tutor v1's ReportLab PDFs
-# under uploads/generated_pdfs/) — mirrors Flask's
-# `send_from_directory("uploads", filename)` at the same /uploads path.
-# Everything else in this port uploads to ImageKit instead of local disk.
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 @app.get("/")
