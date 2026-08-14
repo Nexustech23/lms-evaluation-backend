@@ -256,7 +256,7 @@ async def list_mock_tests(identity: dict = Depends(get_current_identity), db: As
     student_id = ObjectId(identity["user_id"])
     cursor = db["mockTests"].find({"student_id": student_id}, {"questions": 0}).sort("created_at", -1)
     tests = [serialize_mock_test(doc) async for doc in cursor]
-    return {"success": True, "tests": tests}
+    return {"success": True, "mockTests": tests, "total": len(tests)}
 
 
 @router.get("/mock-tests/{test_id}")
