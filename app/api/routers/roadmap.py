@@ -78,6 +78,7 @@ from app.services.roadmap_ai import (
     generate_gemini_json,
     increment_student_claude_tokens,
     increment_student_gemini_tokens,
+    is_claude_overloaded_error,
     is_gemini_quota_error,
     log_style_requirement_gaps,
     validate_and_repair_diagram,
@@ -682,14 +683,27 @@ async def get_subtopic_notes(
         # interview-goal tips, etc.) routinely need more than a few thousand
         # tokens; a too-small flat budget was silently truncating responses.
         notes, usage, truncated = await asyncio.to_thread(generate_claude_json, prompt, 10000)
+        await increment_student_claude_tokens(db, identity["user_id"], usage)
     except anthropic.APIError as e:
-        logging.error("generate_subtopic_notes: Anthropic API error: %s", e)
-        raise HTTPException(status_code=502, detail=f"AI notes generation failed: {e}")
+        if not is_claude_overloaded_error(e):
+            logging.error("generate_subtopic_notes: Anthropic API error: %s", e)
+            raise HTTPException(status_code=502, detail=f"AI notes generation failed: {e}")
 
-    await increment_student_claude_tokens(db, identity["user_id"], usage)
+        # Claude overloaded/rate-limited — fail over to Gemini rather than
+        # block notes generation entirely. Same prompt works unmodified: both
+        # generators return the same (data, usage, truncated) shape, and
+        # extract_json handles a top-level JSON object from either provider
+        # identically.
+        logging.warning("generate_subtopic_notes: Claude overloaded, falling back to Gemini: %s", e)
+        try:
+            notes, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+        except Exception as e2:
+            logging.error("generate_subtopic_notes: Gemini fallback also failed: %s", e2)
+            raise HTTPException(status_code=502, detail=f"AI notes generation failed: {e2}")
+        await increment_student_gemini_tokens(db, identity["user_id"], usage)
 
     if truncated:
-        logging.error("Claude notes response truncated — max_tokens limit hit")
+        logging.error("AI notes response truncated — max_tokens limit hit")
         raise HTTPException(status_code=502, detail="AI response was too long. Try a more specific subtopic.")
 
     if isinstance(notes, dict):
@@ -786,14 +800,25 @@ async def get_subtopic_resources(
     prompt = build_learning_resources_prompt(topic, candidates_by_category)
     try:
         picks, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+        await increment_student_gemini_tokens(db, identity["user_id"], usage)
     except Exception as e:
-        logging.error("get_subtopic_resources: %s", e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Learning resources fetch failed: {e}")
+        if not is_gemini_quota_error(e):
+            logging.error("get_subtopic_resources: %s", e, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"Learning resources fetch failed: {e}")
 
-    await increment_student_gemini_tokens(db, identity["user_id"], usage)
+        # Gemini quota exhausted — fail over to Claude rather than block
+        # resource selection entirely. Same prompt works unmodified: both
+        # generators return the same (data, usage, truncated) shape.
+        logging.warning("get_subtopic_resources: Gemini quota exceeded, falling back to Claude: %s", e)
+        try:
+            picks, usage, truncated = await asyncio.to_thread(generate_claude_json, prompt, 2000)
+        except anthropic.APIError as e2:
+            logging.error("get_subtopic_resources: Claude fallback also failed: %s", e2)
+            raise HTTPException(status_code=502, detail=f"Learning resources fetch failed: {e2}")
+        await increment_student_claude_tokens(db, identity["user_id"], usage)
 
     if truncated:
-        logging.error("Gemini learning resources response truncated — MAX_TOKENS limit hit")
+        logging.error("Learning resources response truncated — MAX_TOKENS limit hit")
         raise HTTPException(status_code=502, detail="Learning resources selection was too long. Please try again.")
 
     resolved: Dict[str, List[Dict[str, Any]]] = {}

@@ -27,6 +27,7 @@ import anthropic
 from bson import ObjectId
 from google import genai as google_genai
 from google.genai import types as google_genai_types
+# pyrefly: ignore [missing-import]
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
@@ -53,31 +54,39 @@ def _get_gemini() -> google_genai.Client:
 
 def extract_json(text: str) -> Any:
     """Robustly extract the first JSON object/array from a Claude/Gemini response.
-    Handles markdown code-fences (```json … ```) and bare JSON.
-
-    Picks whichever of "{" / "[" actually occurs FIRST in the text, rather
-    than always trying "{" first — a top-level JSON array (e.g. Auto Test's
-    "[ {...}, {...}, ... ]") has its first "{" appear INSIDE the array, so
-    always-try-"{"-first would match only that one inner object and silently
-    return a single dict instead of the whole array.
+    Handles nested markdown code blocks (e.g. in programming questions) and ignores
+    brackets inside string literals by leveraging raw_decode.
     """
-    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if fenced:
-        text = fenced.group(1).strip()
-    candidates = []
-    for start_char, end_char in [("{", "}"), ("[", "]")]:
-        start = text.find(start_char)
-        if start != -1:
-            candidates.append((start, start_char, end_char))
-    for start, start_char, end_char in sorted(candidates, key=lambda c: c[0]):
-        depth = 0
-        for i, ch in enumerate(text[start:], start):
-            if ch == start_char:
-                depth += 1
-            elif ch == end_char:
-                depth -= 1
-                if depth == 0:
-                    return json.loads(text[start:i + 1])
+    # 1. Try loading directly if it already starts and ends with brackets/braces
+    text_clean = text.strip()
+    if (text_clean.startswith("{") and text_clean.endswith("}")) or (text_clean.startswith("[") and text_clean.endswith("]")):
+        try:
+            return json.loads(text_clean)
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Find the earliest occurrence of '{' or '['
+    indices = [text.find("{"), text.find("[")]
+    valid_indices = [idx for idx in indices if idx != -1]
+    if not valid_indices:
+        raise ValueError("No valid JSON found in model output")
+
+    # Start looking from the earliest character
+    curr_idx = min(valid_indices)
+    while curr_idx != -1:
+        try:
+            # raw_decode parses exactly one JSON entity starting at curr_idx
+            obj, _ = json.JSONDecoder().raw_decode(text[curr_idx:])
+            return obj
+        except json.JSONDecodeError:
+            # Fallback: search for the next '{' or '[' in the remaining text
+            next_brace = text.find("{", curr_idx + 1)
+            next_bracket = text.find("[", curr_idx + 1)
+            next_indices = [idx for idx in (next_brace, next_bracket) if idx != -1]
+            if not next_indices:
+                break
+            curr_idx = min(next_indices)
+
     raise ValueError("No valid JSON found in model output")
 
 
@@ -278,6 +287,19 @@ def is_gemini_quota_error(exc: Exception) -> bool:
     code = getattr(exc, "code", None)
     status = (getattr(exc, "status", "") or "").upper()
     return code == 429 or "RESOURCE_EXHAUSTED" in status or "QUOTA" in status
+
+
+def is_claude_overloaded_error(exc: Exception) -> bool:
+    """
+    True only for a Claude rate-limit/overload failure (HTTP 429 RateLimitError,
+    or 529 "overloaded_error") — the one Claude failure mode worth failing over
+    to Gemini for, mirroring is_gemini_quota_error's treatment of the reverse
+    direction. Other Claude errors (malformed prompt, auth, transient 5xx)
+    aren't retried on a different provider; they surface as a normal error
+    instead.
+    """
+    status_code = getattr(exc, "status_code", None)
+    return status_code in (429, 529)
 
 
 def generate_gemini_json(prompt: str) -> Tuple[Optional[Any], Any, bool]:
