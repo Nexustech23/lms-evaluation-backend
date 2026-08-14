@@ -33,7 +33,7 @@ def get_vector_store():
     try:
         from app.services.rag.vector_store import VectorStore
 
-        _vector_store = VectorStore(url=settings.QDRANT_URL)
+        _vector_store = VectorStore(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY or None)
         logger.info("Qdrant vector store connected at %s", settings.QDRANT_URL)
     except Exception as exc:
         logger.warning("Vector store unavailable (Qdrant down or embedder init failed): %s", exc)

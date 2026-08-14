@@ -78,6 +78,7 @@ from app.services.roadmap_ai import (
     generate_gemini_json,
     increment_student_claude_tokens,
     increment_student_gemini_tokens,
+    is_gemini_quota_error,
     log_style_requirement_gaps,
     validate_and_repair_diagram,
     _dominant_vark_style,
@@ -536,6 +537,24 @@ async def get_roadmap(
     return serialize_roadmap(doc)
 
 
+@router.delete("/{roadmap_id}")
+async def delete_roadmap(
+    roadmap_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    if not ObjectId.is_valid(roadmap_id):
+        raise HTTPException(status_code=400, detail="Invalid roadmap id")
+
+    result = await db["selfLearnerRoadmaps"].delete_one(
+        {"_id": ObjectId(roadmap_id), "user_id": ObjectId(identity["user_id"])}
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Roadmap not found")
+
+    return {"success": True}
+
+
 # ── Subtopic Progress ───────────────────────────────────────────────────────
 
 @router.patch("/{roadmap_id}/subtopic")
@@ -851,14 +870,26 @@ async def generate_auto_test(
 
     try:
         questions, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+        await increment_student_gemini_tokens(db, identity["user_id"], usage)
     except Exception as e:
-        logging.error("generate_auto_test: %s", e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"AI test generation failed: {e}")
+        if not is_gemini_quota_error(e):
+            logging.error("generate_auto_test: %s", e, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"AI test generation failed: {e}")
 
-    await increment_student_gemini_tokens(db, identity["user_id"], usage)
+        # Gemini quota exhausted — fail over to Claude rather than block quiz
+        # generation entirely. Same prompt works unmodified: both generators
+        # return the same (data, usage, truncated) shape, and extract_json
+        # handles a top-level JSON array from either provider identically.
+        logging.warning("generate_auto_test: Gemini quota exceeded, falling back to Claude: %s", e)
+        try:
+            questions, usage, truncated = await asyncio.to_thread(generate_claude_json, prompt, 8000)
+        except anthropic.APIError as e2:
+            logging.error("generate_auto_test: Claude fallback also failed: %s", e2)
+            raise HTTPException(status_code=502, detail=f"AI test generation failed: {e2}")
+        await increment_student_claude_tokens(db, identity["user_id"], usage)
 
     if truncated:
-        logging.error("Gemini Auto Test response truncated — MAX_TOKENS limit hit")
+        logging.error("Auto Test response truncated — MAX_TOKENS limit hit")
         raise HTTPException(status_code=502, detail="AI response was too long. Try fewer questions.")
 
     if not isinstance(questions, list) or not questions:

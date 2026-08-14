@@ -129,11 +129,15 @@ def chunk_text(doc_id: str, pages: List[dict]) -> List[Chunk]:
 class VectorStore:
     """Thin Qdrant wrapper. All methods are blocking — call via asyncio.to_thread."""
 
-    def __init__(self, url: str = "http://localhost:6333"):
+    def __init__(self, url: str = "http://localhost:6333", api_key: str | None = None):
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
 
-        self.client = QdrantClient(url=url)
+        # api_key=None is fine for a local/unauthenticated Qdrant (dev
+        # docker run) — only Qdrant Cloud / an auth-enabled instance needs
+        # it, and passing None there simply gets rejected by the server
+        # instead of silently misbehaving.
+        self.client = QdrantClient(url=url, api_key=api_key or None)
         try:
             self.client.get_collection(COLLECTION)
         except Exception:

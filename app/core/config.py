@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379"
 
     QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
 
     @property
     def is_production(self) -> bool:

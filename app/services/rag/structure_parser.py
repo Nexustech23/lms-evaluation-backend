@@ -24,28 +24,44 @@ _NUMBERED_HEADING = re.compile(r"^\s{0,3}(\d+(\.\d+)*)\.?\s+(.{3,80})$")
 _MD_HEADING = re.compile(r"^(#{1,4})\s+(.{2,80})$")
 
 
+WORDS_PER_VIRTUAL_PAGE = 500
+
+
 def classify_doc_type(pages: List[dict]) -> DocType:
     """
     Heuristic: structured admin/course docs have a high density of numbered
     headings and tables relative to page count. Prose textbooks don't.
     Tune the thresholds against your own corpus once you have >20 uploads.
+
+    This backend's extractors (see course_material.py) return the whole
+    document as ONE flat page, not true per-page dicts — dividing by
+    len(pages) in that case degenerates to a raw count (any single numbered
+    line anywhere in the whole document would trip STRUCTURED). Using an
+    estimated "effective page count" from word count instead keeps the
+    density meaningful regardless of whether real pagination is available.
     """
-    total_pages = max(len(pages), 1)
     heading_hits = 0
     table_hits = 0
+    total_words = 0
     for page in pages:
-        for line in page["text"].splitlines():
+        text = page["text"]
+        total_words += len(text.split())
+        for line in text.splitlines():
             if _NUMBERED_HEADING.match(line) or _MD_HEADING.match(line):
                 heading_hits += 1
         table_hits += len(page.get("tables", []))
 
-    heading_density = heading_hits / total_pages
-    table_density = table_hits / total_pages
+    effective_pages = max(total_words / WORDS_PER_VIRTUAL_PAGE, len(pages), 1)
+
+    heading_density = heading_hits / effective_pages
+    table_density = table_hits / effective_pages
 
     # >0.8 headings/page or any real table density => treat as structured.
     doc_type = DocType.STRUCTURED if (heading_density >= 0.8 or table_density >= 0.15) else DocType.UNSTRUCTURED
-    logger.info("classify_doc_type: pages=%d heading_density=%.2f table_density=%.2f -> %s",
-                total_pages, heading_density, table_density, doc_type.value)
+    logger.info(
+        "classify_doc_type: pages=%d effective_pages=%.1f heading_density=%.2f table_density=%.2f -> %s",
+        len(pages), effective_pages, heading_density, table_density, doc_type.value,
+    )
     return doc_type
 
 
