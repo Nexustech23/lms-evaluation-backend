@@ -267,6 +267,19 @@ def generate_curriculum(prompt: str) -> Tuple[Optional[Dict[str, Any]], Any, boo
 # GEMINI JSON GENERATION (subtopic notes / stage quiz / pre-assessment)
 # ============================================================
 
+def is_gemini_quota_error(exc: Exception) -> bool:
+    """
+    True only for a Gemini quota/rate-limit failure (HTTP 429 /
+    RESOURCE_EXHAUSTED) — the one Gemini failure mode worth failing over to
+    Claude for. Other Gemini errors (malformed prompt, transient 5xx,
+    network blip) aren't retried on a different provider; they surface as a
+    normal error instead, same as before.
+    """
+    code = getattr(exc, "code", None)
+    status = (getattr(exc, "status", "") or "").upper()
+    return code == 429 or "RESOURCE_EXHAUSTED" in status or "QUOTA" in status
+
+
 def generate_gemini_json(prompt: str) -> Tuple[Optional[Any], Any, bool]:
     """Returns (parsed_json_or_None, usage_metadata, truncated)."""
     client = _get_gemini()
