@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import SUPERADMIN, require_role
+from app.core.rate_limit import contact_rate_limit
 from app.db.mongodb import get_database
 from app.models.contact import create_contact_document, serialize_contact
 from app.schemas.contact import ContactCreate
@@ -18,7 +19,7 @@ from app.schemas.contact import ContactCreate
 router = APIRouter(tags=["contact"])
 
 
-@router.post("/contact")
+@router.post("/contact", dependencies=[Depends(contact_rate_limit)])
 async def create_contact(
     payload: ContactCreate,
     db: AsyncIOMotorDatabase = Depends(get_database),

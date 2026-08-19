@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_API_KEY: str = ""
 
+    # Rate limiting (see app/core/rate_limit.py). All windows are 60s.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_GLOBAL_PER_MINUTE: int = 200          # per IP, applied to every request
+    RATE_LIMIT_AI_PER_MINUTE: int = 10               # per user, on single-action AI endpoints
+    RATE_LIMIT_BULK_GRADING_PER_MINUTE: int = 60      # per user, /evaluate-answer-script only —
+    # its "Evaluate All" button fires one request per ungraded answer script at once
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 10              # per IP, on public unauthenticated endpoints
+
     @property
     def is_production(self) -> bool:
         return self.ENV.lower() == "production"

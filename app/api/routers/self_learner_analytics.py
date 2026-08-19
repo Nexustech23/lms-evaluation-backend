@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity
+from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.services.attempt_insight import generate_attempt_insight
 
@@ -407,7 +408,7 @@ def _items_from_quiz_history(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
-@router.post("/attempts/{source_type}/{attempt_id}/insight")
+@router.post("/attempts/{source_type}/{attempt_id}/insight", dependencies=[Depends(ai_rate_limit)])
 async def get_attempt_insight(
     source_type: str,
     attempt_id: str,

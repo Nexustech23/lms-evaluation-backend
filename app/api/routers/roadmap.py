@@ -48,6 +48,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
 from app.api.deps import get_current_identity
+from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.roadmap import create_roadmap_document, serialize_roadmap
 from app.schemas.roadmap import (
@@ -449,7 +450,7 @@ async def get_creation_status(job_id: str, identity: dict = Depends(get_current_
 
 # ── Pre-Assessment Quiz (must be before /{roadmap_id} routes) ──────────────
 
-@router.post("/assess")
+@router.post("/assess", dependencies=[Depends(ai_rate_limit)])
 async def generate_pre_assessment(
     payload: PreAssessmentRequest,
     identity: dict = Depends(get_current_identity),
@@ -479,7 +480,7 @@ async def generate_pre_assessment(
 
 # ── List & Create ───────────────────────────────────────────────────────────
 
-@router.post("")
+@router.post("", dependencies=[Depends(ai_rate_limit)])
 async def create_roadmap(
     background_tasks: BackgroundTasks,
     payload: CreateRoadmapRequest,
@@ -854,7 +855,7 @@ async def get_subtopic_resources(
 
 # ── Auto Test — configure + generate ────────────────────────────────────────
 
-@router.post("/{roadmap_id}/quiz/generate")
+@router.post("/{roadmap_id}/quiz/generate", dependencies=[Depends(ai_rate_limit)])
 async def generate_auto_test(
     roadmap_id: str,
     payload: GenerateAutoTestRequest,
@@ -1056,7 +1057,7 @@ async def get_practice_questions(
     return {"questions": questions, "cached": False}
 
 
-@router.post("/{roadmap_id}/practice/evaluate")
+@router.post("/{roadmap_id}/practice/evaluate", dependencies=[Depends(ai_rate_limit)])
 async def evaluate_practice_answer(
     roadmap_id: str,
     payload: EvaluatePracticeAnswerRequest,

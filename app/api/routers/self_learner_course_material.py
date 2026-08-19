@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.deps import get_current_identity
 from app.api.routers.course_material import _run_ingest_job
+from app.core.rate_limit import ai_rate_limit
 from app.services.job_store import get_job, set_job
 
 router = APIRouter(
@@ -48,7 +49,7 @@ async def get_upload_status(job_id: str, identity: dict = Depends(get_current_id
     return job
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(ai_rate_limit)])
 async def upload_course_material(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),

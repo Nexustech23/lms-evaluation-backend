@@ -307,21 +307,38 @@ async def get_all_institutes(
 
     user_ids = [u["_id"] for u in users]
     inst_map = {}
-    async for inst in db["instituteDetails"].find({"user_id": {"$in": user_ids}}, {"user_id": 1, "token_usage": 1}):
-        inst_map[str(inst["user_id"])] = inst.get("token_usage", {})
+    async for inst in db["instituteDetails"].find(
+        {"user_id": {"$in": user_ids}}, {"user_id": 1, "token_usage": 1, "token_limit": 1}
+    ):
+        inst_map[str(inst["user_id"])] = {
+            "token_usage": inst.get("token_usage", {}),
+            "token_limit": inst.get("token_limit"),  # None = unlimited (pre-existing institute)
+        }
 
     result = []
     for user in users:
         uid = str(user["_id"])
-        token_usage = inst_map.get(uid, {})
+        entry = inst_map.get(uid, {})
+        token_usage = entry.get("token_usage", {})
+        token_limit = entry.get("token_limit")
+
+        gemini_used = token_usage.get("gemini", {}).get("total_tokens", 0)
+        claude_used = token_usage.get("claude", {}).get("total_tokens", 0)
+        gemini_limit = (token_limit or {}).get("gemini")
+        claude_limit = (token_limit or {}).get("claude")
+
         result.append({
             "id": uid,
             "fullName": user.get("fullName"),
             "email": user.get("email"),
             "created_at": user.get("created_at"),
             "is_active": user.get("is_active", True),
-            "gemini_total_tokens": token_usage.get("gemini", {}).get("total_tokens", 0),
-            "claude_total_tokens": token_usage.get("claude", {}).get("total_tokens", 0),
+            "gemini_total_tokens": gemini_used,
+            "claude_total_tokens": claude_used,
+            "gemini_token_limit": gemini_limit,
+            "claude_token_limit": claude_limit,
+            "gemini_tokens_remaining": (gemini_limit - gemini_used) if gemini_limit is not None else None,
+            "claude_tokens_remaining": (claude_limit - claude_used) if claude_limit is not None else None,
         })
 
     total = await db["users"].count_documents(query)
@@ -392,6 +409,24 @@ async def update_institute(
     }
     update_fields = {k: v for k, v in field_map.items() if v is not None}
     update_fields["updated_at"] = datetime.now(timezone.utc)
+
+    # Top-up: superadmin sets a new total limit (not an amount to add).
+    # Uses dot notation so a bare {"gemini": X} doesn't clobber the other
+    # provider's limit, and so this also works for institutes that had no
+    # token_limit document at all (previously "unlimited") — setting one
+    # provider's limit here leaves the other provider unlimited until the
+    # superadmin sets that one too.
+    gemini_limit = institute_data.get("gemini_token_limit")
+    if gemini_limit is not None:
+        if not isinstance(gemini_limit, int) or gemini_limit < 0:
+            raise HTTPException(status_code=400, detail="gemini_token_limit must be a non-negative integer")
+        update_fields["token_limit.gemini"] = gemini_limit
+
+    claude_limit = institute_data.get("claude_token_limit")
+    if claude_limit is not None:
+        if not isinstance(claude_limit, int) or claude_limit < 0:
+            raise HTTPException(status_code=400, detail="claude_token_limit must be a non-negative integer")
+        update_fields["token_limit.claude"] = claude_limit
 
     await db["instituteDetails"].update_one({"_id": institute_id}, {"$set": update_fields})
 
