@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import FACULTY, INSTITUTE, get_current_identity
+from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.job_store import get_job, set_job, update_job
@@ -163,7 +164,7 @@ async def get_ingest_status(job_id: str, identity: dict = Depends(get_current_id
     return job
 
 
-@router.post("/upload")
+@router.post("/upload", dependencies=[Depends(ai_rate_limit)])
 async def upload_course_material(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),

@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.rate_limit import bulk_grading_rate_limit
 from app.db.mongodb import get_database
 from app.schemas.grading import EvaluateAnswerScriptRequest
 from app.services.grading import (
@@ -35,7 +36,7 @@ from app.services.grading import (
 from app.services.imagekit import upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
-from app.utils.token_usage import aggregate_grading_tokens, save_grading_tokens_to_institute
+from app.utils.token_usage import aggregate_grading_tokens, check_institute_token_budget, save_grading_tokens_to_institute
 from app.utils.transcript_generation_helper import refresh_transcript_for_exam
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["grading"])
@@ -304,7 +305,7 @@ async def _run_evaluation_job(
 # ROUTES
 # ============================================================
 
-@router.post("/evaluate-answer-script")
+@router.post("/evaluate-answer-script", dependencies=[Depends(bulk_grading_rate_limit)])
 async def evaluate_answer_script(
     background_tasks: BackgroundTasks,
     payload: EvaluateAnswerScriptRequest,
@@ -320,6 +321,17 @@ async def evaluate_answer_script(
     answer_id = payload.answerId
     generate_transcript_pdf = payload.generateTranscriptPdf
 
+    # Grading uses both Gemini (OCR) and Claude (grading + optional
+    # transcript) calls inside the background job — cost is only known once
+    # the job finishes, so this is a pre-flight check only. If the institute
+    # is already out of tokens, don't start a job that can never complete
+    # cleanly; once started, a job is allowed to finish even if it pushes
+    # usage slightly past the limit, rather than abandoning a half-graded
+    # answer sheet.
+    budget = await check_institute_token_budget(db, str(faculty_id), ["gemini", "claude"])
+    if not budget["allowed"]:
+        return JSONResponse(status_code=402, content={"error": budget["message"]})
+
     job_id = str(uuid.uuid4())
     await set_job(EVAL_JOB_PREFIX, job_id, {"status": "processing", "progress": 0, "step": "Starting evaluation"})
 
@@ -332,6 +344,7 @@ async def evaluate_answer_script(
         "status": "processing",
         "generate_transcript_pdf": generate_transcript_pdf,
         "message": "Evaluation started. Poll /evaluate-answer-script/status/<job_id>.",
+        "token_warnings": budget["warnings"],
     })
 
 

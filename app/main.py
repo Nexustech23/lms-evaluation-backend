@@ -33,6 +33,7 @@ from app.api.routers import (
     transcripts,
 )
 from app.core.config import settings
+from app.core.rate_limit import GlobalRateLimitMiddleware
 from app.core.redis_client import close_redis_connection, connect_to_redis
 from app.db.mongodb import close_mongo_connection, connect_to_mongo, get_database, ping_mongo
 
@@ -63,6 +64,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LMS Evaluation API", lifespan=lifespan)
+
+# Registered before CORSMiddleware so CORS ends up as the outer layer (FastAPI
+# wraps middleware in reverse registration order) — otherwise a 429 response
+# short-circuited by GlobalRateLimitMiddleware would go out with no CORS
+# headers, and the browser would block it before the frontend ever saw it.
+app.add_middleware(GlobalRateLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

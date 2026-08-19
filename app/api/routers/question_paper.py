@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.question_paper import build_create_document, build_update_fields, serialize_question_paper
 from app.schemas.question_paper import (
@@ -46,7 +47,11 @@ from app.services.docx_from_text import build_docx
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.imagekit import delete_imagekit_file, upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
-from app.utils.token_usage import increment_institute_claude_tokens, increment_institute_gemini_tokens
+from app.utils.token_usage import (
+    check_institute_token_budget,
+    increment_institute_claude_tokens,
+    increment_institute_gemini_tokens,
+)
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["question-paper"])
 
@@ -382,7 +387,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 # ROUTES — AI GENERATION
 # ============================================================
 
-@router.post("/question-paper/generate-ai")
+@router.post("/question-paper/generate-ai", dependencies=[Depends(ai_rate_limit)])
 async def generate_question_paper_ai(
     background_tasks: BackgroundTasks,
     prompt: str = Form(""),
@@ -437,6 +442,14 @@ async def generate_question_paper_ai(
         if not prompt and not qb_bytes:
             return JSONResponse(status_code=400, content={"error": "Provide either a 'prompt' or a 'questionBank' file."})
 
+        # Generation uses both Gemini (file extraction) and Claude (the
+        # paper itself), so if either pool is exhausted the whole job is
+        # blocked upfront rather than burning the other provider's tokens
+        # on a run that can't finish.
+        budget = await check_institute_token_budget(db, str(faculty_id), ["gemini", "claude"])
+        if not budget["allowed"]:
+            return JSONResponse(status_code=402, content={"error": budget["message"]})
+
         cp_bytes = None
         cp_filename = ""
         if coursePlanner:
@@ -482,6 +495,7 @@ async def generate_question_paper_ai(
             "success": True,
             "jobId": job_id,
             "message": "Generation started. Poll /question-paper/generate-ai/status/<jobId>.",
+            "token_warnings": budget["warnings"],
         })
 
     except HTTPException:

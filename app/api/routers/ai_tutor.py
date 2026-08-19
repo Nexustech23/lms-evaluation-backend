@@ -29,6 +29,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.api.deps import get_current_identity
+from app.core.rate_limit import ai_rate_limit
 from app.services.claude import generate_html
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.imagekit import upload_file_to_imagekit
@@ -357,7 +358,7 @@ async def _run_notes_job(job_id: str, params: dict, file_bytes: Optional[bytes],
 # ROUTES — HOMEWORK HELP
 # ============================================================
 
-@router.post("/homework-help")
+@router.post("/homework-help", dependencies=[Depends(ai_rate_limit)])
 async def homework_help(
     background_tasks: BackgroundTasks,
     prompt: str = Form(""),
@@ -437,7 +438,7 @@ async def homework_help_status(job_id: str):
 # ROUTES — GENERATE NOTES
 # ============================================================
 
-@router.post("/generate-notes")
+@router.post("/generate-notes", dependencies=[Depends(ai_rate_limit)])
 async def generate_notes(
     background_tasks: BackgroundTasks,
     prompt: str = Form(""),

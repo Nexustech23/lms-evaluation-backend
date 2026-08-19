@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.exam import create_exam_document
 from app.schemas.exams import (
@@ -28,6 +29,7 @@ from app.schemas.exams import (
     UploadQuestionPaperRequest,
 )
 from app.services.gemini import extract_and_patch_question_paper_text
+from app.utils.token_usage import check_institute_token_budget
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["exams"])
 
@@ -111,7 +113,7 @@ async def create_folder(
 # UPLOAD QUESTION PAPER (+ background Gemini text extraction)
 # =====================================================
 
-@router.post("/upload-question-paper/{folder_id}")
+@router.post("/upload-question-paper/{folder_id}", dependencies=[Depends(ai_rate_limit)])
 async def upload_question_paper(
     folder_id: str,
     background_tasks: BackgroundTasks,
@@ -134,6 +136,11 @@ async def upload_question_paper(
     filename = payload.filename
     no_of_question = payload.no_of_question
 
+    # Text extraction is a Gemini call, so it's the only part of this
+    # endpoint gated by the institute's token budget — the upload itself
+    # always succeeds even if the institute is out of tokens.
+    budget = await check_institute_token_budget(db, str(faculty_id), ["gemini"])
+
     now = datetime.now(timezone.utc)
     await db["newsavedDocs"].update_one(
         {"_id": folder_object_id},
@@ -145,21 +152,27 @@ async def upload_question_paper(
                 "no_of_questions": int(no_of_question),
                 "text": None,
                 "text_at": None,
-                "text_error": None,
+                "text_error": None if budget["allowed"] else budget["message"],
             },
             "updated_at": now,
         }},
     )
 
-    background_tasks.add_task(
-        extract_and_patch_question_paper_text, db, folder_object_id, questionpaper_url, str(faculty_id), filename
-    )
+    if budget["allowed"]:
+        background_tasks.add_task(
+            extract_and_patch_question_paper_text, db, folder_object_id, questionpaper_url, str(faculty_id), filename
+        )
 
     updated_exam = await db["newsavedDocs"].find_one({"_id": folder_object_id})
 
+    message = "Question paper uploaded. Text extraction is running in the background."
+    if not budget["allowed"]:
+        message = f"Question paper uploaded, but text extraction was skipped: {budget['message']}"
+
     return {
         "success": True,
-        "message": "Question paper uploaded. Text extraction is running in the background.",
+        "message": message,
+        "token_warnings": budget["warnings"],
         "exam": {
             "id": str(updated_exam["_id"]),
             "folder_name": updated_exam.get("folder_name"),

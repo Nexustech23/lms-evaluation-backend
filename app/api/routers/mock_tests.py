@@ -31,6 +31,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity
 from app.api.routers.roadmap import _resolve_grounding
+from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.mock_test import (
     build_create_document,
@@ -149,7 +150,7 @@ async def _run_roadmap_generation(test_id: ObjectId, prompt: str, user_id: str) 
 # ROUTES
 # ============================================================
 
-@router.post("/mock-tests")
+@router.post("/mock-tests", dependencies=[Depends(ai_rate_limit)])
 async def create_mock_test(
     background_tasks: BackgroundTasks,
     payload: MockTestCreateRequest,

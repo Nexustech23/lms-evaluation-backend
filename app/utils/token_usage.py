@@ -5,6 +5,13 @@ from typing import Any, Dict, List, Optional
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+# An institute is warned once it has less than this fraction of a pool's
+# limit left, so it gets some runway to request a top-up before it's
+# actually blocked. Percentage (not a flat token count) so it scales
+# sensibly whether the limit is a 5M demo allocation or a much larger paid
+# plan.
+WARNING_THRESHOLD_RATIO = 0.05
+
 
 async def increment_institute_gemini_tokens(
     db: AsyncIOMotorDatabase, faculty_id: str, prompt_tokens: int, candidate_tokens: int
@@ -144,3 +151,73 @@ async def save_grading_tokens_to_institute(
         )
     except Exception as e:
         logging.error("save_grading_tokens_to_institute error: %s", e)
+
+
+async def _resolve_institute_id_for_faculty(db: AsyncIOMotorDatabase, faculty_id: str) -> Optional[ObjectId]:
+    faculty = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id)})
+    if not faculty:
+        return None
+    institute_id = faculty.get("institute_id")
+    if not institute_id:
+        return None
+    if isinstance(institute_id, str) and ObjectId.is_valid(institute_id):
+        institute_id = ObjectId(institute_id)
+    return institute_id
+
+
+_PROVIDER_LABELS = {"gemini": "Gemini", "claude": "Claude"}
+
+
+async def check_institute_token_budget(
+    db: AsyncIOMotorDatabase, faculty_id: str, providers: List[str]
+) -> Dict[str, Any]:
+    """
+    Pre-flight check run before kicking off an AI job, so a caller gets an
+    immediate error instead of a job that starts and fails partway through.
+
+    An institute with no token_limit document (pre-existing institutes,
+    before this feature) is treated as unlimited and always allowed.
+
+    Returns:
+      {
+        "allowed": bool,
+        "message": str | None,       # set when allowed is False
+        "warnings": [                # non-blocking, still allowed
+          {"provider": "gemini", "remaining": 123456, "limit": 5000000}
+        ],
+      }
+    """
+    institute_id = await _resolve_institute_id_for_faculty(db, faculty_id)
+    if not institute_id:
+        return {"allowed": True, "message": None, "warnings": []}
+
+    institute = await db["instituteDetails"].find_one(
+        {"_id": institute_id}, {"token_limit": 1, "token_usage": 1}
+    )
+    token_limit = (institute or {}).get("token_limit")
+    if not token_limit:
+        return {"allowed": True, "message": None, "warnings": []}
+
+    token_usage = (institute or {}).get("token_usage") or {}
+    warnings: List[Dict[str, Any]] = []
+
+    for provider in providers:
+        limit = token_limit.get(provider)
+        if not limit:
+            continue
+        used = token_usage.get(provider, {}).get("total_tokens", 0)
+        remaining = limit - used
+        if remaining <= 0:
+            label = _PROVIDER_LABELS.get(provider, provider)
+            return {
+                "allowed": False,
+                "message": (
+                    f"{label} token limit reached for this institute. "
+                    "Contact your administrator to increase the limit."
+                ),
+                "warnings": [],
+            }
+        if remaining <= limit * WARNING_THRESHOLD_RATIO:
+            warnings.append({"provider": provider, "remaining": remaining, "limit": limit})
+
+    return {"allowed": True, "message": None, "warnings": warnings}

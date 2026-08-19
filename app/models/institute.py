@@ -38,6 +38,21 @@ def _empty_institute_token_usage() -> Dict[str, Any]:
     }
 
 
+# Default allocation for newly onboarded institutes. Institutes created
+# before this field existed have no token_limit at all, which the budget
+# checks in app/utils/token_usage.py treat as unlimited — so this default
+# only ever applies going forward, never retroactively.
+DEFAULT_TOKEN_LIMIT = 5_000_000
+
+
+def _default_institute_token_limit() -> Dict[str, Any]:
+    return {
+        "gemini": DEFAULT_TOKEN_LIMIT,
+        "claude": DEFAULT_TOKEN_LIMIT,
+        "plan": "demo",
+    }
+
+
 def create_institute_document(data: Dict[str, Any]) -> Dict[str, Any]:
     user_id, institute_name = validate_institute_data(data)
     now = datetime.now(timezone.utc)
@@ -73,6 +88,7 @@ def create_institute_document(data: Dict[str, Any]) -> Dict[str, Any]:
         "is_verified": False,
 
         "token_usage": _empty_institute_token_usage(),
+        "token_limit": _default_institute_token_limit(),
 
         "created_at": now,
         "updated_at": now,
@@ -164,4 +180,7 @@ def serialize_institute(doc: Dict[str, Any], user_data: Dict[str, Any] = None) -
         "hasCOAccess": user_data.get("hasCOAccess", False) if user_data else False,
         "hasQPGAccess": user_data.get("hasQPGAccess", False) if user_data else False,
         "token_usage": _serialize_token_usage(doc.get("token_usage")),
+        # None means unlimited — institutes created before this field existed
+        # have no token_limit document at all.
+        "token_limit": doc.get("token_limit"),
     }

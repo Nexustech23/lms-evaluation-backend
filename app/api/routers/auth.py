@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user
+from app.core.rate_limit import login_rate_limit
 from app.core.security import create_access_token, hash_password, set_access_cookie, unset_access_cookie, verify_password
 from app.db.mongodb import get_database
 from app.models.faculty import create_faculty_document
@@ -419,7 +420,7 @@ async def register(
 # LOGIN
 # ============================================================
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(login_rate_limit)])
 async def login(
     response: Response,
     payload: LoginRequest,
