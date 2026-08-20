@@ -3,9 +3,11 @@
 # /home/ubuntu/lms-evaluation-backend/fastapi-backend
 # whenever FastAPI backend code changes need to go live.
 #
-# Runs on port 5051 (host) alongside Flask's lms-backend on port 5050 —
-# this is deliberately NOT a replacement for redeploy.sh in the parent
-# directory. See that script's own comments for the Flask deploy.
+# Post-cutover: FastAPI is now the sole backend, running on host port
+# 5050 (Flask's lms-backend has been stopped and retired — see the
+# docker-compose.yml comment for why the port mapping changed from
+# 5051:5050 to 5050:5050). Flask's old redeploy.sh in the parent
+# directory should no longer be used.
 set -e
 
 cd "$(dirname "$0")"
@@ -25,8 +27,8 @@ docker compose up -d lms-backend-fastapi
 echo "==> Verifying network attachment..."
 docker network inspect lms-shared --format "Containers on lms-shared: {{range .Containers}}{{.Name}} {{end}}"
 
-echo "==> Done. FastAPI is now live on port 5051 (Flask remains on 5050, untouched)."
-echo "==> Health check: curl http://localhost:5051/health"
+echo "==> Done. FastAPI is now live on port 5050 (sole backend — Flask has been retired)."
+echo "==> Health check: curl http://localhost:5050/health"
 
 echo "==> Build took ${BUILD_SECS}s."
 if [ "$BUILD_SECS" -gt 120 ]; then
