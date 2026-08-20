@@ -5,12 +5,12 @@ services:
     build: .
     container_name: lms-backend-fastapi
     ports:
-      # Host 5051 -> container 5050, so this runs alongside Flask's
-      # lms-backend (which owns host port 5050) without colliding.
-      # Once you're confident in it, flip the frontend's API_URL to point
-      # here — or, for a full cutover, swap this to "5050:5050" after
-      # stopping the Flask container.
-      - "5051:5050"
+      # Flask's lms-backend previously owned host port 5050; the FastAPI
+      # port has run alongside it on 5051 during the migration. Cutover:
+      # this now claims 5050 directly — the Flask container must be
+      # stopped BEFORE this is redeployed, or the two will collide on the
+      # same host port.
+      - "5050:5050"
     env_file:
       - .env
     restart: unless-stopped
