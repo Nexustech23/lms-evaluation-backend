@@ -31,6 +31,7 @@ from google.genai import types as google_genai_types
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.schemas.interactive_lesson import InteractiveLesson, lesson_block_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -496,12 +497,180 @@ def log_style_requirement_gaps(notes: Dict[str, Any], dominant_style: str, week:
             )
 
 
+def validate_interactive_lesson(notes: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and sanitize the AI lesson DSL without rejecting useful notes.
+
+    A completely valid lesson is retained. If only some generated blocks are
+    malformed, valid blocks are salvaged. If none validate, the interactive
+    section is omitted and the existing notes UI remains the safe fallback.
+    """
+    if not isinstance(notes, dict):
+        return notes
+
+    sanitized = dict(notes)
+    raw_lesson = sanitized.get("interactiveLesson")
+    if not isinstance(raw_lesson, dict):
+        sanitized.pop("interactiveLesson", None)
+        return sanitized
+
+    try:
+        lesson = InteractiveLesson.model_validate(raw_lesson)
+        sanitized["interactiveLesson"] = lesson.model_dump()
+        sanitized["notesSchemaVersion"] = 4
+        return sanitized
+    except Exception as exc:
+        logger.warning("interactive lesson validation failed; attempting block salvage: %s", exc)
+
+    valid_blocks = []
+    for raw_block in raw_lesson.get("blocks", []):
+        try:
+            valid_blocks.append(lesson_block_adapter.validate_python(raw_block).model_dump())
+        except Exception as exc:
+            block_type = raw_block.get("type", "unknown") if isinstance(raw_block, dict) else "unknown"
+            logger.warning("dropping invalid interactive block type=%s: %s", block_type, exc)
+
+    # Preserve only pedagogically complete lessons. Salvaging individual
+    # blocks is useful, but missing mission/context/mastery metadata should
+    # fall back to the existing notes rather than produce another confusing
+    # collection of disconnected cards.
+    if valid_blocks:
+        candidate = dict(raw_lesson)
+        candidate["blocks"] = valid_blocks[:12]
+        try:
+            lesson = InteractiveLesson.model_validate(candidate)
+            sanitized["interactiveLesson"] = lesson.model_dump()
+            sanitized["notesSchemaVersion"] = 4
+            return sanitized
+        except Exception as exc:
+            logger.warning("salvaged lesson still failed pedagogical validation: %s", exc)
+
+    sanitized.pop("interactiveLesson", None)
+    return sanitized
+
+
+_DOMAIN_GUIDANCE = {
+    "technology": "Use architecture flows, code walkthroughs, dry runs, debugging, and system scenarios only when they genuinely help.",
+    "business": "Use customer/business scenarios, case studies, decisions, comparisons, and meaningful metrics. Do not add code unless the topic requires it.",
+    "quantitative": "Use formula derivation, worked calculations, visual state changes, estimation, and practice problems.",
+    "science": "Use observable processes, cause and effect, classification, experiments, and evidence-based conclusions.",
+    "humanities": "Use timelines, competing perspectives, source/context analysis, arguments, and real-world interpretation.",
+    "general": "Use concrete scenarios, comparisons, guided decisions, reflection, and practical application.",
+}
+
+
+def infer_lesson_domain(subject: str, sub_title: str = "") -> str:
+    """Small deterministic hint for the generator; the lesson remains generic.
+
+    This is intentionally broad rather than a course catalogue. It selects a
+    teaching strategy, not a hard-coded subject component.
+    """
+    text = f"{subject} {sub_title}".lower()
+    keyword_groups = (
+        ("technology", ("computer", "software", "programming", "python", "java", "api", "fastapi", "data structure", "algorithm", "database", "cloud", "cyber", "machine learning", "nlp", "neural")),
+        ("business", ("marketing", "management", "business", "sales", "branding", "customer", "commerce", "entrepreneur", "human resource", "operations")),
+        ("quantitative", ("mathematics", "math", "statistics", "calculus", "algebra", "accounting", "finance", "economics", "probability")),
+        ("science", ("biology", "chemistry", "physics", "medicine", "environment", "anatomy", "ecology")),
+        ("humanities", ("history", "geography", "literature", "language", "political", "sociology", "psychology", "philosophy", "law")),
+    )
+    for domain, keywords in keyword_groups:
+        if any(keyword in text for keyword in keywords):
+            return domain
+    return "general"
+
+
+_GUIDED_LESSON_PROMPT = """  "interactiveLesson": {
+    "schemaVersion": 4,
+    "language": "English",
+    "domain": "__DOMAIN__",
+    "title": "<clear lesson title>",
+    "mission": {
+      "goal": "<what the learner will accomplish>",
+      "whyItMatters": "<practical relevance>",
+      "estimatedMinutes": 25,
+      "successCriteria": ["<observable criterion 1>", "<criterion 2>"]
+    },
+    "prerequisites": ["<what to know first, or 'No prior knowledge required'>"],
+    "learningOutcomes": ["<I can... outcome 1>", "<outcome 2>"],
+    "keyTerms": [
+      {"term":"<term>","meaning":"<plain-English meaning>","example":"<short example>"},
+      {"term":"<term 2>","meaning":"<meaning>","example":"<example>"}
+    ],
+    "anchorExample": {
+      "title": "<meaningful example name>",
+      "context": "<what the example represents>",
+      "whyChosen": "<why this example helps this learner understand the concept>"
+    },
+    "visualAid": {
+      "kind": "grid",
+      "title": "<what the learner is looking at>",
+      "purpose": "<how this visual makes the core relationship concrete>",
+      "columnHeaders": ["<column 1>", "<column 2>"],
+      "rows": [
+        {"label":"<row 1>","values":["<value>","<value>"]},
+        {"label":"<row 2>","values":["<value>","<value>"]}
+      ],
+      "interactionPrompt": "<what the learner should click and notice>",
+      "caption": "<the important pattern revealed by the visual>"
+    },
+    "blocks": [],
+    "summary": {
+      "keyTakeaways": ["<takeaway 1>", "<takeaway 2>", "<takeaway 3>"],
+      "masteryChecklist": ["<I can... check 1>", "<check 2>"],
+      "nextStep": "<what to study or practise next>"
+    }
+  }
+}
+
+Populate blocks with exactly 5 items in teaching order. Use ONLY these exact block schemas:
+- {"type":"concept","title":"...","simpleExplanation":"...","whyItMatters":"...","realWorldConnection":"..."}
+- {"type":"mental_model","title":"...","analogy":"...","explanation":"...","remember":"..."}
+- {"type":"worked_example","title":"...","scenario":"...","exampleReason":"...","steps":[{"label":"...","action":"...","explanation":"...","result":"..."}],"outcome":"..."}
+- {"type":"guided_walkthrough","title":"...","purpose":"...","example":"...","exampleReason":"...","steps":[{"focus":"...","action":"...","state":"...","why":"..."}],"conclusion":"..."}
+- {"type":"formula_walkthrough","title":"...","formula":"...","explanation":"...","steps":[{"label":"...","expression":"...","result":"...","explanation":"..."}]}
+- {"type":"comparison","title":"...","columns":[{"heading":"...","points":["..."]},{"heading":"...","points":["..."]}],"conclusion":"..."}
+- {"type":"code_walkthrough","title":"...","language":"...","code":"...","purpose":"...","steps":[{"line":1,"focus":"...","state":"...","explanation":"..."}],"outcome":"..."}
+- {"type":"common_mistakes","title":"...","items":[{"mistake":"...","whyItHappens":"...","correction":"..."}]}
+- {"type":"practical_activity","title":"...","instructions":"...","steps":["...","..."],"expectedOutcome":"...","reflectionQuestion":"..."}
+- {"type":"case_study","title":"...","scenario":"...","facts":["...","..."],"decision":"...","recommendedApproach":"...","reasoning":"..."}
+- {"type":"debugging_lab","title":"...","scenario":"...","brokenExample":"...","hints":["..."],"solution":"...","explanation":"..."}
+- {"type":"parameter_explorer","title":"...","prompt":"...","parameterLabel":"...","options":[{"value":"...","label":"...","effect":"..."}]}
+- {"type":"prediction","title":"...","question":"...","options":["...","..."],"correctAnswerIndex":0,"explanation":"..."}
+- {"type":"quick_check","title":"...","question":"...","options":["...","..."],"correctAnswerIndex":0,"explanation":"..."}
+
+GUIDED-LESSON RULES:
+- Keep the entire response below 4,000 words. Each prose field must be at most 70 words, each list at most 5 items, and each walkthrough/worked example at most 5 steps.
+- Do not repeat content across summary, detailedExplanation, and interactiveLesson. Put teaching depth in interactiveLesson and keep legacy reference fields brief.
+- Write every field in clear English. Never use Hinglish or unexplained jargon.
+- Assume no prior knowledge at Beginner difficulty. Define a technical term before any block uses it.
+- Build one coherent narrative around anchorExample. Never introduce a random input, person, string, number, or scenario without explaining what it represents and why it was selected.
+- visualAid is required and must make the lesson's core relationship visible with meaningful, domain-specific data. It is a learning model, not decoration.
+- Select exactly one approved visual kind: grid, table, sequence, flow, timeline, or hierarchy. Use grid for arrays/matrices/spatial coordinates; table for comparisons or metrics; sequence for ordered transformations; flow for processes/funnels/system movement; timeline for dated change; hierarchy for levels, categories, or parent-child relationships.
+- For grid/table, include 1-6 columnHeaders and 1-6 rows; every row's values array must exactly match the number of headers. For sequence/flow/timeline/hierarchy, replace columnHeaders and rows with "items":[{"label":"...","value":"...","description":"...","level":0}] and include 2-10 ordered items. A hierarchy must start at level 0 and may increase only one level at a time.
+- Keep visual labels and values short enough to scan. interactionPrompt must tell the learner what to click or compare; caption must explain the pattern they should discover.
+- Use this five-stage sequence: (1) concept or mental_model, (2) worked_example or guided_walkthrough, (3) one domain-appropriate application, (4) common_mistakes or comparison, (5) prediction or quick_check.
+- A walkthrough step must state the current focus, what happens, the resulting state when applicable, and why it happens. Its conclusion must show the final result explicitly.
+- Use code_walkthrough/debugging_lab only when code is inherently relevant. Use case_study for business decisions, formula_walkthrough for calculations, and practical_activity for hands-on application.
+- Include common_mistakes where useful. Keep each block focused enough for one screen.
+- Do not output HTML, JavaScript, generated UI code, unsupported block types, or executable expressions. The React client owns all behavior.
+- Domain teaching guidance: __DOMAIN_GUIDANCE__"""
+
+
+def build_guided_lesson_schema_prompt(domain: str) -> str:
+    return (
+        _GUIDED_LESSON_PROMPT
+        .replace("__DOMAIN__", domain)
+        .replace("__DOMAIN_GUIDANCE__", _DOMAIN_GUIDANCE[domain])
+    )
+
+
 def build_notes_prompt(
     subject: str, week_title: str, sub_title: str, sub_summary: str, key_points: List[str],
     dominant_style: str, difficulty: str,
     grounding_context: Optional[str] = None,
     goal: Optional[str] = None,
 ) -> str:
+    lesson_domain = infer_lesson_domain(subject, sub_title)
+    guided_lesson_prompt = build_guided_lesson_schema_prompt(lesson_domain)
     grounding_block = (
         f"""
 ## Course Material (ground the notes in this real content where relevant)
@@ -521,15 +690,14 @@ def build_notes_prompt(
     interview_tips_field = (
         """  "interviewTips": [
     "<High-frequency interview question or tip related to this subtopic>",
-    "<tip 2>",
-    "<tip 3>"
+    "<tip 2>"
   ],
 """
         if include_interview_tips
         else ""
     )
-    return f"""You are a senior technical educator writing premium self-study notes personalized to
-this student's learning style and level.
+    return f"""You are an expert educator writing a coherent, premium self-study lesson personalized
+to this student's learning style, level, goal, and course domain.
 
 ## Context
 Subject: {subject}
@@ -537,6 +705,8 @@ Week: {week_title}
 Subtopic: {sub_title}
 Overview: {sub_summary}
 Key Points to Cover: {json.dumps(key_points)}
+Student Goal: {goal or "General learning and practical understanding"}
+Suggested Domain Family: {lesson_domain}
 
 ## Personalization (apply throughout every section below, not just the summary)
 Learning style — {dominant_style}: {style_note}
@@ -544,25 +714,23 @@ Difficulty — {difficulty}: {difficulty_note}
 {grounding_block}
 
 ## Task
-Write **comprehensive, student-friendly study notes** for the subtopic "{sub_title}".
-The notes must help a student both understand and apply the concept.
+Write a **complete but concise, student-friendly guided lesson** for the subtopic "{sub_title}".
+The interactiveLesson is the primary teaching experience. Legacy fields before it are compact reference
+material only; do not repeat the same explanation in both places.
 
 Return ONLY a valid JSON object (no prose, no markdown wrapper) with this exact schema:
 
 {{
-  "summary": "<3-5 sentence engaging overview of what this subtopic covers and why it matters>",
+  "summary": "<2-3 sentence engaging overview of what this subtopic covers and why it matters>",
   "detailedExplanation": [
-    {{ "heading": "<Section title, e.g. What is it?>", "content": "<2-4 paragraphs for this section>" }},
-    {{ "heading": "<Section title, e.g. How it works>", "content": "<2-4 paragraphs>" }},
-    {{ "heading": "<Section title, e.g. Real-world example>", "content": "<2-4 paragraphs>" }},
-    {{ "heading": "<Section title, e.g. When to use it>", "content": "<2-4 paragraphs>" }}
+    {{ "heading": "<What it is>", "content": "<one concise paragraph, maximum 100 words>" }},
+    {{ "heading": "<How and when it is used>", "content": "<one concise paragraph, maximum 100 words>" }}
   ],
   "keyPoints": [
     "<Concise, memorable bullet — start with a verb>",
     "<point 2>",
     "<point 3>",
-    "<point 4>",
-    "<point 5>"
+    "<point 4>"
   ],
   "formulasOrRules": [
     {{
@@ -572,19 +740,18 @@ Return ONLY a valid JSON object (no prose, no markdown wrapper) with this exact 
     }}
   ],
   "codeExample": {{
-    "language": "<programming language or 'N/A'>",
-    "code": "<relevant code snippet or 'N/A' if not applicable>",
-    "explanation": "<Line-by-line or block-by-block walkthrough>"
+      "language": "<programming language or 'N/A'>",
+      "code": "<relevant code snippet of at most 25 lines, or 'N/A' when code is not inherent to this topic>",
+      "explanation": "<Line-by-line walkthrough, or why code is not applicable>"
   }},
   "commonMistakes": [
     "<Mistake students commonly make and how to avoid it>",
-    "<mistake 2>",
-    "<mistake 3>"
+    "<mistake 2>"
   ],
 {interview_tips_field}  "revisionChecklist": [
     "<I can explain ... >",
-    "<I can implement ... >",
-    "<I can identify ... >"
+    "<I can apply ... >",
+    "<I can evaluate or identify ... >"
   ],
   "conceptDiagram": {(
       '"<A Mermaid graph TD/LR diagram source string illustrating this subtopic'
@@ -594,10 +761,9 @@ Return ONLY a valid JSON object (no prose, no markdown wrapper) with this exact 
   "handsOnTask": {(
       '{ "title": "<short hands-on task title>", '
       '"steps": ["<concrete step 1>", "<step 2>", "<step 3>", "... at least 3 steps>"], '
-      '"expectedOutcome": "<what the student should observe or produce when done>" } '
-      '— REQUIRED with at least 3 concrete steps since Kinesthetic is the dominant style.'
-  ) if dominant_style == "Kinesthetic" else '{ "title": "", "steps": [], "expectedOutcome": "" }'}
-}}
+      '"expectedOutcome": "<what the student should observe or produce when done>" }'
+  ) if dominant_style == "Kinesthetic" else '{ "title": "", "steps": [], "expectedOutcome": "" }'},
+{guided_lesson_prompt}
 
 {MERMAID_SYNTAX_RULES if dominant_style == "Visual" else ""}"""
 

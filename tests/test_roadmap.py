@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 from bson import ObjectId
@@ -12,11 +13,14 @@ from app.models.roadmap import create_roadmap_document
 from app.services.rag.mongo_store import find_document_by_id
 from app.services.rag.schemas import DocType, DocumentRecord, SourceFormat
 from app.services.roadmap_ai import (
+    build_notes_prompt,
     _dominant_vark_style,
     _is_valid_mermaid_diagram,
     _normalize_difficulty,
     _normalize_vark,
     _split_question_counts,
+    infer_lesson_domain,
+    validate_interactive_lesson,
 )
 from tests.test_security_fixes import _seed_and_login_user
 
@@ -215,8 +219,14 @@ async def test_notes_generates_and_caches_per_style_and_difficulty(client_factor
         assert body["cached"] is False
         assert body["style"] == "Auditory"
         assert body["difficulty"] == "Difficult"
-        assert body["notes"] == fake_notes
+        assert body["notes"]["summary"] == fake_notes["summary"]
+        assert body["notes"]["notesSchemaVersion"] == 4
+        assert body["notes"]["conceptDiagram"] == ""
         assert mock_gen.call_count == 1
+
+        stored = await test_db["selfLearnerRoadmaps"].find_one({"_id": ObjectId(roadmap_id)})
+        stored_notes = stored["weeks"][0]["subtopics"][0]["notes"]
+        assert "v4-English-Auditory-Difficult" in stored_notes
 
         # Same blend/difficulty again -> served from cache, AI not called again
         resp2 = await learner.get(
@@ -236,6 +246,237 @@ async def test_notes_generates_and_caches_per_style_and_difficulty(client_factor
         assert resp3.json()["cached"] is False
         assert resp3.json()["style"] == "Visual"
         assert mock_gen.call_count == 2
+
+
+def test_notes_prompt_exposes_only_supported_interactive_blocks():
+    prompt = build_notes_prompt(
+        "Machine Learning", "Neural Networks", "Backpropagation", "Update weights.",
+        ["Gradients"], "Visual", "Beginner",
+    )
+    assert '"schemaVersion": 4' in prompt
+    assert '"visualAid"' in prompt
+    assert "Use grid for arrays/matrices/spatial coordinates" in prompt
+    assert '"language": "English"' in prompt
+    assert '"type":"guided_walkthrough"' in prompt
+    assert '"type":"parameter_explorer"' in prompt
+    assert "exactly 5 items in teaching order" in prompt
+    assert "entire response below 4,000 words" in prompt
+    assert "Do not output HTML, JavaScript" in prompt
+
+
+def test_lesson_domain_inference_supports_technical_and_non_technical_courses():
+    assert infer_lesson_domain("Computer Science", "FastAPI") == "technology"
+    assert infer_lesson_domain("Digital Marketing", "Customer Segmentation") == "business"
+    assert infer_lesson_domain("Finance", "Compound Interest") == "quantitative"
+    assert infer_lesson_domain("History", "Industrial Revolution") == "humanities"
+
+
+def test_marketing_prompt_selects_business_teaching_without_forcing_code():
+    prompt = build_notes_prompt(
+        "Digital Marketing", "Audience Strategy", "Customer Segmentation",
+        "Group customers using meaningful characteristics.", ["Segments", "Campaign fit"],
+        "Reading", "Beginner",
+    )
+    assert "Suggested Domain Family: business" in prompt
+    assert '"domain": "business"' in prompt
+    assert "Do not add code unless the topic requires it" in prompt
+
+
+def test_notes_prompt_json_schema_stays_valid_for_every_learning_style():
+    for style in ("Visual", "Auditory", "Reading", "Kinesthetic"):
+        prompt = build_notes_prompt(
+            "General Science", "Foundations", "Observation", "Observe a process.",
+            ["Evidence"], style, "Beginner",
+        )
+        start = prompt.index("{", prompt.index("with this exact schema:"))
+        end = prompt.index("\n\nPopulate blocks", start)
+        schema = json.loads(prompt[start:end])
+        assert schema["interactiveLesson"]["schemaVersion"] == 4
+        assert schema["interactiveLesson"]["visualAid"]["kind"] == "grid"
+
+
+def _valid_guided_lesson(domain="technology"):
+    return {
+        "schemaVersion": 4,
+        "language": "English",
+        "domain": domain,
+        "title": "Understand one complete example",
+        "mission": {
+            "goal": "Understand and apply the concept.",
+            "whyItMatters": "It supports practical decisions.",
+            "estimatedMinutes": 25,
+            "successCriteria": ["Explain the idea", "Apply it to an example"],
+        },
+        "prerequisites": ["No prior knowledge required"],
+        "learningOutcomes": ["Explain the concept", "Apply the process"],
+        "keyTerms": [
+            {"term": "Input", "meaning": "Information used by a process."},
+            {"term": "Result", "meaning": "The outcome after the process."},
+        ],
+        "anchorExample": {
+            "title": "A small practical example",
+            "context": "A learner follows one input through the complete process.",
+            "whyChosen": "The values are small enough to inspect at every step.",
+        },
+        "visualAid": {
+            "kind": "sequence",
+            "title": "Follow one input",
+            "purpose": "Make each stage and its result visible.",
+            "items": [
+                {"label": "Input", "value": "Start", "description": "The information entering the process.", "level": 0},
+                {"label": "Result", "value": "Finish", "description": "The outcome after the process.", "level": 0},
+            ],
+            "interactionPrompt": "Select each stage in order.",
+            "caption": "The result depends on passing the input through every required stage.",
+        },
+        "blocks": [
+            {
+                "type": "concept", "title": "The core idea",
+                "simpleExplanation": "Start with a plain-language definition.",
+                "whyItMatters": "It explains the rest of the process.",
+            },
+            {
+                "type": "mental_model", "title": "A useful model",
+                "analogy": "Think of a labelled path.",
+                "explanation": "Each stage has one purpose.",
+                "remember": "Understand the reason before memorising a step.",
+            },
+            {
+                "type": "worked_example", "title": "Follow the example",
+                "scenario": "Process one small input.",
+                "exampleReason": "It keeps every change visible.",
+                "steps": [
+                    {"label": "Begin", "action": "Read the input.", "explanation": "The process needs a starting value."},
+                    {"label": "Finish", "action": "Produce the result.", "explanation": "All required steps are complete."},
+                ],
+                "outcome": "The learner can explain the complete path.",
+            },
+            {
+                "type": "common_mistakes", "title": "Avoid this",
+                "items": [{"mistake": "Memorising without context", "whyItHappens": "The example was not connected to a goal.", "correction": "State the purpose first."}],
+            },
+            {
+                "type": "quick_check", "title": "Check your understanding",
+                "question": "What should come before memorisation?",
+                "options": ["Understanding the purpose", "Skipping the example"],
+                "correctAnswerIndex": 0,
+                "explanation": "Purpose gives each step meaning.",
+            },
+        ],
+        "summary": {
+            "keyTakeaways": ["Start with purpose", "Follow one example", "Check understanding"],
+            "masteryChecklist": ["I can explain the idea", "I can apply the process"],
+            "nextStep": "Practise with a different example.",
+        },
+    }
+
+
+def test_interactive_lesson_validation_keeps_valid_blocks_and_drops_invalid_ones():
+    lesson = _valid_guided_lesson()
+    lesson["blocks"].append({"type": "invented_widget", "title": "Unsafe"})
+    notes = {"summary": "Learn by exploring.", "interactiveLesson": lesson}
+
+    validated = validate_interactive_lesson(notes)
+
+    assert validated["notesSchemaVersion"] == 4
+    assert len(validated["interactiveLesson"]["blocks"]) == 5
+    assert all(block["type"] != "invented_widget" for block in validated["interactiveLesson"]["blocks"])
+
+
+def test_business_lesson_accepts_a_domain_specific_case_study():
+    lesson = _valid_guided_lesson("business")
+    lesson["anchorExample"] = {
+        "title": "Online clothing store",
+        "context": "The store needs a campaign for repeat customers.",
+        "whyChosen": "It connects segmentation to a familiar business decision.",
+    }
+    lesson["blocks"][3] = {
+        "type": "case_study",
+        "title": "Choose a customer campaign",
+        "scenario": "A store has new, repeat, and inactive customers.",
+        "facts": ["Repeat customers convert more often", "Inactive customers need a reason to return"],
+        "decision": "Which segment should receive a loyalty offer?",
+        "recommendedApproach": "Target repeat customers with the loyalty offer.",
+        "reasoning": "The offer reinforces existing purchase behaviour and supports retention.",
+    }
+
+    validated = validate_interactive_lesson({"interactiveLesson": lesson})
+
+    assert validated["interactiveLesson"]["domain"] == "business"
+    assert validated["interactiveLesson"]["blocks"][3]["type"] == "case_study"
+
+
+def test_visual_aid_accepts_an_interactive_array_grid():
+    lesson = _valid_guided_lesson()
+    lesson["visualAid"] = {
+        "kind": "grid",
+        "title": "A 2 by 3 array",
+        "purpose": "Show how row and column coordinates meet at one value.",
+        "columnHeaders": ["Column 0", "Column 1", "Column 2"],
+        "rows": [
+            {"label": "Row 0", "values": ["4", "8", "2"]},
+            {"label": "Row 1", "values": ["7", "1", "9"]},
+        ],
+        "interactionPrompt": "Select a cell and identify its row and column.",
+        "caption": "Each value has two coordinates: its row first and its column second.",
+    }
+
+    validated = validate_interactive_lesson({"interactiveLesson": lesson})
+
+    visual = validated["interactiveLesson"]["visualAid"]
+    assert visual["kind"] == "grid"
+    assert visual["rows"][1]["values"][2] == "9"
+
+
+def test_visual_aid_accepts_a_marketing_metrics_table():
+    lesson = _valid_guided_lesson("business")
+    lesson["visualAid"] = {
+        "kind": "table",
+        "title": "Campaign performance",
+        "purpose": "Compare the same meaningful metrics across two campaigns.",
+        "columnHeaders": ["Click rate", "Conversion rate"],
+        "rows": [
+            {"label": "Campaign A", "values": ["4%", "2%"]},
+            {"label": "Campaign B", "values": ["3%", "5%"]},
+        ],
+        "interactionPrompt": "Select values and compare which campaign converts better.",
+        "caption": "A higher click rate does not automatically mean a higher conversion rate.",
+    }
+
+    validated = validate_interactive_lesson({"interactiveLesson": lesson})
+
+    assert validated["interactiveLesson"]["visualAid"]["kind"] == "table"
+
+
+def test_visual_aid_rejects_grid_rows_with_wrong_dimensions():
+    lesson = _valid_guided_lesson()
+    lesson["visualAid"] = {
+        "kind": "grid",
+        "title": "Broken grid",
+        "purpose": "This grid has mismatched dimensions.",
+        "columnHeaders": ["Column 0", "Column 1"],
+        "rows": [{"label": "Row 0", "values": ["Only one value"]}],
+        "interactionPrompt": "Select a cell.",
+        "caption": "This should not be shown.",
+    }
+
+    validated = validate_interactive_lesson({"interactiveLesson": lesson})
+
+    assert "interactiveLesson" not in validated
+
+
+def test_interactive_lesson_validation_omits_section_when_no_block_is_valid():
+    notes = {
+        "summary": "Still useful as ordinary notes.",
+        "interactiveLesson": {
+            "schemaVersion": 4,
+            "blocks": [{"type": "quick_check", "title": "Broken"}],
+        },
+    }
+
+    validated = validate_interactive_lesson(notes)
+
+    assert "interactiveLesson" not in validated
 
 
 async def test_notes_week_locked(client_factory, test_db):

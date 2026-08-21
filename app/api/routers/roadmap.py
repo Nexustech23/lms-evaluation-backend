@@ -82,6 +82,7 @@ from app.services.roadmap_ai import (
     is_claude_overloaded_error,
     is_gemini_quota_error,
     log_style_requirement_gaps,
+    validate_interactive_lesson,
     validate_and_repair_diagram,
     _dominant_vark_style,
     _normalize_difficulty,
@@ -94,6 +95,8 @@ router = APIRouter(prefix="/api/self-learner/roadmap", dependencies=[Depends(get
 ROADMAP_JOB_PREFIX = "roadmap_job:"
 QUIZ_PASS_THRESHOLD = 50
 MAX_ACTIVITY_DATES = 30
+NOTES_CACHE_VERSION = 4
+NOTES_LANGUAGE = "English"
 
 
 # ============================================================
@@ -654,7 +657,9 @@ async def get_subtopic_notes(
     vark = _normalize_vark(visual, auditory, reading, kinesthetic)
     dominant_style = _dominant_vark_style(vark).capitalize()
     difficulty_norm = _normalize_difficulty(difficulty)
-    cache_key = f"{dominant_style}-{difficulty_norm}"
+    # Version the cache whenever the notes JSON contract changes. Existing
+    # v1 entries remain in MongoDB but are never served as v2 lessons.
+    cache_key = f"v{NOTES_CACHE_VERSION}-{NOTES_LANGUAGE}-{dominant_style}-{difficulty_norm}"
 
     notes_map = subtopic.get("notes")
     notes_map = notes_map if isinstance(notes_map, dict) else {}
@@ -707,11 +712,16 @@ async def get_subtopic_notes(
         logging.error("AI notes response truncated — max_tokens limit hit")
         raise HTTPException(status_code=502, detail="AI response was too long. Try a more specific subtopic.")
 
-    if isinstance(notes, dict):
-        notes["conceptDiagram"] = await validate_and_repair_diagram(
-            notes.get("conceptDiagram"), db, identity["user_id"],
-        )
-        log_style_requirement_gaps(notes, dominant_style, week, subtopic_idx)
+    if not isinstance(notes, dict):
+        logging.error("AI notes response was not a JSON object")
+        raise HTTPException(status_code=502, detail="AI returned an invalid notes format. Please regenerate.")
+
+    notes = validate_interactive_lesson(notes)
+    notes["notesSchemaVersion"] = NOTES_CACHE_VERSION
+    notes["conceptDiagram"] = await validate_and_repair_diagram(
+        notes.get("conceptDiagram"), db, identity["user_id"],
+    )
+    log_style_requirement_gaps(notes, dominant_style, week, subtopic_idx)
 
     await db["selfLearnerRoadmaps"].update_one(
         {"_id": roadmap_object_id, "user_id": user_object_id},
