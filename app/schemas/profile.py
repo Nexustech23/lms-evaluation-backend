@@ -48,6 +48,7 @@ class InstituteUpdateRequest(BaseModel):
     institute: Dict[str, Any] = {}
     hasCOAccess: Optional[bool] = None
     hasQPGAccess: Optional[bool] = None
+    hasMyCareerGuruAccess: Optional[bool] = None
 
 
 class FacultyUpdateRequest(BaseModel):

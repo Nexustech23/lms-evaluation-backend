@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import List
+from typing import Dict, List, Tuple
 
 from app.services.rag.schemas import Chunk, new_id
 
@@ -29,7 +29,20 @@ _EMBED_MAX_RETRIES = 5
 _EMBED_MODEL = "gemini-embedding-001"
 
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
+def _chars_to_tokens_estimate(char_count: int) -> int:
+    """
+    Gemini's embed_content API reports billable usage as a character count
+    (EmbedContentResponse.metadata.billableCharacterCount) — it has no
+    prompt_token_count/usage_metadata field the way generate_content does.
+    Approximated here at the same ~4-chars-per-token ratio used elsewhere in
+    this codebase for rough estimates, purely so embedding cost can share
+    the tokens-shaped aiUsageEvents ledger schema every other call site
+    uses. This is an estimate, not what Gemini actually bills on.
+    """
+    return max(1, char_count // 4) if char_count else 0
+
+
+def embed_texts(texts: List[str]) -> Tuple[List[List[float]], int]:
     """
     Blocking call — run via asyncio.to_thread() from async callers.
 
@@ -42,18 +55,25 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     The free tier's ~100 req/min cap on embed_content is consumed per
     embedded item, not per API call, so batches are capped and retried on
     429 honoring the server's retryDelay hint when present.
+
+    Returns (vectors, total_billable_characters) — callers that need to
+    track usage (see app.services.ai_usage.record_ai_usage) should pass the
+    character total through _chars_to_tokens_estimate first.
     """
     from app.services.gemini import _get_client
 
     vectors: List[List[float]] = []
+    total_billable_chars = 0
     client = _get_client()
     for i in range(0, len(texts), _EMBED_BATCH_SIZE):
         batch = texts[i:i + _EMBED_BATCH_SIZE]
-        vectors.extend(_embed_batch_with_retry(client, batch))
-    return vectors
+        batch_vectors, batch_chars = _embed_batch_with_retry(client, batch)
+        vectors.extend(batch_vectors)
+        total_billable_chars += batch_chars
+    return vectors, total_billable_chars
 
 
-def _embed_batch_with_retry(client, batch: List[str]) -> List[List[float]]:
+def _embed_batch_with_retry(client, batch: List[str]) -> Tuple[List[List[float]], int]:
     from google.genai.errors import ClientError
 
     for attempt in range(_EMBED_MAX_RETRIES):
@@ -63,7 +83,8 @@ def _embed_batch_with_retry(client, batch: List[str]) -> List[List[float]]:
                 contents=batch,
                 config={"output_dimensionality": EMBED_DIM},
             )
-            return [e.values for e in resp.embeddings]
+            billable_chars = getattr(resp.metadata, "billableCharacterCount", 0) if resp.metadata else 0
+            return [e.values for e in resp.embeddings], (billable_chars or 0)
         except ClientError as exc:
             if exc.code != 429 or attempt == _EMBED_MAX_RETRIES - 1:
                 raise
@@ -146,10 +167,12 @@ class VectorStore:
                 vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
             )
 
-    def upsert(self, chunks: List[Chunk]) -> None:
+    def upsert(self, chunks: List[Chunk]) -> Dict[str, int]:
+        """Returns a tokens-shaped usage dict for the embedding calls this
+        made — see _chars_to_tokens_estimate for why it's an estimate."""
         from qdrant_client.models import PointStruct
 
-        vectors = embed_texts([c.text for c in chunks])
+        vectors, billable_chars = embed_texts([c.text for c in chunks])
         points = [
             PointStruct(
                 id=c.id,
@@ -160,6 +183,7 @@ class VectorStore:
             for c, vec in zip(chunks, vectors)
         ]
         self.client.upsert(collection_name=COLLECTION, points=points)
+        return {"input_tokens": _chars_to_tokens_estimate(billable_chars), "output_tokens": 0}
 
     def has_chunks(self, doc_id: str) -> bool:
         """Cheap existence check — no embedding call needed, unlike search()."""
@@ -182,10 +206,15 @@ class VectorStore:
             points_selector=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
         )
 
-    def search(self, query: str, doc_id: str, top_k: int = 4):
+    def search(self, query: str, doc_id: str, top_k: int = 4) -> Tuple[list, Dict[str, int]]:
+        """Returns (points, usage) — usage covers the single query-embedding
+        call this made (see _chars_to_tokens_estimate for why it's an
+        estimate)."""
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        vec = embed_texts([query])[0]
+        vectors, billable_chars = embed_texts([query])
+        vec = vectors[0]
+        usage = {"input_tokens": _chars_to_tokens_estimate(billable_chars), "output_tokens": 0}
         # `.search()` was removed in qdrant-client >=1.10 in favor of `.query_points()`,
         # which wraps results in a QueryResponse (`.points`) instead of returning a bare list.
         response = self.client.query_points(
@@ -194,4 +223,4 @@ class VectorStore:
             query_filter=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
             limit=top_k,
         )
-        return response.points
+        return response.points, usage

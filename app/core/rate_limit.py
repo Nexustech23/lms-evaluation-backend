@@ -107,5 +107,8 @@ class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
 # Ready-made instances — import these directly into routers.
 login_rate_limit = RateLimitByIP(settings.RATE_LIMIT_AUTH_PER_MINUTE, "auth")
 contact_rate_limit = RateLimitByIP(settings.RATE_LIMIT_AUTH_PER_MINUTE, "contact")
+# Own name/key so a burst of MyCareerGuru signups never throttles login
+# attempts (or vice versa) from the same IP.
+mycareerguru_register_rate_limit = RateLimitByIP(settings.RATE_LIMIT_AUTH_PER_MINUTE, "mycareerguru-register")
 ai_rate_limit = RateLimitByUser(settings.RATE_LIMIT_AI_PER_MINUTE, "ai")
 bulk_grading_rate_limit = RateLimitByUser(settings.RATE_LIMIT_BULK_GRADING_PER_MINUTE, "bulk-grading")

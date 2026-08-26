@@ -46,6 +46,7 @@ def create_school_document(data: Dict[str, Any], created_by: str) -> Dict[str, A
 
         "is_active": True,
         "is_deleted": False,
+        "mycareerguru_enabled": bool(data.get("mycareerguru_enabled", False)),
 
         "created_by": ObjectId(created_by) if ObjectId.is_valid(created_by) else created_by,
         "updated_by": None,
@@ -63,7 +64,7 @@ def update_school_document(data: Dict[str, Any], updated_by: str) -> Dict[str, A
 
     allowed_fields = [
         "school_name", "school_code", "description", "image_url",
-        "established_year", "is_active", "is_deleted",
+        "established_year", "is_active", "is_deleted", "mycareerguru_enabled",
     ]
 
     for field in allowed_fields:
@@ -73,6 +74,8 @@ def update_school_document(data: Dict[str, Any], updated_by: str) -> Dict[str, A
                     update_fields[field] = int(data[field])
                 except ValueError:
                     raise ValueError("established_year must be a number")
+            elif field == "mycareerguru_enabled":
+                update_fields[field] = bool(data[field])
             else:
                 update_fields[field] = data[field]
 
@@ -95,6 +98,7 @@ def serialize_school(doc: Dict[str, Any]) -> Dict[str, Any] | None:
 
         "is_active": doc.get("is_active", True),
         "is_deleted": doc.get("is_deleted", False),
+        "mycareerguru_enabled": doc.get("mycareerguru_enabled", False),
 
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),

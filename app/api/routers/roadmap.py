@@ -47,9 +47,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
-from app.api.deps import get_current_identity
+from app.api.deps import get_current_identity, require_mycareerguru_access
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
+from app.models.ai_usage_event import Feature, Provider
 from app.models.roadmap import create_roadmap_document, serialize_roadmap
 from app.schemas.roadmap import (
     CreateRoadmapRequest,
@@ -59,6 +60,7 @@ from app.schemas.roadmap import (
     SubmitQuizRequest,
     UpdateSubtopicRequest,
 )
+from app.services.ai_usage import record_ai_usage
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
 from app.services.rag import mongo_store as rag_mongo_store
@@ -77,9 +79,6 @@ from app.services.roadmap_ai import (
     generate_claude_json,
     generate_curriculum,
     generate_gemini_json,
-    increment_student_claude_tokens,
-    increment_student_gemini_tokens,
-    is_claude_overloaded_error,
     is_gemini_quota_error,
     log_style_requirement_gaps,
     validate_interactive_lesson,
@@ -90,7 +89,11 @@ from app.services.roadmap_ai import (
     _split_question_counts,
 )
 
-router = APIRouter(prefix="/api/self-learner/roadmap", dependencies=[Depends(get_current_identity)], tags=["roadmap"])
+router = APIRouter(
+    prefix="/api/self-learner/roadmap",
+    dependencies=[Depends(get_current_identity), Depends(require_mycareerguru_access)],
+    tags=["roadmap"],
+)
 
 ROADMAP_JOB_PREFIX = "roadmap_job:"
 QUIZ_PASS_THRESHOLD = 50
@@ -390,7 +393,11 @@ async def _run_create_roadmap_job(
             await update_job(ROADMAP_JOB_PREFIX, job_id, {"status": "error", "error": f"AI generation failed: {e}"})
             return
 
-        await increment_student_claude_tokens(db, user_id, usage)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-5",
+            feature=Feature.ROADMAP_CURRICULUM, usage=usage,
+            grounded=grounding_context is not None, job_id=job_id,
+        )
 
         if truncated:
             logging.error("Claude curriculum response truncated — max_tokens limit hit (job %s)", job_id)
@@ -468,7 +475,10 @@ async def generate_pre_assessment(
         logging.error("generate_pre_assessment_quiz_controller: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"AI quiz generation failed: {e}")
 
-    await increment_student_gemini_tokens(db, identity["user_id"], usage)
+    await record_ai_usage(
+        db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+        feature=Feature.ROADMAP_PRE_ASSESSMENT, usage=usage,
+    )
 
     if truncated:
         logging.error("Gemini pre-assessment response truncated — MAX_TOKENS limit hit")
@@ -684,29 +694,36 @@ async def get_subtopic_notes(
     )
 
     try:
-        # 10000, not a smaller flat budget — content-heavy notes (Visual-
-        # dominant style's concept diagram, Kinesthetic's hands-on task,
-        # interview-goal tips, etc.) routinely need more than a few thousand
-        # tokens; a too-small flat budget was silently truncating responses.
-        notes, usage, truncated = await asyncio.to_thread(generate_claude_json, prompt, 10000)
-        await increment_student_claude_tokens(db, identity["user_id"], usage)
-    except anthropic.APIError as e:
-        if not is_claude_overloaded_error(e):
-            logging.error("generate_subtopic_notes: Anthropic API error: %s", e)
+        notes, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.ROADMAP_NOTES, usage=usage, grounded=grounding_context is not None,
+        )
+    except Exception as e:
+        if not is_gemini_quota_error(e):
+            logging.error("generate_subtopic_notes: Gemini error: %s", e, exc_info=True)
             raise HTTPException(status_code=502, detail=f"AI notes generation failed: {e}")
 
-        # Claude overloaded/rate-limited — fail over to Gemini rather than
-        # block notes generation entirely. Same prompt works unmodified: both
+        # Gemini quota exhausted — fail over to Claude rather than block
+        # notes generation entirely. Same prompt works unmodified: both
         # generators return the same (data, usage, truncated) shape, and
         # extract_json handles a top-level JSON object from either provider
         # identically.
-        logging.warning("generate_subtopic_notes: Claude overloaded, falling back to Gemini: %s", e)
+        logging.warning("generate_subtopic_notes: Gemini quota exceeded, falling back to Claude: %s", e)
         try:
-            notes, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
+            # 10000, not a smaller flat budget — content-heavy notes (Visual-
+            # dominant style's concept diagram, Kinesthetic's hands-on task,
+            # interview-goal tips, etc.) routinely need more than a few
+            # thousand tokens; a too-small flat budget was silently
+            # truncating responses.
+            notes, usage, truncated = await asyncio.to_thread(generate_claude_json, prompt, 10000)
         except Exception as e2:
-            logging.error("generate_subtopic_notes: Gemini fallback also failed: %s", e2)
+            logging.error("generate_subtopic_notes: Claude fallback also failed: %s", e2, exc_info=True)
             raise HTTPException(status_code=502, detail=f"AI notes generation failed: {e2}")
-        await increment_student_gemini_tokens(db, identity["user_id"], usage)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.CLAUDE, model="claude-sonnet-4-5",
+            feature=Feature.ROADMAP_NOTES, usage=usage, grounded=grounding_context is not None,
+        )
 
     if truncated:
         logging.error("AI notes response truncated — max_tokens limit hit")
@@ -811,7 +828,10 @@ async def get_subtopic_resources(
     prompt = build_learning_resources_prompt(topic, candidates_by_category)
     try:
         picks, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
-        await increment_student_gemini_tokens(db, identity["user_id"], usage)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.ROADMAP_RESOURCES, usage=usage,
+        )
     except Exception as e:
         if not is_gemini_quota_error(e):
             logging.error("get_subtopic_resources: %s", e, exc_info=True)
@@ -826,7 +846,10 @@ async def get_subtopic_resources(
         except anthropic.APIError as e2:
             logging.error("get_subtopic_resources: Claude fallback also failed: %s", e2)
             raise HTTPException(status_code=502, detail=f"Learning resources fetch failed: {e2}")
-        await increment_student_claude_tokens(db, identity["user_id"], usage)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.CLAUDE, model="claude-sonnet-4-5",
+            feature=Feature.ROADMAP_RESOURCES, usage=usage,
+        )
 
     if truncated:
         logging.error("Learning resources response truncated — MAX_TOKENS limit hit")
@@ -906,7 +929,10 @@ async def generate_auto_test(
 
     try:
         questions, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
-        await increment_student_gemini_tokens(db, identity["user_id"], usage)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.ROADMAP_QUIZ_GENERATE, usage=usage, grounded=grounding_context is not None,
+        )
     except Exception as e:
         if not is_gemini_quota_error(e):
             logging.error("generate_auto_test: %s", e, exc_info=True)
@@ -922,7 +948,10 @@ async def generate_auto_test(
         except anthropic.APIError as e2:
             logging.error("generate_auto_test: Claude fallback also failed: %s", e2)
             raise HTTPException(status_code=502, detail=f"AI test generation failed: {e2}")
-        await increment_student_claude_tokens(db, identity["user_id"], usage)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.CLAUDE, model="claude-sonnet-4-5",
+            feature=Feature.ROADMAP_QUIZ_GENERATE, usage=usage, grounded=grounding_context is not None,
+        )
 
     if truncated:
         logging.error("Auto Test response truncated — MAX_TOKENS limit hit")
@@ -1043,7 +1072,10 @@ async def get_practice_questions(
         logging.error("get_practice_questions: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"AI practice question generation failed: {e}")
 
-    await increment_student_gemini_tokens(db, identity["user_id"], usage)
+    await record_ai_usage(
+        db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+        feature=Feature.ROADMAP_PRACTICE_QUESTIONS, usage=usage, grounded=bool(grounding_context),
+    )
 
     if truncated:
         logging.error("Gemini practice questions response truncated — MAX_TOKENS limit hit")
@@ -1117,7 +1149,10 @@ async def evaluate_practice_answer(
         logging.error("evaluate_practice_answer: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Answer evaluation failed: {e}")
 
-    await increment_student_gemini_tokens(db, identity["user_id"], usage)
+    await record_ai_usage(
+        db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+        feature=Feature.ROADMAP_PRACTICE_EVALUATE, usage=usage,
+    )
 
     if truncated or not isinstance(result, dict):
         raise HTTPException(status_code=502, detail="AI evaluation response was incomplete. Please try again.")
@@ -1197,7 +1232,10 @@ async def submit_quiz(
             logging.error("submit_quiz: open-ended grading failed: %s", e, exc_info=True)
             raise HTTPException(status_code=502, detail=f"AI grading failed: {e}")
 
-        await increment_student_gemini_tokens(db, identity["user_id"], usage)
+        await record_ai_usage(
+            db, user_id=identity["user_id"], provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.ROADMAP_QUIZ_GRADING, usage=usage,
+        )
 
         if truncated or not isinstance(grading, list) or len(grading) != len(open_ended_items):
             logging.error(

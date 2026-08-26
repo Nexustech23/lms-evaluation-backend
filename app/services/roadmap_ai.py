@@ -24,14 +24,15 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
-from bson import ObjectId
 from google import genai as google_genai
 from google.genai import types as google_genai_types
 # pyrefly: ignore [missing-import]
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.models.ai_usage_event import Feature, Provider
 from app.schemas.interactive_lesson import InteractiveLesson, lesson_block_adapter
+from app.services.ai_usage import record_ai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -92,37 +93,11 @@ def extract_json(text: str) -> Any:
 
 
 # ============================================================
-# TOKEN TRACKING (per-user — distinct from the shared, institute-scoped
-# helpers in app/utils/token_usage.py, which use a different document
-# shape. Best-effort/non-fatal, matching Flask.)
-# ============================================================
-
-async def increment_student_claude_tokens(db: AsyncIOMotorDatabase, user_id: str, usage: Any) -> None:
-    try:
-        await db["users"].update_one(
-            {"_id": ObjectId(user_id)},
-            {"$inc": {
-                "token_usage.claude.input_tokens": getattr(usage, "input_tokens", 0) or 0,
-                "token_usage.claude.output_tokens": getattr(usage, "output_tokens", 0) or 0,
-            }},
-        )
-    except Exception as e:
-        logger.warning("increment_student_claude_tokens failed (non-fatal): %s", e)
-
-
-async def increment_student_gemini_tokens(db: AsyncIOMotorDatabase, user_id: str, usage_metadata: Any) -> None:
-    try:
-        await db["users"].update_one(
-            {"_id": ObjectId(user_id)},
-            {"$inc": {
-                "token_usage.gemini.input_tokens": getattr(usage_metadata, "prompt_token_count", 0) or 0,
-                "token_usage.gemini.output_tokens": getattr(usage_metadata, "candidates_token_count", 0) or 0,
-            }},
-        )
-    except Exception as e:
-        logger.warning("increment_student_gemini_tokens failed (non-fatal): %s", e)
-
-
+# Token tracking for every self-learner/MyCareerGuru AI call now lives in
+# app.services.ai_usage.record_ai_usage (dual-writes the aiUsageEvents
+# ledger + the users.token_usage rollup this module used to maintain on its
+# own) — distinct from the shared, institute-scoped helpers in
+# app/utils/token_usage.py, which use a different document shape entirely.
 # ============================================================
 # CURRICULUM GENERATION (Claude — create_roadmap background job)
 # ============================================================
@@ -470,7 +445,10 @@ async def validate_and_repair_diagram(
     try:
         prompt = build_mermaid_repair_prompt(diagram)
         repaired, usage = await asyncio.to_thread(generate_claude_text, prompt, 1000)
-        await increment_student_claude_tokens(db, user_id, usage)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-5",
+            feature=Feature.ROADMAP_DIAGRAM_REPAIR, usage=usage,
+        )
     except Exception as e:
         logger.warning("mermaid diagram repair call failed (dropping diagram): %s", e)
         return ""
@@ -497,6 +475,29 @@ def log_style_requirement_gaps(notes: Dict[str, Any], dominant_style: str, week:
             )
 
 
+def _repair_grid_visual_aid(raw_lesson: Dict[str, Any]) -> None:
+    """Best-effort in-place repair for the most common visualAid failure: a
+    grid/table row whose `values` length doesn't match `columnHeaders`. Pads
+    short rows with "" and truncates long ones, rather than losing the
+    entire (mandatory, non-block) visualAid — and therefore the whole
+    interactive lesson — over a cosmetic row/column mismatch."""
+    visual_aid = raw_lesson.get("visualAid")
+    if not isinstance(visual_aid, dict) or visual_aid.get("kind") not in ("grid", "table"):
+        return
+    headers = visual_aid.get("columnHeaders")
+    rows = visual_aid.get("rows")
+    if not isinstance(headers, list) or not isinstance(rows, list):
+        return
+    column_count = len(headers)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        values = row.get("values")
+        if not isinstance(values, list) or len(values) == column_count:
+            continue
+        row["values"] = values[:column_count] + [""] * (column_count - len(values))
+
+
 def validate_interactive_lesson(notes: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and sanitize the AI lesson DSL without rejecting useful notes.
 
@@ -512,6 +513,8 @@ def validate_interactive_lesson(notes: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw_lesson, dict):
         sanitized.pop("interactiveLesson", None)
         return sanitized
+
+    _repair_grid_visual_aid(raw_lesson)
 
     try:
         lesson = InteractiveLesson.model_validate(raw_lesson)

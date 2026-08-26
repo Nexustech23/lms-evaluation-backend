@@ -17,10 +17,12 @@ from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.services.claude import generate_text
 from app.services.rag.mongo_store import load_tree
 from app.services.rag.schemas import RetrievalResult, TreeNode
-from app.services.rag.tree_index import _track_claude_tokens, skeleton_view
+from app.services.rag.tree_index import skeleton_view
 
 logger = logging.getLogger("rag.tree_retriever")
 
@@ -49,7 +51,10 @@ async def retrieve(
     # This node-picking call spends real Claude tokens too — track it under the
     # same user, otherwise token_usage undercounts actual API cost.
     if user_id is not None:
-        await _track_claude_tokens(db, user_id, token_usage)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
+            feature=Feature.RAG_RETRIEVE, usage=token_usage,
+        )
 
     try:
         parsed = json.loads(_strip_fence(text))

@@ -121,3 +121,73 @@ async def test_update_faculty_rejects_non_int_experience(superadmin_client, clie
     institute = await _register_institute_admin(superadmin_client, client_factory, "Faculty Bad Institute")
     resp = await institute.put(f"/faculty/{ObjectId()}", json={"experience_years": "a lot"})
     assert resp.status_code == 422
+
+
+# ============================================================
+# AI USAGE SUMMARY
+# ============================================================
+
+async def test_ai_usage_summary_requires_superadmin(superadmin_client, client_factory):
+    institute = await _register_institute_admin(superadmin_client, client_factory, "AI Usage Non-Admin")
+    resp = await institute.get("/ai-usage")
+    assert resp.status_code == 403
+
+
+async def test_ai_usage_summary_aggregates_across_users_within_window(superadmin_client, test_db):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    user_a, user_b = ObjectId(), ObjectId()
+
+    await test_db["aiUsageEvents"].insert_many([
+        {
+            "user_id": user_a, "tenant_type": "individual", "institute_id": None, "school_id": None,
+            "programme_id": None, "provider": "claude", "model": "claude-sonnet-4-5",
+            "feature": "roadmap_curriculum", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150,
+            "cost_usd": 0.001, "grounded": None, "context_id": None, "job_id": None, "created_at": now,
+        },
+        {
+            "user_id": user_b, "tenant_type": "individual", "institute_id": None, "school_id": None,
+            "programme_id": None, "provider": "claude", "model": "claude-sonnet-4-5",
+            "feature": "roadmap_curriculum", "input_tokens": 200, "output_tokens": 80, "total_tokens": 280,
+            "cost_usd": 0.002, "grounded": None, "context_id": None, "job_id": None, "created_at": now,
+        },
+        # Outside the default 30-day window — must be excluded from totals.
+        {
+            "user_id": user_a, "tenant_type": "individual", "institute_id": None, "school_id": None,
+            "programme_id": None, "provider": "claude", "model": "claude-sonnet-4-5",
+            "feature": "roadmap_curriculum", "input_tokens": 9999, "output_tokens": 9999, "total_tokens": 19998,
+            "cost_usd": 50.0, "grounded": None, "context_id": None, "job_id": None,
+            "created_at": now - timedelta(days=60),
+        },
+    ])
+
+    resp = await superadmin_client.get("/ai-usage")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    row = next(r for r in body["byFeature"] if r["feature"] == "roadmap_curriculum")
+    assert row["total_tokens"] == 430  # 150 + 280, the stale row excluded
+    assert row["call_count"] == 2
+    assert row["distinct_users"] == 2
+
+    assert body["totals"]["total_tokens"] == 430
+
+
+async def test_ai_usage_summary_respects_days_param(superadmin_client, test_db):
+    from datetime import datetime, timedelta, timezone
+
+    old_event = {
+        "user_id": ObjectId(), "tenant_type": "individual", "institute_id": None, "school_id": None,
+        "programme_id": None, "provider": "gemini", "model": "gemini-2.5-flash",
+        "feature": "roadmap_notes", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+        "cost_usd": 0.0001, "grounded": None, "context_id": None, "job_id": None,
+        "created_at": datetime.now(timezone.utc) - timedelta(days=10),
+    }
+    await test_db["aiUsageEvents"].insert_one(old_event)
+
+    resp_wide = await superadmin_client.get("/ai-usage?days=30")
+    assert resp_wide.json()["totals"]["total_tokens"] == 15
+
+    resp_narrow = await superadmin_client.get("/ai-usage?days=5")
+    assert resp_narrow.json()["totals"]["total_tokens"] == 0

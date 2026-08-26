@@ -27,16 +27,24 @@ from typing import Optional, Set, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.api.deps import get_current_identity
+from app.api.deps import get_current_identity, require_mycareerguru_access
 from app.core.rate_limit import ai_rate_limit
+from app.db.mongodb import get_database
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.services.claude import generate_html
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.imagekit import upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
 
-router = APIRouter(prefix="/api/ai-tutor", dependencies=[Depends(get_current_identity)], tags=["ai-tutor"])
+router = APIRouter(
+    prefix="/api/ai-tutor",
+    dependencies=[Depends(get_current_identity), Depends(require_mycareerguru_access)],
+    tags=["ai-tutor"],
+)
 
 HW_JOB_PREFIX = "hw_job:"
 NOTES_JOB_PREFIX = "notes_job:"
@@ -262,22 +270,34 @@ Start with <!DOCTYPE html> and end with </html>."""
 # BACKGROUND JOBS
 # ============================================================
 
-async def _run_homework_job(job_id: str, params: dict, file_bytes: Optional[bytes], filename: str) -> None:
+async def _run_homework_job(
+    job_id: str, params: dict, file_bytes: Optional[bytes], filename: str,
+    db: AsyncIOMotorDatabase, user_id: str,
+) -> None:
     try:
         extracted_text = ""
         if file_bytes:
             await update_job(HW_JOB_PREFIX, job_id, {"status": "processing", "step": "extracting_homework"})
             logging.info("[hw:%s] Extracting file content…", job_id)
-            extracted_text, _ = await asyncio.to_thread(_extract_homework_content, file_bytes, filename)
+            extracted_text, extract_usage = await asyncio.to_thread(_extract_homework_content, file_bytes, filename)
             logging.info("[hw:%s] Extraction done — %d chars", job_id, len(extracted_text))
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                feature=Feature.SELF_REVIEW_HOMEWORK_EXTRACTION, usage=extract_usage, job_id=job_id,
+            )
 
         await update_job(HW_JOB_PREFIX, job_id, {"step": "generating_solution"})
         logging.info("[hw:%s] Calling Claude…", job_id)
         full_prompt = _build_homework_prompt(
             params["prompt"], extracted_text, params["homeworkType"], params["responseStyle"]
         )
-        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, "claude-sonnet-4-20250514", 5000)
+        claude_model = "claude-sonnet-4-20250514"
+        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 5000)
         logging.info("[hw:%s] Claude done — %d tokens", job_id, c_usage["total_tokens"])
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model=claude_model,
+            feature=Feature.SELF_REVIEW_HOMEWORK_HELP, usage=c_usage, job_id=job_id,
+        )
 
         await update_job(HW_JOB_PREFIX, job_id, {"step": "building_pdf"})
         logging.info("[hw:%s] Rendering PDF…", job_id)
@@ -307,14 +327,21 @@ async def _run_homework_job(job_id: str, params: dict, file_bytes: Optional[byte
         await set_job(HW_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
 
 
-async def _run_notes_job(job_id: str, params: dict, file_bytes: Optional[bytes], filename: str) -> None:
+async def _run_notes_job(
+    job_id: str, params: dict, file_bytes: Optional[bytes], filename: str,
+    db: AsyncIOMotorDatabase, user_id: str,
+) -> None:
     try:
         extracted_text = ""
         if file_bytes:
             await update_job(NOTES_JOB_PREFIX, job_id, {"status": "processing", "step": "extracting_notes"})
             logging.info("[notes:%s] Extracting file content…", job_id)
-            extracted_text, _ = await asyncio.to_thread(_extract_study_content, file_bytes, filename)
+            extracted_text, extract_usage = await asyncio.to_thread(_extract_study_content, file_bytes, filename)
             logging.info("[notes:%s] Extraction done — %d chars", job_id, len(extracted_text))
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                feature=Feature.SELF_REVIEW_NOTES_EXTRACTION, usage=extract_usage, job_id=job_id,
+            )
 
         await update_job(NOTES_JOB_PREFIX, job_id, {"step": "generating_notes"})
         logging.info("[notes:%s] Calling Claude…", job_id)
@@ -322,10 +349,15 @@ async def _run_notes_job(job_id: str, params: dict, file_bytes: Optional[bytes],
             params["prompt"], extracted_text, params["notesType"], params["notesLength"]
         )
         max_tokens = _NOTES_LENGTH_TOKENS.get(params["notesLength"], 5000)
+        claude_model = "claude-sonnet-4-20250514"
         html_content, c_usage = await asyncio.to_thread(
-            generate_html, full_prompt, "claude-sonnet-4-20250514", max_tokens
+            generate_html, full_prompt, claude_model, max_tokens
         )
         logging.info("[notes:%s] Claude done — %d tokens", job_id, c_usage["total_tokens"])
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model=claude_model,
+            feature=Feature.SELF_REVIEW_NOTES, usage=c_usage, job_id=job_id,
+        )
 
         await update_job(NOTES_JOB_PREFIX, job_id, {"step": "building_pdf"})
         logging.info("[notes:%s] Rendering PDF…", job_id)
@@ -365,6 +397,8 @@ async def homework_help(
     homeworkType: str = Form("Detailed Solution"),
     responseStyle: str = Form("Simple"),
     file: Optional[UploadFile] = File(None),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
         prompt = prompt.strip()
@@ -390,7 +424,7 @@ async def homework_help(
         await set_job(HW_JOB_PREFIX, job_id, {"status": "processing", "step": "starting", "job_id": job_id})
 
         params = {"prompt": prompt, "homeworkType": homework_type, "responseStyle": response_style}
-        background_tasks.add_task(_run_homework_job, job_id, params, file_bytes, filename)
+        background_tasks.add_task(_run_homework_job, job_id, params, file_bytes, filename, db, identity["user_id"])
 
         logging.info("Homework job %s started.", job_id)
         return JSONResponse(status_code=202, content={
@@ -445,6 +479,8 @@ async def generate_notes(
     notesType: str = Form("Short Notes"),
     notesLength: str = Form("5 Pages"),
     file: Optional[UploadFile] = File(None),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
         prompt = prompt.strip()
@@ -470,7 +506,7 @@ async def generate_notes(
         await set_job(NOTES_JOB_PREFIX, job_id, {"status": "processing", "step": "starting", "job_id": job_id})
 
         params = {"prompt": prompt, "notesType": notes_type, "notesLength": notes_length}
-        background_tasks.add_task(_run_notes_job, job_id, params, file_bytes, filename)
+        background_tasks.add_task(_run_notes_job, job_id, params, file_bytes, filename, db, identity["user_id"])
 
         logging.info("Notes job %s started — type=%s length=%s", job_id, notes_type, notes_length)
         return JSONResponse(status_code=202, content={

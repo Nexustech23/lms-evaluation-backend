@@ -6,7 +6,7 @@
 
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from bson import ObjectId
 
@@ -42,14 +42,18 @@ element must have exactly these fields:
 Generate exactly {question_count} questions."""
 
 
-def generate_mock_test_questions(prompt: str) -> List[Dict[str, Any]]:
+def generate_mock_test_questions(prompt: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     Blocking — run via asyncio.to_thread(). Raises on any failure (invalid JSON,
     wrong shape, or the underlying Claude call failing) — the caller is
     responsible for catching this and setting `generationError` on the mock
     test document, matching Flask's behavior.
+
+    Returns (questions, usage) — the caller is responsible for tracking
+    usage (see app.services.ai_usage.record_ai_usage), matching every other
+    generate_* helper in this codebase.
     """
-    text, _usage = generate_text(prompt, model=MOCK_TEST_MODEL, max_tokens=8192)
+    text, usage = generate_text(prompt, model=MOCK_TEST_MODEL, max_tokens=8192)
 
     cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
     cleaned = re.sub(r"\s*```$", "", cleaned).strip()
@@ -61,4 +65,4 @@ def generate_mock_test_questions(prompt: str) -> List[Dict[str, Any]]:
     for q in questions:
         q["_id"] = str(ObjectId())
 
-    return questions
+    return questions, usage

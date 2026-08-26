@@ -185,3 +185,73 @@ async def test_insight_generates_for_practice_test(client_factory, test_db):
         resp = await learner.post(f"/self-learner/analytics/attempts/practice_test/{attempt_id}/insight")
     assert resp.status_code == 200
     assert resp.json()["questions"][0]["question"] == "What is 2+2?"
+
+
+# ============================================================
+# AI USAGE
+# ============================================================
+
+async def test_ai_usage_requires_auth(client):
+    resp = await client.get("/self-learner/analytics/ai-usage")
+    assert resp.status_code == 401
+
+
+async def test_ai_usage_empty_for_new_learner(client_factory, test_db):
+    learner = await _learner_client(client_factory, test_db)
+    resp = await learner.get("/self-learner/analytics/ai-usage")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["byFeature"] == []
+    assert body["totals"] == {
+        "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_usd": 0, "call_count": 0,
+    }
+
+
+async def test_ai_usage_aggregates_by_feature_for_requesting_user_only(client_factory, test_db):
+    learner = await _learner_client(client_factory, test_db)
+    user_id = str((await test_db["users"].find_one({"role": 7}))["_id"])
+    other_user_id = ObjectId()
+
+    await test_db["aiUsageEvents"].insert_many([
+        {
+            "user_id": ObjectId(user_id), "tenant_type": "individual", "institute_id": None,
+            "school_id": None, "programme_id": None, "provider": "claude", "model": "claude-sonnet-4-5",
+            "feature": "roadmap_curriculum", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150,
+            "cost_usd": 0.001, "grounded": None, "context_id": None, "job_id": None,
+            "created_at": datetime.now(timezone.utc),
+        },
+        {
+            "user_id": ObjectId(user_id), "tenant_type": "individual", "institute_id": None,
+            "school_id": None, "programme_id": None, "provider": "claude", "model": "claude-sonnet-4-5",
+            "feature": "roadmap_curriculum", "input_tokens": 40, "output_tokens": 10, "total_tokens": 50,
+            "cost_usd": 0.0005, "grounded": None, "context_id": None, "job_id": None,
+            "created_at": datetime.now(timezone.utc),
+        },
+        {
+            "user_id": ObjectId(user_id), "tenant_type": "individual", "institute_id": None,
+            "school_id": None, "programme_id": None, "provider": "gemini", "model": "gemini-2.5-flash",
+            "feature": "roadmap_notes", "input_tokens": 20, "output_tokens": 5, "total_tokens": 25,
+            "cost_usd": 0.0001, "grounded": None, "context_id": None, "job_id": None,
+            "created_at": datetime.now(timezone.utc),
+        },
+        # Belongs to a different user entirely — must never leak into this learner's totals.
+        {
+            "user_id": other_user_id, "tenant_type": "individual", "institute_id": None,
+            "school_id": None, "programme_id": None, "provider": "claude", "model": "claude-sonnet-4-5",
+            "feature": "roadmap_curriculum", "input_tokens": 999, "output_tokens": 999, "total_tokens": 1998,
+            "cost_usd": 99.0, "grounded": None, "context_id": None, "job_id": None,
+            "created_at": datetime.now(timezone.utc),
+        },
+    ])
+
+    resp = await learner.get("/self-learner/analytics/ai-usage")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    by_feature = {row["feature"]: row for row in body["byFeature"]}
+    assert by_feature["roadmap_curriculum"]["total_tokens"] == 200
+    assert by_feature["roadmap_curriculum"]["call_count"] == 2
+    assert by_feature["roadmap_notes"]["total_tokens"] == 25
+
+    assert body["totals"]["total_tokens"] == 225
+    assert body["totals"]["call_count"] == 3

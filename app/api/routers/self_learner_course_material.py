@@ -22,14 +22,14 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.api.deps import get_current_identity
+from app.api.deps import get_current_identity, require_mycareerguru_access
 from app.api.routers.course_material import _run_ingest_job
 from app.core.rate_limit import ai_rate_limit
 from app.services.job_store import get_job, set_job
 
 router = APIRouter(
     prefix="/api/self-learner/course-material",
-    dependencies=[Depends(get_current_identity)],
+    dependencies=[Depends(get_current_identity), Depends(require_mycareerguru_access)],
     tags=["self-learner-course-material"],
 )
 

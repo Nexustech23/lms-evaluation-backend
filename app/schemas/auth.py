@@ -57,6 +57,7 @@ class RegisterInstitute(_RegisterBase):
     institute: Dict[str, Any]
     hasCOAccess: Optional[bool] = False
     hasQPGAccess: Optional[bool] = False
+    hasMyCareerGuruAccess: Optional[bool] = False
 
     @field_validator("institute")
     @classmethod

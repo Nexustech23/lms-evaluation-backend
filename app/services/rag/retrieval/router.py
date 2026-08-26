@@ -35,7 +35,7 @@ async def retrieve(
     if vector_store is None:
         logger.warning("router: doc_id=%s is UNSTRUCTURED but no vector_store available — treating as ungrounded", doc_id)
         return RetrievalResult(context_text="", source_nodes=[], confidence=0.0, doc_id=doc_id)
-    return await vector_retriever.retrieve(query, doc_id, vector_store)
+    return await vector_retriever.retrieve(query, doc_id, vector_store, db=db, user_id=user_id)
 
 
 def should_use_rag(result: RetrievalResult) -> bool:

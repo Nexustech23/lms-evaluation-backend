@@ -96,6 +96,7 @@ async def _register_institute(db, data, password_hash, current_user_identity):
             "phone": data.get("phone"),
             "hasCOAccess": data.get("hasCOAccess", False),
             "hasQPGAccess": data.get("hasQPGAccess", False),
+            "hasMyCareerGuruAccess": data.get("hasMyCareerGuruAccess", False),
             "is_active": True,
             "color": color,
             "language": language,

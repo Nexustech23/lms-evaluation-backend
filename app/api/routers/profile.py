@@ -7,7 +7,7 @@
 # ============================================================
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
 from bson import ObjectId
@@ -251,7 +251,7 @@ async def update_profile(
 
     elif role == 7:
         if "color" in data:
-            raise HTTPException(status_code=403, detail="Self learners cannot update color")
+            raise HTTPException(status_code=403, detail="MyCareerGuru learners cannot update color")
         message = "Profile updated successfully"
 
     else:
@@ -386,6 +386,7 @@ async def update_institute(
     institute_data = payload.institute
     has_co_access = payload.hasCOAccess
     has_qpg_access = payload.hasQPGAccess
+    has_mycareerguru_access = payload.hasMyCareerGuruAccess
 
     field_map = {
         "institute_name": institute_data.get("institute_name"),
@@ -438,6 +439,16 @@ async def update_institute(
         db, institute_id, user_object_id,
         co_access=has_co_access, qpg_access=has_qpg_access, color=institute_data.get("color"),
     )
+
+    # Deliberately not part of cascade_institute_access: that helper
+    # propagates its flags to every faculty user too, but MyCareerGuru
+    # access is never checked against a faculty user's own doc (only the
+    # institute admin's, via app.api.deps.can_use_mycareerguru) — cascading
+    # it to faculty would just be dead, misleading data on their accounts.
+    if has_mycareerguru_access is not None:
+        await db["users"].update_one(
+            {"_id": user_object_id}, {"$set": {"hasMyCareerGuruAccess": has_mycareerguru_access}}
+        )
 
     updated = await db["instituteDetails"].find_one({"_id": institute_id})
     updated["_id"] = str(updated["_id"])
@@ -873,6 +884,56 @@ async def get_all_self_learners(
     return {"success": True, "page": page, "limit": limit, "total": total, "self_learners": result}
 
 
+# ============================================================
+# AI USAGE — per-feature cost/token breakdown across every AI call tracked
+# in the aiUsageEvents ledger (see app.services.ai_usage.record_ai_usage),
+# spanning both MyCareerGuru individuals and institute-side AI usage.
+# ============================================================
+
+@router.get("/ai-usage", dependencies=[Depends(require_role(SUPERADMIN))])
+async def get_ai_usage_summary(
+    days: int = Query(30, ge=1, le=365),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    pipeline = [
+        {"$match": {"created_at": {"$gte": cutoff}}},
+        {"$group": {
+            "_id": "$feature",
+            "input_tokens": {"$sum": "$input_tokens"},
+            "output_tokens": {"$sum": "$output_tokens"},
+            "total_tokens": {"$sum": "$total_tokens"},
+            "cost_usd": {"$sum": "$cost_usd"},
+            "call_count": {"$sum": 1},
+            "distinct_users": {"$addToSet": "$user_id"},
+        }},
+        {"$sort": {"cost_usd": -1}},
+    ]
+
+    by_feature = []
+    async for row in db["aiUsageEvents"].aggregate(pipeline):
+        by_feature.append({
+            "feature": row["_id"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "total_tokens": row["total_tokens"],
+            "cost_usd": round(row["cost_usd"], 4),
+            "call_count": row["call_count"],
+            "distinct_users": len(row["distinct_users"]),
+        })
+
+    totals = {
+        "input_tokens": sum(r["input_tokens"] for r in by_feature),
+        "output_tokens": sum(r["output_tokens"] for r in by_feature),
+        "total_tokens": sum(r["total_tokens"] for r in by_feature),
+        "cost_usd": round(sum(r["cost_usd"] for r in by_feature), 4),
+        "call_count": sum(r["call_count"] for r in by_feature),
+    }
+
+    return {"success": True, "days": days, "byFeature": by_feature, "totals": totals}
+
+
 @router.put("/self-learner/{learner_user_id}", dependencies=[Depends(require_role(SUPERADMIN))])
 async def update_self_learner(
     learner_user_id: str,
@@ -885,7 +946,7 @@ async def update_self_learner(
 
     learner = await db["users"].find_one({"_id": ObjectId(learner_user_id), "role": 7})
     if not learner:
-        raise HTTPException(status_code=404, detail="Self learner not found")
+        raise HTTPException(status_code=404, detail="MyCareerGuru learner not found")
 
     update_fields: Dict[str, Any] = {}
     for field in ["fullName", "phone", "is_active"]:
@@ -899,7 +960,7 @@ async def update_self_learner(
     updated = await db["users"].find_one({"_id": ObjectId(learner_user_id)}, {"password_hash": 0}) or {}
     updated["_id"] = str(updated["_id"])
 
-    return {"success": True, "message": "Self learner updated successfully", "self_learner": updated}
+    return {"success": True, "message": "MyCareerGuru learner updated successfully", "self_learner": updated}
 
 
 @router.delete("/self-learner/{learner_user_id}", dependencies=[Depends(require_role(SUPERADMIN))])
@@ -909,8 +970,8 @@ async def delete_self_learner(learner_user_id: str, db: AsyncIOMotorDatabase = D
 
     learner = await db["users"].find_one({"_id": ObjectId(learner_user_id), "role": 7})
     if not learner:
-        raise HTTPException(status_code=404, detail="Self learner not found")
+        raise HTTPException(status_code=404, detail="MyCareerGuru learner not found")
 
     await db["users"].delete_one({"_id": ObjectId(learner_user_id)})
 
-    return {"success": True, "message": f"Self learner deleted (user_id: {learner_user_id})"}
+    return {"success": True, "message": f"MyCareerGuru learner deleted (user_id: {learner_user_id})"}

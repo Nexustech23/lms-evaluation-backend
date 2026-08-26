@@ -179,6 +179,7 @@ def serialize_institute(doc: Dict[str, Any], user_data: Dict[str, Any] = None) -
 
         "hasCOAccess": user_data.get("hasCOAccess", False) if user_data else False,
         "hasQPGAccess": user_data.get("hasQPGAccess", False) if user_data else False,
+        "hasMyCareerGuruAccess": user_data.get("hasMyCareerGuruAccess", False) if user_data else False,
         "token_usage": _serialize_token_usage(doc.get("token_usage")),
         # None means unlimited — institutes created before this field existed
         # have no token_limit document at all.

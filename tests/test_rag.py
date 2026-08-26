@@ -8,6 +8,8 @@
 # ============================================================
 from unittest.mock import AsyncMock, patch
 
+from bson import ObjectId
+
 from app.services.rag import mongo_store
 from app.services.rag.retrieval import router, tree_retriever, vector_retriever
 from app.services.rag.schemas import DocType, RetrievalResult, TreeNode
@@ -155,7 +157,7 @@ async def test_unstructured_doc_with_vector_store_dispatches_to_vector_retriever
          patch.object(router.vector_retriever, "retrieve", new=AsyncMock(return_value=expected)) as mock_vector:
         result = await router.retrieve("query", "doc1", DocType.UNSTRUCTURED, db=None, vector_store=fake_store)
     mock_tree.assert_not_called()
-    mock_vector.assert_awaited_once_with("query", "doc1", fake_store)
+    mock_vector.assert_awaited_once_with("query", "doc1", fake_store, db=None, user_id=None)
     assert result is expected
 
 
@@ -251,13 +253,14 @@ class _FakeHit:
 
 
 class _FakeVectorStore:
-    def __init__(self, hits):
+    def __init__(self, hits, usage=None):
         self._hits = hits
+        self._usage = usage or {"input_tokens": 3, "output_tokens": 0}
         self.calls = []
 
     def search(self, query, doc_id, top_k):
         self.calls.append((query, doc_id, top_k))
-        return self._hits
+        return self._hits, self._usage
 
 
 async def test_vector_retriever_no_hits_returns_empty_result():
@@ -279,3 +282,23 @@ async def test_vector_retriever_joins_hits_and_uses_top_score_as_confidence():
     assert "second chunk" in result.context_text
     assert result.source_nodes == ["c1", "c2"]
     assert store.calls == [("query", "doc1", 4)]
+
+
+async def test_vector_retriever_tracks_query_embedding_usage_when_db_and_user_given(test_db):
+    store = _FakeVectorStore(hits=[_FakeHit("c1", "chunk", 0.5)], usage={"input_tokens": 7, "output_tokens": 0})
+    await test_db["users"].insert_one({"_id": ObjectId("507f1f77bcf86cd799439011"), "role": 7})
+
+    await vector_retriever.retrieve("query", "doc1", store, db=test_db, user_id="507f1f77bcf86cd799439011")
+
+    event = await test_db["aiUsageEvents"].find_one({"feature": "rag_retrieve"})
+    assert event is not None
+    assert event["input_tokens"] == 7
+    assert event["provider"] == "gemini"
+
+
+async def test_vector_retriever_skips_tracking_without_db_or_user_id():
+    # Default call signature (no db/user_id) must keep working unchanged —
+    # every existing caller before this feature was added relies on that.
+    store = _FakeVectorStore(hits=[_FakeHit("c1", "chunk", 0.5)])
+    result = await vector_retriever.retrieve("query", "doc1", store)
+    assert result.confidence == 0.5

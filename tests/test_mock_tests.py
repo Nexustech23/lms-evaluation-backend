@@ -19,7 +19,7 @@ async def _learner_client(client_factory, test_db):
 
 
 async def _create_test(learner, **payload):
-    with patch(_PATCH_TARGET, return_value=[]):
+    with patch(_PATCH_TARGET, return_value=([], {"input_tokens": 0, "output_tokens": 0})):
         return await learner.post("/mock-tests", json=payload)
 
 

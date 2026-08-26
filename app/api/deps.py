@@ -154,6 +154,68 @@ async def resolve_current_institute_id(identity: dict, db: AsyncIOMotorDatabase)
     return institute_id if isinstance(institute_id, ObjectId) else ObjectId(institute_id)
 
 
+async def can_use_mycareerguru(db: AsyncIOMotorDatabase, identity: dict) -> bool:
+    """
+    MyCareerGuru access rule:
+      - SELF_LEARNER (role 7): always true — it's their own product.
+      - INSTITUTE_STUDENT (role 4): true only if BOTH the student's
+        institute has MyCareerGuru enabled (hasMyCareerGuruAccess on the
+        institute admin's own user doc, set by Super Admin at onboarding /
+        via PUT /institute/{user_id}) AND the student's specific school has
+        it enabled (mycareerguru_enabled on that schoolDetails document, set
+        by the institute admin via PUT /schools/{school_id}) — an institute
+        can pilot the feature with one school before enabling it campus-wide.
+      - Every other role: false. Resolved live on each call rather than
+        cached on the student's own user doc, so toggling either flag takes
+        effect immediately without needing to re-cascade to every student.
+    """
+    role = identity.get("role")
+    if role == SELF_LEARNER:
+        return True
+    if role != INSTITUTE_STUDENT:
+        return False
+
+    user_id = identity.get("user_id")
+    if not user_id or not ObjectId.is_valid(user_id):
+        return False
+
+    student = await db["studentDetails"].find_one({"user_id": ObjectId(user_id), "role": INSTITUTE_STUDENT})
+    if not student:
+        return False
+
+    institute = await db["instituteDetails"].find_one({"_id": student.get("institute_id")})
+    if not institute:
+        return False
+
+    institute_admin = await db["users"].find_one({"_id": institute.get("user_id")})
+    if not institute_admin or not institute_admin.get("hasMyCareerGuruAccess", False):
+        return False
+
+    school = await db["schoolDetails"].find_one({"_id": student.get("school_id")})
+    return bool(school and school.get("mycareerguru_enabled", False))
+
+
+async def require_mycareerguru_access(
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> dict:
+    """
+    Router-level dependency for the MyCareerGuru surface (roadmap.py,
+    self_learner_analytics.py, self_learner_course_material.py, ai_tutor.py,
+    mock_tests.py). Only ever blocks INSTITUTE_STUDENT callers who fail
+    can_use_mycareerguru — every other role that could already reach these
+    routers keeps its existing access unchanged, since gating them wasn't
+    part of this feature's scope and could regress access nobody asked to
+    have revoked.
+    """
+    if identity.get("role") == INSTITUTE_STUDENT and not await can_use_mycareerguru(db, identity):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="MyCareerGuru is not enabled for your institute or school yet. Contact your institute admin.",
+        )
+    return identity
+
+
 async def validate_entity_ownership(
     collection: AsyncIOMotorCollection, entity_id: str, institute_id: ObjectId
 ) -> Tuple[Optional[dict], Optional[dict], Optional[int]]:

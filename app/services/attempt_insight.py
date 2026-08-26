@@ -17,8 +17,9 @@ import json
 import logging
 from typing import Any, Dict, List
 
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.services.claude import generate_text
-from app.services.rag.tree_index import _track_claude_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,10 @@ async def generate_attempt_insight(items: List[Dict[str, Any]], db=None, user_id
     text, token_usage = await asyncio.to_thread(generate_text, prompt, max_tokens=max_tokens)
 
     if db is not None and user_id is not None:
-        await _track_claude_tokens(db, user_id, token_usage)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
+            feature=Feature.DETAILED_FEEDBACK, usage=token_usage,
+        )
 
     try:
         return json.loads(_strip_code_fence(text))

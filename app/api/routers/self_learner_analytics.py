@@ -28,12 +28,16 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.api.deps import get_current_identity
+from app.api.deps import get_current_identity, require_mycareerguru_access
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.services.attempt_insight import generate_attempt_insight
 
-router = APIRouter(prefix="/self-learner/analytics", dependencies=[Depends(get_current_identity)], tags=["self-learner-analytics"])
+router = APIRouter(
+    prefix="/self-learner/analytics",
+    dependencies=[Depends(get_current_identity), Depends(require_mycareerguru_access)],
+    tags=["self-learner-analytics"],
+)
 
 
 def _quiz_attempt_id(roadmap_id: Any, week: Any, submitted_at: datetime) -> str:
@@ -531,3 +535,53 @@ async def get_attempt_insight(
         }
 
     raise HTTPException(status_code=400, detail="Invalid sourceType")
+
+
+# ============================================================
+# AI USAGE — the student's own spend across every AI feature they've used
+# (roadmap generation, self-review, Test Engine, RAG-grounded material),
+# sourced from the aiUsageEvents ledger app.services.ai_usage.record_ai_usage
+# writes on every tracked call. See app/models/ai_usage_event.py for the
+# feature-tag vocabulary this groups by.
+# ============================================================
+
+@router.get("/ai-usage")
+async def get_my_ai_usage(
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    user_id = ObjectId(identity["user_id"])
+
+    pipeline = [
+        {"$match": {"user_id": user_id}},
+        {"$group": {
+            "_id": "$feature",
+            "input_tokens": {"$sum": "$input_tokens"},
+            "output_tokens": {"$sum": "$output_tokens"},
+            "total_tokens": {"$sum": "$total_tokens"},
+            "cost_usd": {"$sum": "$cost_usd"},
+            "call_count": {"$sum": 1},
+        }},
+        {"$sort": {"total_tokens": -1}},
+    ]
+
+    by_feature = []
+    async for row in db["aiUsageEvents"].aggregate(pipeline):
+        by_feature.append({
+            "feature": row["_id"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "total_tokens": row["total_tokens"],
+            "cost_usd": round(row["cost_usd"], 4),
+            "call_count": row["call_count"],
+        })
+
+    totals = {
+        "input_tokens": sum(r["input_tokens"] for r in by_feature),
+        "output_tokens": sum(r["output_tokens"] for r in by_feature),
+        "total_tokens": sum(r["total_tokens"] for r in by_feature),
+        "cost_usd": round(sum(r["cost_usd"] for r in by_feature), 4),
+        "call_count": sum(r["call_count"] for r in by_feature),
+    }
+
+    return {"success": True, "byFeature": by_feature, "totals": totals}

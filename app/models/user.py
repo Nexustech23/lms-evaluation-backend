@@ -21,7 +21,7 @@ ROLE_DETAILS = {
     INSTITUTE_STUDENT: {"name": "institute_student", "description": "Institute Student"},
     TUTOR: {"name": "tutor", "description": "Private Tutor"},
     TUTOR_STUDENT: {"name": "tutor_student", "description": "Tutor Student"},
-    SELF_LEARNER: {"name": "self_learner", "description": "Self Learner"},
+    SELF_LEARNER: {"name": "self_learner", "description": "MyCareerGuru Learner"},
 }
 
 ALLOWED_ROLES = {
@@ -90,6 +90,7 @@ def create_user_document(data: Dict[str, Any], password_hash: str) -> Dict[str, 
 
     hasCOAccess = bool(data.get("hasCOAccess", data.get("hascoAccess", False)))
     hasQPGAccess = bool(data.get("hasQPGAccess", False))
+    hasMyCareerGuruAccess = bool(data.get("hasMyCareerGuruAccess", False))
 
     color = _validate_color(data.get("color", "#FF7F10"))
     language = _validate_language(data.get("language", "english"))
@@ -108,6 +109,7 @@ def create_user_document(data: Dict[str, Any], password_hash: str) -> Dict[str, 
 
         "hasCOAccess": hasCOAccess,
         "hasQPGAccess": hasQPGAccess,
+        "hasMyCareerGuruAccess": hasMyCareerGuruAccess,
 
         "color": color,
         "language": language,
@@ -154,6 +156,9 @@ def update_user_document(data: Dict[str, Any]) -> Dict[str, Any]:
 
     if "hasQPGAccess" in data:
         update_fields["hasQPGAccess"] = bool(data["hasQPGAccess"])
+
+    if "hasMyCareerGuruAccess" in data:
+        update_fields["hasMyCareerGuruAccess"] = bool(data["hasMyCareerGuruAccess"])
 
     if "color" in data:
         update_fields["color"] = _validate_color(data["color"])
@@ -213,6 +218,7 @@ def serialize_user(doc: Dict[str, Any]) -> Dict[str, Any] | None:
 
         "hasCOAccess": bool(doc.get("hasCOAccess", False)),
         "hasQPGAccess": bool(doc.get("hasQPGAccess", False)),
+        "hasMyCareerGuruAccess": bool(doc.get("hasMyCareerGuruAccess", False)),
 
         "phone": doc.get("phone"),
         "is_active": doc.get("is_active", True),

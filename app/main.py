@@ -21,6 +21,7 @@ from app.api.routers import (
     institute_hierarchy,
     marks_import,
     mock_tests,
+    mycareerguru_auth,
     profile,
     question_paper,
     relative_grading,
@@ -36,6 +37,7 @@ from app.core.config import settings
 from app.core.rate_limit import GlobalRateLimitMiddleware
 from app.core.redis_client import close_redis_connection, connect_to_redis
 from app.db.mongodb import close_mongo_connection, connect_to_mongo, get_database, ping_mongo
+from app.services.ai_usage import ensure_ai_usage_indexes
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("pymongo").setLevel(logging.WARNING)
@@ -57,6 +59,7 @@ async def lifespan(app: FastAPI):
 
     connect_to_mongo()
     await ping_mongo()
+    await ensure_ai_usage_indexes(get_database())
     connect_to_redis()
     yield
     await close_redis_connection()
@@ -121,6 +124,7 @@ app.include_router(question_paper.router)
 app.include_router(grading.router)
 app.include_router(marks_import.router)
 app.include_router(mock_tests.router)
+app.include_router(mycareerguru_auth.router)
 app.include_router(relative_grading.router)
 app.include_router(roadmap.router)
 app.include_router(self_learner_analytics.router)

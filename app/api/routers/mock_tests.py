@@ -29,10 +29,11 @@ from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.api.deps import get_current_identity
+from app.api.deps import get_current_identity, require_mycareerguru_access
 from app.api.routers.roadmap import _resolve_grounding
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
+from app.models.ai_usage_event import Feature, Provider
 from app.models.mock_test import (
     build_create_document,
     build_roadmap_test_document,
@@ -41,16 +42,19 @@ from app.models.mock_test import (
     serialize_roadmap_test_question,
 )
 from app.schemas.mock_test import MockTestCreateRequest, MockTestSubmitRequest
-from app.services.mock_test_generation import build_mock_test_prompt, generate_mock_test_questions
+from app.services.ai_usage import record_ai_usage
+from app.services.mock_test_generation import MOCK_TEST_MODEL, build_mock_test_prompt, generate_mock_test_questions
 from app.services.roadmap_ai import (
     build_auto_test_prompt,
     build_open_ended_grading_prompt,
     generate_gemini_json,
-    increment_student_gemini_tokens,
     _split_question_counts,
 )
 
-router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["mock-tests"])
+router = APIRouter(
+    dependencies=[Depends(get_current_identity), Depends(require_mycareerguru_access)],
+    tags=["mock-tests"],
+)
 
 
 def _serialize_attempt(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -108,11 +112,15 @@ def _evaluate_answers(
 # BACKGROUND GENERATION
 # ============================================================
 
-async def _run_generation(test_id: ObjectId, prompt: str) -> None:
+async def _run_generation(test_id: ObjectId, prompt: str, user_id: str) -> None:
     db = get_database()
     now = datetime.now(timezone.utc)
     try:
-        questions = await asyncio.to_thread(generate_mock_test_questions, prompt)
+        questions, usage = await asyncio.to_thread(generate_mock_test_questions, prompt)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.CLAUDE, model=MOCK_TEST_MODEL,
+            feature=Feature.TEST_ENGINE_GENERATE, usage=usage, context_id=str(test_id),
+        )
         await db["mockTests"].update_one(
             {"_id": test_id},
             {"$set": {"questions": questions, "questionCount": len(questions), "updated_at": now}},
@@ -123,7 +131,7 @@ async def _run_generation(test_id: ObjectId, prompt: str) -> None:
         await db["mockTests"].update_one({"_id": test_id}, {"$set": {"generationError": str(e), "updated_at": now}})
 
 
-async def _run_roadmap_generation(test_id: ObjectId, prompt: str, user_id: str) -> None:
+async def _run_roadmap_generation(test_id: ObjectId, prompt: str, user_id: str, grounded: bool = False) -> None:
     """Roadmap-mode counterpart of _run_generation — reuses Auto Test's
     question generation (Gemini, same as every other roadmap quiz/practice
     call site) instead of subject-mode's own prompt/schema."""
@@ -131,7 +139,10 @@ async def _run_roadmap_generation(test_id: ObjectId, prompt: str, user_id: str) 
     now = datetime.now(timezone.utc)
     try:
         questions, usage, truncated = await asyncio.to_thread(generate_gemini_json, prompt)
-        await increment_student_gemini_tokens(db, user_id, usage)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.TEST_ENGINE_GENERATE, usage=usage, grounded=grounded, context_id=str(test_id),
+        )
 
         if truncated or not isinstance(questions, list) or not questions:
             raise ValueError("AI did not return valid questions (truncated or empty response)")
@@ -174,7 +185,7 @@ async def create_mock_test(
         doc.get("subjectName") or "General", doc.get("topic"), doc["difficulty"],
         doc["questionCount"], doc["questionTypes"], doc["marksPerQuestion"],
     )
-    background_tasks.add_task(_run_generation, test_id, prompt)
+    background_tasks.add_task(_run_generation, test_id, prompt, identity["user_id"])
 
     return {
         "success": True,
@@ -241,7 +252,7 @@ async def _create_roadmap_test(
     prompt = build_auto_test_prompt(
         subject, week_title, subtopic_names, counts, payload.custom_prompt, grounding_context=grounding_context,
     )
-    background_tasks.add_task(_run_roadmap_generation, test_id, prompt, user_id)
+    background_tasks.add_task(_run_roadmap_generation, test_id, prompt, user_id, grounding_context is not None)
 
     return {
         "success": True,
@@ -397,7 +408,10 @@ async def _submit_roadmap_test(
             logging.error("submit_roadmap_test: open-ended grading failed: %s", e, exc_info=True)
             raise HTTPException(status_code=502, detail=f"AI grading failed: {e}")
 
-        await increment_student_gemini_tokens(db, user_id, usage)
+        await record_ai_usage(
+            db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.TEST_ENGINE_GRADING, usage=usage, context_id=str(test_id),
+        )
 
         if truncated or not isinstance(grading, list) or len(grading) != len(open_ended_items):
             logging.error(

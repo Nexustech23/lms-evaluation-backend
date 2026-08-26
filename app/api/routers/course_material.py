@@ -32,6 +32,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import FACULTY, INSTITUTE, get_current_identity
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.job_store import get_job, set_job, update_job
 from app.services.rag import mongo_store, singletons, structure_parser, tree_index
@@ -93,8 +95,12 @@ async def _run_ingest_job(
         source_format = _EXT_TO_FORMAT.get(ext, SourceFormat.TXT)
 
         if ext == "pdf":
-            text, _usage = await asyncio.to_thread(
+            text, extract_usage = await asyncio.to_thread(
                 generate_content_from_file, file_bytes, mime_type or "application/pdf", _PDF_EXTRACT_PROMPT,
+            )
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                feature=Feature.RAG_INGEST_EXTRACTION, usage=extract_usage, job_id=job_id,
             )
         else:
             text = await asyncio.to_thread(extract_text_from_file, file_bytes, filename)
@@ -131,7 +137,11 @@ async def _run_ingest_job(
                 })
                 return
             chunks = chunk_text(doc_id, pages)
-            await asyncio.to_thread(store.upsert, chunks)
+            embed_usage = await asyncio.to_thread(store.upsert, chunks)
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.GEMINI, model="gemini-embedding-001",
+                feature=Feature.RAG_EMBEDDING, usage=embed_usage, job_id=job_id,
+            )
 
         record = DocumentRecord(
             id=doc_id, filename=filename, source_format=source_format, doc_type=doc_type,
