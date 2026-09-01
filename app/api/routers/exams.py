@@ -7,12 +7,12 @@
 import asyncio
 import io
 import json
+import logging
 import math
 import zipfile
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-import requests
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -29,6 +29,8 @@ from app.schemas.exams import (
     UploadQuestionPaperRequest,
 )
 from app.services.gemini import extract_and_patch_question_paper_text
+from app.utils.net import SsrfError, safe_get
+from app.utils.query import search_regex
 from app.utils.token_usage import check_institute_token_budget
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["exams"])
@@ -240,14 +242,15 @@ async def get_all_folders(
         {"$unwind": {"path": "$faculty", "preserveNullAndEmptyArrays": True}},
     ]
 
-    if search:
+    search_clause = search_regex(search)
+    if search_clause:
         pipeline.append({
             "$match": {
                 "$or": [
-                    {"folder_name": {"$regex": search, "$options": "i"}},
-                    {"exam_title": {"$regex": search, "$options": "i"}},
-                    {"subject.subject_name": {"$regex": search, "$options": "i"}},
-                    {"subject.subject_code": {"$regex": search, "$options": "i"}},
+                    {"folder_name": search_clause},
+                    {"exam_title": search_clause},
+                    {"subject.subject_name": search_clause},
+                    {"subject.subject_code": search_clause},
                 ]
             }
         })
@@ -551,15 +554,23 @@ async def download_folder(folder_id: str, db: AsyncIOMotorDatabase = Depends(get
 
                 answer_script_url = answer.get("answer_script_url")
                 if answer_script_url:
-                    resp = requests.get(answer_script_url, timeout=60, allow_redirects=True)
-                    if resp.status_code == 200 and resp.content[:4] == b"%PDF":
-                        zip_file.writestr(f"{student_folder}{filename}", resp.content)
+                    try:
+                        content = safe_get(answer_script_url, timeout=60)
+                    except SsrfError as exc:
+                        logging.warning("download-folder: skipping unsafe answer_script_url: %s", exc)
+                        content = b""
+                    if content[:4] == b"%PDF":
+                        zip_file.writestr(f"{student_folder}{filename}", content)
 
                 evaluated_report_url = answer.get("evaluated_report_url")
                 if evaluated_report_url:
-                    resp = requests.get(evaluated_report_url, timeout=60, allow_redirects=True)
-                    if resp.status_code == 200 and resp.content[:4] == b"%PDF":
-                        zip_file.writestr(f"{student_folder}{student_name}_result.pdf", resp.content)
+                    try:
+                        content = safe_get(evaluated_report_url, timeout=60)
+                    except SsrfError as exc:
+                        logging.warning("download-folder: skipping unsafe evaluated_report_url: %s", exc)
+                        content = b""
+                    if content[:4] == b"%PDF":
+                        zip_file.writestr(f"{student_folder}{student_name}_result.pdf", content)
 
         zip_buffer.seek(0)
         return zip_buffer.read()

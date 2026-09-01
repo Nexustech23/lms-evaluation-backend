@@ -16,7 +16,17 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.api.deps import get_current_identity, get_current_user_and_faculty_details, get_current_user_and_institute, validate_entity_ownership
+from app.api.deps import (
+    FACULTY,
+    INSTITUTE,
+    SUPERADMIN,
+    get_current_identity,
+    get_current_user_and_faculty_details,
+    get_current_user_and_institute,
+    require_entity_in_institute,
+    require_role,
+    validate_entity_ownership,
+)
 from app.db.mongodb import get_database
 from app.models.batch import create_batch_document, delete_batch_cascade, serialize_batch
 from app.models.department import create_department_document, serialize_department, update_department_document
@@ -41,8 +51,20 @@ from app.schemas.institute_hierarchy import (
     UpdateSchoolRequest,
     UpdateSubjectRequest,
 )
+from app.utils.query import search_regex
 
-router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["institute-hierarchy"])
+# Router-level gate: this whole surface is institute-admin / faculty only.
+# Previously it was just Depends(get_current_identity) (any authenticated user
+# of any of the 7 roles), which — combined with several ID-addressed routes
+# below that did no per-object tenant check — let a student or a public
+# self-learner signup delete or read another institute's academic data.
+# SUPERADMIN is kept in the allow-list so platform-level tooling/tests still
+# reach these endpoints; the per-route ownership checks below are what
+# actually enforce tenant isolation.
+router = APIRouter(
+    dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE, FACULTY))],
+    tags=["institute-hierarchy"],
+)
 
 
 async def _resolve_institute_or_faculty(identity: dict, db: AsyncIOMotorDatabase):
@@ -148,8 +170,8 @@ async def get_schools(
     skip = (page - 1) * limit if limit > 0 else 0
     query: Dict[str, Any] = {"institute_id": ObjectId(institute_id)}
 
-    if search and search.strip():
-        regex = {"$regex": search.strip(), "$options": "i"}
+    regex = search_regex(search)
+    if regex:
         query["$or"] = [{"school_name": regex}, {"school_code": regex}, {"description": regex}]
 
     total = await db["schoolDetails"].count_documents(query)
@@ -183,12 +205,20 @@ async def update_school(
     if not ObjectId.is_valid(school_id):
         raise HTTPException(status_code=400, detail="Invalid school_id")
 
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["schoolDetails"], school_id, institute_id)
+
     try:
         update_payload = update_school_document(payload.model_dump(exclude_unset=True), identity["user_id"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    result = await db["schoolDetails"].update_one({"_id": ObjectId(school_id)}, update_payload)
+    result = await db["schoolDetails"].update_one(
+        {"_id": ObjectId(school_id), "institute_id": ObjectId(institute_id)}, update_payload
+    )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="School not found")
 
@@ -248,12 +278,27 @@ async def _school_delete_summary(db: AsyncIOMotorDatabase, school_id: str):
 
 
 @router.delete("/schools/{school_id}")
-async def delete_school(school_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def delete_school(
+    school_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(school_id):
         raise HTTPException(status_code=400, detail="Invalid school_id")
 
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["schoolDetails"], school_id, institute_id)
+    institute_oid = ObjectId(institute_id)
+
     summary, programme_ids, department_ids, batch_ids, faculty_ids, user_ids = await _school_delete_summary(db, school_id)
 
+    # Every downstream filter below is keyed by _id lists derived from THIS
+    # school's subtree (or the school_id itself), so it can only ever touch
+    # this institute's data — but the school-level delete is still pinned to
+    # institute_oid as a belt-and-suspenders tenant guard.
     await db["subjectDetails"].delete_many({
         "$or": [
             {"school_id": ObjectId(school_id)}, {"school_id": school_id},
@@ -269,10 +314,17 @@ async def delete_school(school_id: str, db: AsyncIOMotorDatabase = Depends(get_d
         await db["programmeDetails"].delete_many({"_id": {"$in": programme_ids}})
     if faculty_ids:
         await db["facultyDetails"].delete_many({"_id": {"$in": faculty_ids}})
+    # Faculty LOGIN accounts are deactivated, never hard-deleted from a
+    # cascade: a mistaken or malicious school delete stays reversible, audit
+    # history is preserved, and rows other collections still reference don't
+    # dangle.
     if user_ids:
-        await db["users"].delete_many({"_id": {"$in": user_ids}})
+        await db["users"].update_many(
+            {"_id": {"$in": user_ids}},
+            {"$set": {"is_active": False, "is_deleted": True, "updated_at": datetime.now(timezone.utc)}},
+        )
 
-    result = await db["schoolDetails"].delete_one({"_id": ObjectId(school_id)})
+    result = await db["schoolDetails"].delete_one({"_id": ObjectId(school_id), "institute_id": institute_oid})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="School not found")
 
@@ -280,9 +332,16 @@ async def delete_school(school_id: str, db: AsyncIOMotorDatabase = Depends(get_d
 
 
 @router.get("/schools/{school_id}/delete-summary")
-async def get_delete_summary(school_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_delete_summary(
+    school_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(school_id):
         raise HTTPException(status_code=400, detail="Invalid school_id")
+
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    await require_entity_in_institute(db["schoolDetails"], school_id, institute_id)
 
     summary, *_ = await _school_delete_summary(db, school_id)
     return summary
@@ -322,25 +381,31 @@ async def create_programme(
 
 
 @router.get("/programme/{programme_id}")
-async def get_programme(programme_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_programme(
+    programme_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(programme_id):
         raise HTTPException(status_code=400, detail="Invalid programme_id")
 
-    programme = await db["programmeDetails"].find_one({"_id": ObjectId(programme_id)})
-    if not programme:
-        raise HTTPException(status_code=404, detail="Programme not found")
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    programme = await require_entity_in_institute(db["programmeDetails"], programme_id, institute_id)
 
     return {"success": True, "programme": serialize_programme(programme)}
 
 
 @router.get("/programmes_po_target/{subject_id}")
-async def get_programme_po(subject_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_programme_po(
+    subject_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(subject_id):
         raise HTTPException(status_code=400, detail="Invalid subject_id")
 
-    subject = await db["subjectDetails"].find_one({"_id": ObjectId(subject_id)})
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    subject = await require_entity_in_institute(db["subjectDetails"], subject_id, institute_id)
 
     programme_id = subject.get("programme_id")
     if not programme_id:
@@ -348,7 +413,9 @@ async def get_programme_po(subject_id: str, db: AsyncIOMotorDatabase = Depends(g
     if isinstance(programme_id, str):
         programme_id = ObjectId(programme_id)
 
-    programme = await db["programmeDetails"].find_one({"_id": programme_id})
+    programme = await db["programmeDetails"].find_one(
+        {"_id": programme_id, "institute_id": ObjectId(institute_id)}
+    )
     if not programme:
         raise HTTPException(status_code=404, detail="Programme not found")
 
@@ -367,16 +434,20 @@ async def get_programmes(
     page: int = Query(1),
     limit: int = Query(10),
     search: str = Query(""),
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     if not ObjectId.is_valid(school_id):
         raise HTTPException(status_code=400, detail="Invalid school_id")
 
-    skip = (page - 1) * limit if limit > 0 else 0
-    query: Dict[str, Any] = {"school_id": ObjectId(school_id)}
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    await require_entity_in_institute(db["schoolDetails"], school_id, institute_id)
 
-    if search and search.strip():
-        regex = {"$regex": search.strip(), "$options": "i"}
+    skip = (page - 1) * limit if limit > 0 else 0
+    query: Dict[str, Any] = {"school_id": ObjectId(school_id), "institute_id": ObjectId(institute_id)}
+
+    regex = search_regex(search)
+    if regex:
         query["$or"] = [{"programme_name": regex}, {"programme_code": regex}, {"description": regex}]
 
     total = await db["programmeDetails"].count_documents(query)
@@ -401,17 +472,29 @@ async def get_programmes(
 
 
 @router.put("/programmes/po")
-async def update_programme_po(payload: UpdateProgrammePoRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def update_programme_po(
+    payload: UpdateProgrammePoRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     programme_id = payload.programme_id
     if not ObjectId.is_valid(programme_id):
         raise HTTPException(status_code=400, detail="Valid programme_id is required")
+
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["programmeDetails"], programme_id, institute_id)
 
     try:
         update_payload = update_programme_po_targets(payload.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    result = await db["programmeDetails"].update_one({"_id": ObjectId(programme_id)}, update_payload)
+    result = await db["programmeDetails"].update_one(
+        {"_id": ObjectId(programme_id), "institute_id": ObjectId(institute_id)}, update_payload
+    )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Programme not found")
 
@@ -422,17 +505,26 @@ async def update_programme_po(payload: UpdateProgrammePoRequest, db: AsyncIOMoto
 async def update_programme(
     programme_id: str,
     payload: UpdateProgrammeRequest,
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     if not ObjectId.is_valid(programme_id):
         raise HTTPException(status_code=400, detail="Invalid programme_id")
+
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["programmeDetails"], programme_id, institute_id)
 
     try:
         update_payload = update_programme_document(payload.model_dump(exclude_unset=True))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    result = await db["programmeDetails"].update_one({"_id": ObjectId(programme_id)}, update_payload)
+    result = await db["programmeDetails"].update_one(
+        {"_id": ObjectId(programme_id), "institute_id": ObjectId(institute_id)}, update_payload
+    )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Programme not found")
 
@@ -440,9 +532,19 @@ async def update_programme(
 
 
 @router.delete("/programmes/{programme_id}")
-async def delete_programme(programme_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def delete_programme(
+    programme_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(programme_id):
         raise HTTPException(status_code=400, detail="Invalid programme_id")
+
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["programmeDetails"], programme_id, institute_id)
 
     programme_obj_id = ObjectId(programme_id)
 
@@ -464,7 +566,9 @@ async def delete_programme(programme_id: str, db: AsyncIOMotorDatabase = Depends
     await db["batchDetails"].delete_many({"_id": {"$in": batch_ids}})
     await db["departmentDetails"].delete_many({"_id": {"$in": department_ids}})
 
-    result = await db["programmeDetails"].delete_one({"_id": programme_obj_id})
+    result = await db["programmeDetails"].delete_one(
+        {"_id": programme_obj_id, "institute_id": ObjectId(institute_id)}
+    )
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Programme not found")
 
@@ -511,16 +615,20 @@ async def get_departments(
     page: int = Query(1),
     limit: int = Query(10),
     search: str = Query(""),
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     if not ObjectId.is_valid(programme_id):
         raise HTTPException(status_code=400, detail="Invalid programme_id")
 
-    skip = (page - 1) * limit if limit > 0 else 0
-    query: Dict[str, Any] = {"programme_id": ObjectId(programme_id)}
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    await require_entity_in_institute(db["programmeDetails"], programme_id, institute_id)
 
-    if search and search.strip():
-        regex = {"$regex": search.strip(), "$options": "i"}
+    skip = (page - 1) * limit if limit > 0 else 0
+    query: Dict[str, Any] = {"programme_id": ObjectId(programme_id), "institute_id": ObjectId(institute_id)}
+
+    regex = search_regex(search)
+    if regex:
         query["$or"] = [{"department_name": regex}, {"code": regex}]
 
     total = await db["departmentDetails"].count_documents(query)
@@ -548,17 +656,26 @@ async def get_departments(
 async def update_department(
     department_id: str,
     payload: UpdateDepartmentRequest,
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     if not ObjectId.is_valid(department_id):
         raise HTTPException(status_code=400, detail="Invalid department_id")
+
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["departmentDetails"], department_id, institute_id)
 
     try:
         update_payload = update_department_document(payload.model_dump(exclude_unset=True))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    result = await db["departmentDetails"].update_one({"_id": ObjectId(department_id)}, update_payload)
+    result = await db["departmentDetails"].update_one(
+        {"_id": ObjectId(department_id), "institute_id": ObjectId(institute_id)}, update_payload
+    )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Department not found")
 
@@ -566,9 +683,19 @@ async def update_department(
 
 
 @router.delete("/departments/{department_id}")
-async def delete_department(department_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def delete_department(
+    department_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(department_id):
         raise HTTPException(status_code=400, detail="Invalid department_id")
+
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["departmentDetails"], department_id, institute_id)
 
     dept_obj_id = ObjectId(department_id)
 
@@ -578,7 +705,9 @@ async def delete_department(department_id: str, db: AsyncIOMotorDatabase = Depen
     await db["subjectDetails"].delete_many({"$or": [{"department_id": dept_obj_id}, {"batch_id": {"$in": batch_ids}}]})
     await db["batchDetails"].delete_many({"_id": {"$in": batch_ids}})
 
-    result = await db["departmentDetails"].delete_one({"_id": dept_obj_id})
+    result = await db["departmentDetails"].delete_one(
+        {"_id": dept_obj_id, "institute_id": ObjectId(institute_id)}
+    )
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Department not found")
 
@@ -770,8 +899,8 @@ async def get_batches(
     else:
         raise HTTPException(status_code=400, detail="Either department_id or programme_id is required")
 
-    if search and search.strip():
-        regex = {"$regex": search.strip(), "$options": "i"}
+    regex = search_regex(search)
+    if regex:
         query["$or"] = [{"batch_name": regex}]
 
     total = await db["batchDetails"].count_documents(query)
@@ -832,7 +961,20 @@ async def get_batch(
 
 
 @router.delete("/batches/{batch_id}")
-async def delete_batch(batch_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def delete_batch(
+    batch_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    if not ObjectId.is_valid(batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch_id")
+
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+    await require_entity_in_institute(db["batchDetails"], batch_id, institute_id)
+
     try:
         result = await delete_batch_cascade(db, batch_id)
     except ValueError as e:
@@ -1017,8 +1159,8 @@ async def get_subjects_by_faculty(
     if semester:
         query["semester"] = _semester_query_value(semester)
 
-    if search and search.strip():
-        regex = {"$regex": search.strip(), "$options": "i"}
+    regex = search_regex(search)
+    if regex:
         # NOTE: mirrors Flask — a regex filter on "semester" is a no-op when
         # semester is stored as an int, but ported as-is for parity.
         query["$or"] = [{"subject_name": regex}, {"subject_code": regex}, {"semester": regex}]
@@ -1111,8 +1253,8 @@ async def get_subjects_by_institute(
     if semester:
         query["semester"] = _semester_query_value(semester)
 
-    if search and search.strip():
-        regex = {"$regex": search.strip(), "$options": "i"}
+    regex = search_regex(search)
+    if regex:
         query["$or"] = [{"subject_name": regex}, {"subject_code": regex}, {"semester": regex}]
 
     total = await db["subjectDetails"].count_documents(query)
@@ -1168,11 +1310,18 @@ async def get_subjects_by_institute(
 
 
 @router.get("/subject/{subject_id}")
-async def get_subject_by_id(subject_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_subject_by_id(
+    subject_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(subject_id):
         raise HTTPException(status_code=400, detail="Invalid subject_id")
 
-    subject = await db["subjectDetails"].find_one({"_id": ObjectId(subject_id), "is_deleted": False})
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    subject = await db["subjectDetails"].find_one(
+        {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False}
+    )
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
 
@@ -1180,13 +1329,22 @@ async def get_subject_by_id(subject_id: str, db: AsyncIOMotorDatabase = Depends(
 
 
 @router.get("/subjects/{programme_id}")
-async def get_subjects(programme_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_subjects(
+    programme_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(programme_id):
         raise HTTPException(status_code=400, detail="Invalid programme_id")
 
+    _, institute_id = await _resolve_institute_or_faculty(identity, db)
+    await require_entity_in_institute(db["programmeDetails"], programme_id, institute_id)
+
     subjects = [
         serialize_subject(doc)
-        async for doc in db["subjectDetails"].find({"programme_id": ObjectId(programme_id), "is_deleted": False})
+        async for doc in db["subjectDetails"].find(
+            {"programme_id": ObjectId(programme_id), "institute_id": ObjectId(institute_id), "is_deleted": False}
+        )
     ]
 
     return {"success": True, "subjects": subjects}
@@ -1203,6 +1361,11 @@ async def update_subject(
     if not ObjectId.is_valid(subject_id):
         raise HTTPException(status_code=400, detail="Invalid subject_id")
 
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+
     update_fields: Dict[str, Any] = {}
     for field in ["subject_name", "subject_code", "teaching_periods", "credits"]:
         if field in data:
@@ -1216,7 +1379,8 @@ async def update_subject(
     update_fields["updated_by"] = identity["user_id"]
 
     result = await db["subjectDetails"].update_one(
-        {"_id": ObjectId(subject_id), "is_deleted": False}, {"$set": update_fields}
+        {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False},
+        {"$set": update_fields},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Subject not found")
@@ -1233,8 +1397,13 @@ async def delete_subject(
     if not ObjectId.is_valid(subject_id):
         raise HTTPException(status_code=400, detail="Invalid subject_id")
 
-    await db["subjectDetails"].update_one(
-        {"_id": ObjectId(subject_id)},
+    _, institute_id, error = await get_current_user_and_institute(identity, db)
+    if error:
+        message, code = error
+        raise HTTPException(status_code=code, detail=message)
+
+    result = await db["subjectDetails"].update_one(
+        {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False},
         {"$set": {
             "is_deleted": True,
             "is_active": False,
@@ -1242,5 +1411,7 @@ async def delete_subject(
             "updated_at": datetime.now(timezone.utc),
         }},
     )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Subject not found")
 
     return {"success": True, "message": "Subject deleted successfully"}

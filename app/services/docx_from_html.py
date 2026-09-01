@@ -78,14 +78,19 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
         if not src:
             return
         try:
-            import requests
             from PIL import Image
+
+            from app.utils.net import SsrfError, safe_get
 
             if src.startswith("data:image/") and ";base64," in src:
                 _, base64_data = src.split(";base64,", 1)
                 img_bytes = base64.b64decode(base64_data)
             elif src.startswith("http"):
-                img_bytes = requests.get(src, timeout=10).content
+                try:
+                    # SSRF-checked: this src comes from AI-generated / user HTML.
+                    img_bytes = safe_get(src, timeout=10, max_bytes=10 * 1024 * 1024)
+                except SsrfError:
+                    return
             else:
                 return
 

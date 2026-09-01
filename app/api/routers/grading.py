@@ -16,7 +16,6 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-import requests
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
@@ -25,6 +24,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
 from app.core.rate_limit import bulk_grading_rate_limit
 from app.db.mongodb import get_database
+from app.utils.net import safe_get
 from app.schemas.grading import EvaluateAnswerScriptRequest
 from app.services.grading import (
     extract_answer_text_with_gemini,
@@ -45,9 +45,8 @@ EVAL_JOB_PREFIX = "job:"
 
 
 def _download_pdf(url: str) -> bytes:
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    return resp.content
+    # SSRF-checked: rejects internal / metadata addresses and redirects.
+    return safe_get(url, timeout=60)
 
 
 async def _resolve_institute_id(db: AsyncIOMotorDatabase, exam: dict) -> ObjectId:

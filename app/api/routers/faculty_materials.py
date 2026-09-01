@@ -46,17 +46,31 @@ async def create_faculty_material(
         if not faculty:
             raise HTTPException(status_code=404, detail="Faculty profile not found")
     elif identity.get("role") == INSTITUTE:
+        admin_institute = await db["instituteDetails"].find_one(
+            {"user_id": ObjectId(user_id), "is_deleted": {"$ne": True}}
+        )
+        if not admin_institute:
+            raise HTTPException(status_code=404, detail="Institute profile not found")
         faculty_id = data.get("faculty_id")
         if faculty_id and ObjectId.is_valid(faculty_id):
-            faculty = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id), "is_deleted": {"$ne": True}})
+            # the target faculty must belong to THIS admin's institute
+            faculty = await db["facultyDetails"].find_one({
+                "_id": ObjectId(faculty_id),
+                "institute_id": admin_institute["_id"],
+                "is_deleted": {"$ne": True},
+            })
         if not faculty:
-            raise HTTPException(status_code=400, detail="faculty_id is required for institute admin")
+            raise HTTPException(status_code=400, detail="faculty_id is required and must belong to your institute")
 
     if not ObjectId.is_valid(data.get("subject_id", "")):
         raise HTTPException(status_code=404, detail="Subject not found")
     subject = await db["subjectDetails"].find_one({"_id": ObjectId(data["subject_id"]), "is_deleted": {"$ne": True}})
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
+
+    # the subject must be in the same institute as the (resolved) faculty
+    if str(subject.get("institute_id")) != str(faculty["institute_id"]):
+        raise HTTPException(status_code=403, detail="Subject does not belong to this institute")
 
     if identity.get("role") == FACULTY and str(subject.get("faculty_id")) != str(faculty["_id"]):
         raise HTTPException(status_code=403, detail="Subject not assigned to this faculty")
