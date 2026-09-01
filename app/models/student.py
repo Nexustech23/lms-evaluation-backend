@@ -47,7 +47,12 @@ def create_student_document(data: Dict[str, Any]) -> Dict[str, Any]:
 
     name = data.get("name", "").strip()
     college_short_name = data.get("college_short_name", "college")
-    college_email = generate_college_email(name=name, college_short_name=college_short_name)
+    # Prefer an explicitly supplied login email — auth.py._register_institute_student
+    # generates a unique, collision-suffixed, non-@gmail address and passes it
+    # in. Only synthesize one as a fallback for callers that don't.
+    college_email = data.get("college_email") or generate_college_email(
+        name=name, college_short_name=college_short_name
+    )
 
     return {
         "user_id": data.get("user_id"),

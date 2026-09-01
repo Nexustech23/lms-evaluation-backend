@@ -23,6 +23,8 @@ from app.api.deps import (
     get_current_user_and_institute,
     require_role,
 )
+from app.core.config import settings
+from app.core.redis_client import revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
 from app.models.user import serialize_doc
@@ -281,8 +283,17 @@ async def change_password(
     new_hash = hash_password(payload.newPassword)
     await db["users"].update_one(
         {"_id": ObjectId(user_id)},
-        {"$set": {"password_hash": new_hash, "updated_at": datetime.now(timezone.utc)}},
+        {"$set": {
+            "password_hash": new_hash,
+            "must_change_password": False,
+            "updated_at": datetime.now(timezone.utc),
+        }},
     )
+
+    # Invalidate every session issued before this change (any other device,
+    # and — for a first-login forced change — the temporary-password session
+    # itself). The client re-authenticates with the new password.
+    await revoke_user_tokens(user_id, settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
 
     return {"message": "Password updated successfully"}
 
@@ -347,9 +358,17 @@ async def get_all_institutes(
 
 
 @router.get("/institute/{user_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
-async def get_institute(user_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_institute(
+    user_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user ID")
+
+    # SUPERADMIN may read any institute; an INSTITUTE admin only its own.
+    if identity.get("role") == INSTITUTE and user_id != identity["user_id"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
     institute = await db["instituteDetails"].find_one({"user_id": ObjectId(user_id), "is_deleted": {"$ne": True}})
     if not institute:
@@ -545,18 +564,37 @@ async def get_all_faculties(
     }
 
 
+async def _faculty_in_caller_scope(db: AsyncIOMotorDatabase, faculty_id: str, identity: dict) -> Dict[str, Any]:
+    """SUPERADMIN may target any faculty; an INSTITUTE admin only faculty of
+    their own institute. Raises 400/403/404 as appropriate; returns the doc."""
+    if not ObjectId.is_valid(faculty_id):
+        raise HTTPException(status_code=400, detail="Invalid faculty ID")
+
+    query: Dict[str, Any] = {"_id": ObjectId(faculty_id)}
+    if identity.get("role") == INSTITUTE:
+        _, institute_id, error = await get_current_user_and_institute(identity, db)
+        if error:
+            message, code = error
+            raise HTTPException(status_code=code, detail=message)
+        query["institute_id"] = institute_id
+
+    faculty_doc = await db["facultyDetails"].find_one(query)
+    if not faculty_doc:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+    return faculty_doc
+
+
 @router.put("/faculty/{faculty_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
 async def update_faculty(
     faculty_id: str,
     payload: FacultyUpdateRequest = FacultyUpdateRequest(),
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     data = payload.model_dump(exclude_unset=True)
-    if not ObjectId.is_valid(faculty_id):
-        raise HTTPException(status_code=400, detail="Invalid faculty ID")
 
-    faculty_doc = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id), "is_deleted": {"$ne": True}})
-    if not faculty_doc:
+    faculty_doc = await _faculty_in_caller_scope(db, faculty_id, identity)
+    if faculty_doc.get("is_deleted"):
         raise HTTPException(status_code=404, detail="Faculty not found")
 
     user_id = faculty_doc.get("user_id")
@@ -617,13 +655,12 @@ async def update_faculty(
 
 
 @router.delete("/faculty/{faculty_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
-async def delete_faculty(faculty_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(faculty_id):
-        raise HTTPException(status_code=400, detail="Invalid faculty ID")
-
-    faculty_doc = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id)})
-    if not faculty_doc:
-        raise HTTPException(status_code=404, detail="Faculty not found")
+async def delete_faculty(
+    faculty_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    faculty_doc = await _faculty_in_caller_scope(db, faculty_id, identity)
 
     fid = faculty_doc["_id"]
     uid = faculty_doc["user_id"]
