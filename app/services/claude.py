@@ -17,7 +17,7 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def generate_html(
-    prompt: str, model: str = "claude-sonnet-4-20250514", max_tokens: int = 5000
+    prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 5000
 ) -> Tuple[str, Dict[str, int]]:
     """
     Blocking call — run via asyncio.to_thread() from async callers.
