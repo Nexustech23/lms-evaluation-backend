@@ -36,6 +36,7 @@ from app.api.routers import (
 )
 from app.core.config import settings
 from app.core.observability import RequestTimingMiddleware, install_slow_query_logging
+from app.core.queue import close_queue, connect_to_queue
 from app.core.rate_limit import GlobalRateLimitMiddleware
 from app.core.redis_client import close_redis_connection, connect_to_redis
 from app.db.indexes import ensure_indexes
@@ -76,7 +77,9 @@ async def lifespan(app: FastAPI):
     await ensure_ai_usage_indexes(get_database())
     await ensure_indexes(get_database())
     connect_to_redis()
+    await connect_to_queue()
     yield
+    await close_queue()
     await close_redis_connection()
     close_mongo_connection()
 

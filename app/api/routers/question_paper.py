@@ -27,11 +27,12 @@ from math import ceil
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.utils.uploads import read_upload_capped
@@ -390,7 +391,6 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
 @router.post("/question-paper/generate-ai", dependencies=[Depends(ai_rate_limit)])
 async def generate_question_paper_ai(
-    background_tasks: BackgroundTasks,
     prompt: str = Form(""),
     departmentName: str = Form(""),
     subjectName: str = Form("Subject"),
@@ -490,7 +490,7 @@ async def generate_question_paper_ai(
             "coursePlanner": cp_bytes, "coursePlannerFilename": cp_filename,
         }
 
-        background_tasks.add_task(_run_generation_job, job_id, params, job_file_bytes)
+        await enqueue("run_question_paper_generation", job_id, params, job_file_bytes)
 
         return JSONResponse(status_code=202, content={
             "success": True,
