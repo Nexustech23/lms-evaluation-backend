@@ -9,6 +9,7 @@
 # they depend on evaluation/answer collections that don't exist yet.
 # ============================================================
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -105,12 +106,14 @@ async def dashboard_details(
 
     institute_obj_id = ObjectId(institute_id)
 
-    schools_count = await db["schoolDetails"].count_documents({"institute_id": institute_obj_id})
-    programmes_count = await db["programmeDetails"].count_documents({"institute_id": institute_obj_id})
-    departments_count = await db["departmentDetails"].count_documents({"institute_id": institute_obj_id})
-    faculty_count = await db["facultyDetails"].count_documents({"institute_id": institute_obj_id})
-
-    institute = await db["instituteDetails"].find_one({"_id": institute_obj_id})
+    # Independent reads — run them concurrently instead of serially.
+    schools_count, programmes_count, departments_count, faculty_count, institute = await asyncio.gather(
+        db["schoolDetails"].count_documents({"institute_id": institute_obj_id}),
+        db["programmeDetails"].count_documents({"institute_id": institute_obj_id}),
+        db["departmentDetails"].count_documents({"institute_id": institute_obj_id}),
+        db["facultyDetails"].count_documents({"institute_id": institute_obj_id}),
+        db["instituteDetails"].find_one({"_id": institute_obj_id}),
+    )
 
     return {
         "success": True,

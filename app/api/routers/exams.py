@@ -5,6 +5,7 @@
 # ============================================================
 
 import asyncio
+import concurrent.futures
 import io
 import json
 import logging
@@ -541,36 +542,37 @@ async def download_folder(folder_id: str, db: AsyncIOMotorDatabase = Depends(get
     if not answers:
         raise HTTPException(status_code=404, detail="No answer scripts found in this folder")
 
+    def _fetch(url: str) -> bytes:
+        try:
+            return safe_get(url, timeout=60)
+        except SsrfError as exc:
+            logging.warning("download-folder: skipping unsafe url: %s", exc)
+            return b""
+
     def _build_zip() -> bytes:
+        # Build the (zip path, url) work list in the same order as before,
+        # fetch every URL concurrently, then assemble the zip. Same entries,
+        # same PDF bytes, same order — only the network fetches parallelize.
+        jobs: list[tuple[str, str]] = []
+        for answer in answers:
+            filename = answer.get("filename", "AnswerScript.pdf")
+            if not filename.lower().endswith(".pdf"):
+                filename = f"{filename}.pdf"
+            student_name = filename.replace(".pdf", "").replace(".PDF", "")
+
+            if answer.get("answer_script_url"):
+                jobs.append((f"{student_name}/{filename}", answer["answer_script_url"]))
+            if answer.get("evaluated_report_url"):
+                jobs.append((f"{student_name}/{student_name}_result.pdf", answer["evaluated_report_url"]))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            contents = list(pool.map(lambda j: _fetch(j[1]), jobs))
+
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for answer in answers:
-                filename = answer.get("filename", "AnswerScript.pdf")
-                if not filename.lower().endswith(".pdf"):
-                    filename = f"{filename}.pdf"
-
-                student_name = filename.replace(".pdf", "").replace(".PDF", "")
-                student_folder = f"{student_name}/"
-
-                answer_script_url = answer.get("answer_script_url")
-                if answer_script_url:
-                    try:
-                        content = safe_get(answer_script_url, timeout=60)
-                    except SsrfError as exc:
-                        logging.warning("download-folder: skipping unsafe answer_script_url: %s", exc)
-                        content = b""
-                    if content[:4] == b"%PDF":
-                        zip_file.writestr(f"{student_folder}{filename}", content)
-
-                evaluated_report_url = answer.get("evaluated_report_url")
-                if evaluated_report_url:
-                    try:
-                        content = safe_get(evaluated_report_url, timeout=60)
-                    except SsrfError as exc:
-                        logging.warning("download-folder: skipping unsafe evaluated_report_url: %s", exc)
-                        content = b""
-                    if content[:4] == b"%PDF":
-                        zip_file.writestr(f"{student_folder}{student_name}_result.pdf", content)
+            for (zip_path, _url), content in zip(jobs, contents):
+                if content[:4] == b"%PDF":
+                    zip_file.writestr(zip_path, content)
 
         zip_buffer.seek(0)
         return zip_buffer.read()
