@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -86,14 +87,19 @@ def _extract_text_from_doc(file_bytes: bytes) -> str:
             doc_path = os.path.join(tmp_dir, "input.doc")
             with open(doc_path, "wb") as f:
                 f.write(file_bytes)
-            ret = os.system(
-                f"libreoffice --headless --convert-to txt:Text --outdir {tmp_dir} {doc_path} > /dev/null 2>&1"
+            # subprocess with an argument list + no shell: nothing here is
+            # shell-interpreted, and a hung LibreOffice can't block forever.
+            proc = subprocess.run(
+                ["libreoffice", "--headless", "--convert-to", "txt:Text", "--outdir", tmp_dir, doc_path],
+                capture_output=True,
+                timeout=120,
+                check=False,
             )
             txt_path = os.path.join(tmp_dir, "input.txt")
-            if ret == 0 and os.path.exists(txt_path):
+            if proc.returncode == 0 and os.path.exists(txt_path):
                 with open(txt_path, "r", errors="replace") as f:
                     return f.read()
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         logging.warning("LibreOffice .doc fallback failed: %s", e)
 
     raw = file_bytes.decode("latin-1", errors="replace")

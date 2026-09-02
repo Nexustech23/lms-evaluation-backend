@@ -41,6 +41,17 @@ async def _increment(key: str) -> int:
 
 
 def _client_ip(request: Request) -> str:
+    # Behind a trusted reverse proxy, request.client.host is the proxy — every
+    # client would share one rate-limit bucket. Honour X-Forwarded-For /
+    # X-Real-IP only when explicitly opted in (settings.TRUST_PROXY_HEADERS),
+    # since a directly-exposed app must not trust a client-supplied header.
+    if settings.TRUST_PROXY_HEADERS:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -91,7 +102,11 @@ class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
             key = f"ratelimit:global:ip:{_client_ip(request)}"
             count = await _increment(key)
         except Exception:
-            # Redis hiccup must never take the whole app down — fail open.
+            # Deliberate fail-OPEN, and only here: this is the loose whole-app
+            # floor, so a Redis blip must not 5xx every request. The tight
+            # limiters that actually protect login and the billed AI
+            # endpoints (RateLimitByIP / RateLimitByUser) fail CLOSED — a
+            # Redis outage makes those endpoints error rather than bypass.
             logging.exception("GlobalRateLimitMiddleware: Redis check failed, allowing request")
             return await call_next(request)
 

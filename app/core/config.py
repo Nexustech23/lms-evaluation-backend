@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # its "Evaluate All" button fires one request per ungraded answer script at once
     RATE_LIMIT_AUTH_PER_MINUTE: int = 10              # per IP, on public unauthenticated endpoints
 
+    # Set true ONLY when the app sits behind a trusted reverse proxy / load
+    # balancer that sets X-Forwarded-For. When false, rate-limit keys use the
+    # direct socket peer (correct for direct exposure; behind a proxy it
+    # would lump every client under the proxy's IP). Never enable this on a
+    # directly-internet-facing deployment — clients could spoof the header.
+    TRUST_PROXY_HEADERS: bool = False
+
     # SSRF guard (see app/utils/net.py). Comma-separated extra hostnames the
     # server is allowed to fetch from, on top of the ImageKit host (always
     # allowed) — e.g. a CDN used for question-paper uploads. Leave empty to
@@ -79,6 +86,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "JWT_SECRET_KEY must be a strong random value (>= 32 chars) when ENV=production. "
                 'Generate one with:  python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_wildcard_cors_with_credentials(self) -> "Settings":
+        # app/main.py mounts CORSMiddleware with allow_credentials=True. The
+        # CORS spec forbids "*" with credentials, and Starlette would silently
+        # reflect the Origin instead — turning it into an any-origin
+        # credentialed policy. Fail fast instead.
+        if "*" in self.cors_origins_list:
+            raise ValueError(
+                'CORS_ORIGINS must be an explicit list of origins — "*" is not allowed '
+                "because the API sends credentials (cookies)."
             )
         return self
 

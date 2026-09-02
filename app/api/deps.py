@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Tuple
 
 import jwt
@@ -6,7 +7,11 @@ from fastapi import Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
 
 from app.core.config import settings
-from app.core.redis_client import tokens_revoked_after
+from app.core.redis_client import (
+    get_cached_account_state,
+    set_cached_account_state,
+    tokens_revoked_after,
+)
 from app.core.security import decode_access_token
 from app.db.mongodb import get_database
 from app.models.user import (
@@ -49,14 +54,14 @@ async def get_current_identity(
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    # A valid signature is no longer enough on its own. The account must
-    # still exist and be active, and the token must not predate a logout /
-    # forced-logout / password change. Previously a deactivated or deleted
-    # user kept full access for the token's entire 24h lifetime.
-    user = await db["users"].find_one(
-        {"_id": ObjectId(user_id)}, {"is_active": 1, "is_deleted": 1, "role": 1}
-    )
-    if not user or user.get("is_deleted") is True or not user.get("is_active", True):
+    # A valid signature is no longer enough on its own: the account must
+    # still exist and be active, must not predate a logout / forced-logout /
+    # password change, and (when flagged) must have changed a temporary
+    # password before doing anything else. This state is cached in Redis for
+    # ACCOUNT_STATE_TTL seconds so it isn't a Mongo round-trip on every
+    # request; a Redis/Mongo error fails OPEN (unknown -> not blocked).
+    state = await _resolve_account_state(db, user_id)
+    if state.get("blocked"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive")
 
     cutoff = await tokens_revoked_after(user_id)
@@ -65,7 +70,44 @@ async def get_current_identity(
         if isinstance(iat, (int, float)) and iat < cutoff:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
 
-    return {"user_id": user_id, "role": payload.get("role", user.get("role"))}
+    if state.get("must_change_password") and request.url.path not in _PASSWORD_CHANGE_EXEMPT_PATHS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change required. Set a new password to continue.",
+        )
+
+    return {"user_id": user_id, "role": payload.get("role", state.get("role"))}
+
+
+# Endpoints reachable while must_change_password is set (so the user can
+# actually change it and the client can render the prompt).
+_PASSWORD_CHANGE_EXEMPT_PATHS = {"/me", "/logout", "/profile", "/profile/change-password"}
+
+
+async def _resolve_account_state(db: AsyncIOMotorDatabase, user_id: str) -> dict:
+    cached = await get_cached_account_state(user_id)
+    if cached is not None:
+        return cached
+
+    try:
+        user = await db["users"].find_one(
+            {"_id": ObjectId(user_id)},
+            {"is_active": 1, "is_deleted": 1, "role": 1, "must_change_password": 1},
+        )
+    except Exception:
+        logging.warning("get_current_identity: users lookup failed for %s — failing open", user_id)
+        return {}  # fail open — unknown state, not treated as blocked
+
+    if not user:
+        state = {"blocked": True}
+    else:
+        state = {
+            "blocked": user.get("is_deleted") is True or not user.get("is_active", True),
+            "must_change_password": bool(user.get("must_change_password", False)),
+            "role": user.get("role"),
+        }
+    await set_cached_account_state(user_id, state)
+    return state
 
 
 def require_role(*allowed_roles: int):

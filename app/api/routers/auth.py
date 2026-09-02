@@ -43,6 +43,10 @@ ROLE_NAME_TO_NUMBER = {
 
 PENDING_APPROVAL_ROLES = {5, 7}  # tutor, self_learner
 
+# Precomputed once at import so an "unknown email" login still pays one
+# bcrypt verification (constant-ish timing vs. a real wrong-password login).
+_DUMMY_PASSWORD_HASH = hash_password("not-a-real-password-timing-equalizer")
+
 
 def _validate_color(color) -> str:
     if isinstance(color, str) and re.match(r"^#([A-Fa-f0-9]{6})$", color):
@@ -457,11 +461,16 @@ async def login(
         password = payload.password
 
         user = await db["users"].find_one({"email": email, "is_deleted": False})
+        # One response for "no such account" and "wrong password" so an
+        # attacker can't enumerate which emails are registered. When the
+        # account is absent, still run one bcrypt verification against a
+        # fixed dummy hash so the response timing doesn't give it away.
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            verify_password(password, _DUMMY_PASSWORD_HASH)
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         if not verify_password(password, user["password_hash"]):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         if not user.get("is_active", True):
             if user.get("role") in PENDING_APPROVAL_ROLES:
