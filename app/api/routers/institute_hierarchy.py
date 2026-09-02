@@ -28,6 +28,7 @@ from app.api.deps import (
     require_role,
     validate_entity_ownership,
 )
+from app.core.cache import bust_institute_hierarchy, cached_get
 from app.db.mongodb import get_database
 from app.models.batch import create_batch_document, delete_batch_cascade, serialize_batch
 from app.models.department import create_department_document, serialize_department, update_department_document
@@ -52,6 +53,7 @@ from app.schemas.institute_hierarchy import (
     UpdateSchoolRequest,
     UpdateSubjectRequest,
 )
+from app.utils.batch import load_by_ids
 from app.utils.query import search_regex
 
 # Router-level gate: this whole surface is institute-admin / faculty only.
@@ -157,6 +159,7 @@ async def create_school(
     result = await db["schoolDetails"].insert_one(school_doc)
     created = await db["schoolDetails"].find_one({"_id": result.inserted_id})
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "school": serialize_school(created)}
 
 
@@ -176,6 +179,17 @@ async def get_schools(
     regex = search_regex(search)
     if regex:
         query["$or"] = [{"school_name": regex}, {"school_code": regex}, {"description": regex}]
+
+    # Display-only dropdown call (no pagination, no search) — cache it.
+    if limit == 0 and not search:
+        async def _load():
+            rows = [s async for s in db["schoolDetails"].find(query).sort("created_at", -1)]
+            return {
+                "success": True, "page": page, "limit": limit, "total": len(rows), "total_pages": 1,
+                "filters": {"search": search},
+                "schools": [{"id": str(s["_id"]), "school_name": s.get("school_name")} for s in rows],
+            }
+        return await cached_get("schools_dropdown", institute_id, _load)
 
     total = await db["schoolDetails"].count_documents(query)
     cursor = db["schoolDetails"].find(query).sort("created_at", -1)
@@ -225,6 +239,7 @@ async def update_school(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="School not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "School updated successfully"}
 
 
@@ -331,6 +346,7 @@ async def delete_school(
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="School not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "School deleted successfully", "deleted": summary}
 
 
@@ -380,6 +396,7 @@ async def create_programme(
     result = await db["programmeDetails"].insert_one(programme_doc)
     created = await db["programmeDetails"].find_one({"_id": result.inserted_id})
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "programme": serialize_programme(created)}
 
 
@@ -453,6 +470,16 @@ async def get_programmes(
     if regex:
         query["$or"] = [{"programme_name": regex}, {"programme_code": regex}, {"description": regex}]
 
+    if limit == 0 and not search:
+        async def _load():
+            rows = [p async for p in db["programmeDetails"].find(query).sort("created_at", -1)]
+            return {
+                "success": True, "page": page, "limit": limit, "total": len(rows), "total_pages": 1,
+                "filters": {"search": search},
+                "programmes": [{"id": str(p["_id"]), "programme_name": p.get("programme_name")} for p in rows],
+            }
+        return await cached_get("programmes_dropdown", institute_id, _load, sub_id=school_id)
+
     total = await db["programmeDetails"].count_documents(query)
     cursor = db["programmeDetails"].find(query).sort("created_at", -1)
     if limit > 0:
@@ -501,6 +528,7 @@ async def update_programme_po(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Programme not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Programme PO/targets updated successfully"}
 
 
@@ -531,6 +559,7 @@ async def update_programme(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Programme not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Programme updated successfully"}
 
 
@@ -575,6 +604,7 @@ async def delete_programme(
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Programme not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Programme and related data deleted"}
 
 
@@ -609,6 +639,7 @@ async def create_department(
     result = await db["departmentDetails"].insert_one(department_doc)
     created = await db["departmentDetails"].find_one({"_id": result.inserted_id})
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "department": serialize_department(created)}
 
 
@@ -633,6 +664,16 @@ async def get_departments(
     regex = search_regex(search)
     if regex:
         query["$or"] = [{"department_name": regex}, {"code": regex}]
+
+    if limit == 0 and not search:
+        async def _load():
+            rows = [d async for d in db["departmentDetails"].find(query).sort("created_at", -1)]
+            return {
+                "success": True, "page": page, "limit": limit, "total": len(rows), "total_pages": 1,
+                "filters": {"search": search},
+                "departments": [{"id": str(d["_id"]), "department_name": d.get("department_name")} for d in rows],
+            }
+        return await cached_get("departments_dropdown", institute_id, _load, sub_id=programme_id)
 
     total = await db["departmentDetails"].count_documents(query)
     cursor = db["departmentDetails"].find(query).sort("created_at", -1)
@@ -682,6 +723,7 @@ async def update_department(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Department not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Department updated successfully"}
 
 
@@ -714,6 +756,7 @@ async def delete_department(
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Department not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Department and related data deleted"}
 
 
@@ -788,6 +831,7 @@ async def create_batch(
             subject_doc = create_subject_document(subject_payload, str(user["_id"]))
             await db["subjectDetails"].insert_one(subject_doc)
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "batch_id": str(batch_id)}
 
 
@@ -867,6 +911,7 @@ async def update_batch(
                 subject_doc = create_subject_document(subject_payload, str(user["_id"]))
                 await db["subjectDetails"].insert_one(subject_doc)
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Batch and subjects updated successfully"}
 
 
@@ -905,6 +950,21 @@ async def get_batches(
     regex = search_regex(search)
     if regex:
         query["$or"] = [{"batch_name": regex}]
+
+    if limit == 0 and not search:
+        async def _load():
+            rows = [b async for b in db["batchDetails"].find(query).sort("created_at", -1)]
+            return {
+                "success": True, "page": page, "limit": limit, "total": len(rows), "total_pages": 1,
+                "filters": {"search": search, "department_id": department_id, "programme_id": programme_id},
+                "batches": [
+                    {"id": str(b["_id"]), "batch_name": b.get("batch_name"), "semesters": b.get("semesters")}
+                    for b in rows
+                ],
+            }
+        return await cached_get(
+            "batches_dropdown", institute_id, _load, sub_id=f"{department_id or ''}:{programme_id or ''}"
+        )
 
     total = await db["batchDetails"].count_documents(query)
     cursor = db["batchDetails"].find(query).sort("created_at", -1)
@@ -983,6 +1043,7 @@ async def delete_batch(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Batch and all related data deleted successfully", "deleted": result["deleted"]}
 
 
@@ -1011,6 +1072,7 @@ async def create_subject(
 
     result = await db["subjectDetails"].insert_one(subject_doc)
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "subject_id": str(result.inserted_id)}
 
 
@@ -1039,12 +1101,32 @@ async def get_faculty_filter_data(
 
     subjects = [s async for s in db["subjectDetails"].find({"faculty_id": faculty_id, "is_deleted": False})]
 
+    # Preload every referenced hierarchy row in 4 $in queries (Phase 4) — the
+    # map-building loops below then do dict lookups instead of a find_one per
+    # subject. Progressive filtering of `subjects` still controls which rows
+    # land in each map; preloading a superset is harmless.
+    _schools_by_id = await load_by_ids(
+        db, "schoolDetails", (s.get("school_id") for s in subjects),
+        {"_id": 1, "school_name": 1, "school_code": 1, "co": 1},
+    )
+    _programmes_by_id = await load_by_ids(
+        db, "programmeDetails", (s.get("programme_id") for s in subjects),
+        {"_id": 1, "programme_name": 1, "programme_code": 1},
+    )
+    _departments_by_id = await load_by_ids(
+        db, "departmentDetails", (s.get("department_id") for s in subjects),
+        {"_id": 1, "department_name": 1, "code": 1},
+    )
+    _batches_by_id = await load_by_ids(
+        db, "batchDetails", (s.get("batch_id") for s in subjects), {"_id": 1, "batch_name": 1},
+    )
+
     school_map: Dict[str, Any] = {}
     for s in subjects:
         sid = s.get("school_id")
         if not sid or str(sid) in school_map:
             continue
-        school = await db["schoolDetails"].find_one({"_id": sid}, {"_id": 1, "school_name": 1, "school_code": 1, "co": 1})
+        school = _schools_by_id.get(sid)
         if school:
             school_map[str(sid)] = {
                 "id": str(school["_id"]),
@@ -1062,7 +1144,7 @@ async def get_faculty_filter_data(
         pid = s.get("programme_id")
         if not pid or str(pid) in programme_map:
             continue
-        programme = await db["programmeDetails"].find_one({"_id": pid}, {"_id": 1, "programme_name": 1, "programme_code": 1})
+        programme = _programmes_by_id.get(pid)
         if programme:
             programme_map[str(pid)] = {
                 "id": str(programme["_id"]),
@@ -1079,7 +1161,7 @@ async def get_faculty_filter_data(
         did = s.get("department_id")
         if not did or str(did) in department_map:
             continue
-        department = await db["departmentDetails"].find_one({"_id": did}, {"_id": 1, "department_name": 1, "code": 1})
+        department = _departments_by_id.get(did)
         if department:
             department_map[str(did)] = {
                 "id": str(department["_id"]),
@@ -1098,7 +1180,7 @@ async def get_faculty_filter_data(
         bid = s.get("batch_id")
         if not bid or str(bid) in batch_map:
             continue
-        batch = await db["batchDetails"].find_one({"_id": bid}, {"_id": 1, "batch_name": 1})
+        batch = _batches_by_id.get(bid)
         if batch:
             batch_map[str(bid)] = {"id": str(batch["_id"]), "batch_name": batch.get("batch_name")}
 
@@ -1186,12 +1268,27 @@ async def get_subjects_by_faculty(
             "subjects": [{"id": str(s["_id"]), "subject_name": s.get("subject_name")} for s in subjects],
         }
 
+    # Batched FK enrichment (Phase 4) — one $in per collection instead of
+    # four find_one per subject. Same lookups, same output.
+    schools_by_id = await load_by_ids(
+        db, "schoolDetails", (s["school_id"] for s in subjects), {"_id": 1, "school_name": 1, "institute_id": 1}
+    )
+    depts_by_id = await load_by_ids(
+        db, "departmentDetails", (s.get("department_id") for s in subjects), {"_id": 1, "code": 1}
+    )
+    batches_by_id = await load_by_ids(
+        db, "batchDetails", (s.get("batch_id") for s in subjects), {"_id": 1, "batch_name": 1}
+    )
+    progs_by_id = await load_by_ids(
+        db, "programmeDetails", (s.get("programme_id") for s in subjects), {"_id": 1, "programme_code": 1}
+    )
+
     populated = []
     for subject in subjects:
-        school = await db["schoolDetails"].find_one({"_id": subject["school_id"]}, {"_id": 1, "school_name": 1, "institute_id": 1})
-        department = await db["departmentDetails"].find_one({"_id": subject.get("department_id")}, {"_id": 1, "code": 1})
-        batch = await db["batchDetails"].find_one({"_id": subject.get("batch_id")}, {"_id": 1, "batch_name": 1})
-        programme = await db["programmeDetails"].find_one({"_id": subject.get("programme_id")}, {"_id": 1, "programme_code": 1})
+        school = schools_by_id.get(subject["school_id"])
+        department = depts_by_id.get(subject.get("department_id"))
+        batch = batches_by_id.get(subject.get("batch_id"))
+        programme = progs_by_id.get(subject.get("programme_id"))
 
         populated.append({
             "_id": str(subject["_id"]),
@@ -1271,6 +1368,19 @@ async def get_subjects_by_institute(
         "department_id": department_id, "batch_id": batch_id, "semester": semester,
     }
 
+    if limit == 0 and not search:
+        async def _load():
+            rows = [s async for s in db["subjectDetails"].find(query).sort("created_at", -1)]
+            return {
+                "success": True, "page": page, "limit": limit, "total": len(rows), "total_pages": 1,
+                "filters": filters,
+                "subjects": [{"id": str(s["_id"]), "subject_name": s.get("subject_name")} for s in rows],
+            }
+        return await cached_get(
+            "subjects_dropdown", institute_id, _load,
+            sub_id=f"{school_id or ''}:{programme_id or ''}:{department_id or ''}:{batch_id or ''}:{semester or ''}",
+        )
+
     if limit == 0:
         return {
             "success": True, "page": page, "limit": limit, "total": total, "total_pages": 1,
@@ -1278,12 +1388,27 @@ async def get_subjects_by_institute(
             "subjects": [{"id": str(s["_id"]), "subject_name": s.get("subject_name")} for s in subjects],
         }
 
+    # Batched FK enrichment (Phase 4) — one $in per collection instead of
+    # four find_one per subject. Same lookups, same output.
+    schools_by_id = await load_by_ids(
+        db, "schoolDetails", (s["school_id"] for s in subjects), {"_id": 1, "school_name": 1, "institute_id": 1}
+    )
+    depts_by_id = await load_by_ids(
+        db, "departmentDetails", (s.get("department_id") for s in subjects), {"_id": 1, "department_name": 1}
+    )
+    batches_by_id = await load_by_ids(
+        db, "batchDetails", (s.get("batch_id") for s in subjects), {"_id": 1, "batch_name": 1}
+    )
+    progs_by_id = await load_by_ids(
+        db, "programmeDetails", (s.get("programme_id") for s in subjects), {"_id": 1, "programme_name": 1}
+    )
+
     populated = []
     for subject in subjects:
-        school = await db["schoolDetails"].find_one({"_id": subject["school_id"]}, {"_id": 1, "school_name": 1, "institute_id": 1})
-        department = await db["departmentDetails"].find_one({"_id": subject.get("department_id")}, {"_id": 1, "department_name": 1})
-        batch = await db["batchDetails"].find_one({"_id": subject.get("batch_id")}, {"_id": 1, "batch_name": 1})
-        programme = await db["programmeDetails"].find_one({"_id": subject.get("programme_id")}, {"_id": 1, "programme_name": 1})
+        school = schools_by_id.get(subject["school_id"])
+        department = depts_by_id.get(subject.get("department_id"))
+        batch = batches_by_id.get(subject.get("batch_id"))
+        programme = progs_by_id.get(subject.get("programme_id"))
 
         populated.append({
             "_id": str(subject["_id"]),
@@ -1388,6 +1513,7 @@ async def update_subject(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Subject not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Subject updated successfully"}
 
 
@@ -1417,4 +1543,5 @@ async def delete_subject(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Subject not found")
 
+    await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Subject deleted successfully"}

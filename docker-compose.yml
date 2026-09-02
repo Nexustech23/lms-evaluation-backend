@@ -24,6 +24,21 @@ services:
     # the fixed host `ports` mapping above, put nginx/traefik in front on
     # 5050, and `docker compose up -d --scale lms-backend-fastapi=3`.
 
+  # Perf Phase 2 — executes the AI / PDF / transcript jobs that the web
+  # container enqueues to Redis (arq). Same image and env as the web
+  # service; no ports (not an HTTP server). Scale it independently of the
+  # web tier: `docker compose up -d --scale lms-worker=3`.
+  lms-worker:
+    build: .
+    command: arq app.worker.WorkerSettings
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - lms-backend-fastapi
+    networks:
+      - lms-shared
+
 networks:
   lms-shared:
     external: true

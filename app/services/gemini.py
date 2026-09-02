@@ -319,7 +319,8 @@ def generate_content_from_file(
 
 
 # ==========================================
-# BACKGROUND JOB (FastAPI BackgroundTasks, not a raw Thread)
+# BACKGROUND JOB — runs in the arq worker process (Perf Phase 2), enqueued
+# by exams.upload_question_paper via app.core.queue.enqueue.
 # ==========================================
 
 async def extract_and_patch_question_paper_text(

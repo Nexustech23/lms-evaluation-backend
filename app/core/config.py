@@ -122,5 +122,15 @@ class Settings(BaseSettings):
     THREAD_POOL_WORKERS: int = 24
     MONGO_MAX_POOL_SIZE: int = 50
 
+    # Task queue (Phase 2 — see app/core/queue.py + app/worker.py). The AI /
+    # PDF / transcript jobs run in a separate `worker` container instead of
+    # inside the web process.
+    #   "redis"  — enqueue to arq; the worker container executes the job.
+    #   "inline" — run the job body in-process, awaited before the request
+    #              returns (used by the test suite, which has no worker).
+    QUEUE_MODE: str = "redis"
+    ARQ_MAX_JOBS: int = 12               # concurrent jobs per worker process
+    ARQ_JOB_TIMEOUT_SECONDS: int = 1800   # hard cap per job (grading + transcript can be slow)
+
 
 settings = Settings()

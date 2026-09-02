@@ -36,6 +36,7 @@ from app.schemas.profile import (
     SelfLearnerUpdateRequest,
     TutorUpdateRequest,
 )
+from app.utils.batch import load_by_ids
 from app.utils.cascade import cascade_institute_access, cascade_institute_status, cascade_tutor_status
 
 router = APIRouter(tags=["profile"])
@@ -505,11 +506,22 @@ async def get_all_faculties(
         if programme and programme.get("school_id"):
             query["school_id"] = programme["school_id"]
 
+    faculty_rows = [doc async for doc in db["facultyDetails"].find(query).sort("created_at", -1)]
+
+    # Batched enrichment (Phase 4): one $in for users, one for schools,
+    # instead of a find_one per faculty row.
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in faculty_rows),
+        {"fullName": 1, "email": 1, "phone": 1, "is_active": 1},
+    )
+    schools_by_id = await load_by_ids(
+        db, "schoolDetails", (d.get("school_id") for d in faculty_rows),
+        {"school_name": 1, "school_code": 1},
+    )
+
     result = []
-    async for doc in db["facultyDetails"].find(query).sort("created_at", -1):
-        u = await db["users"].find_one(
-            {"_id": doc["user_id"]}, {"fullName": 1, "email": 1, "phone": 1, "is_active": 1}
-        ) or {}
+    for doc in faculty_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
 
         if search and search.strip():
             search_lower = search.strip().lower()
@@ -525,11 +537,7 @@ async def get_all_faculties(
             result.append({"id": str(doc["_id"]), "user_id": str(doc["user_id"]), "fullName": u.get("fullName")})
             continue
 
-        school = None
-        if doc.get("school_id"):
-            school = await db["schoolDetails"].find_one(
-                {"_id": doc["school_id"]}, {"school_name": 1, "school_code": 1}
-            )
+        school = schools_by_id.get(doc["school_id"]) if doc.get("school_id") else None
 
         result.append({
             "id": str(doc["_id"]),
@@ -693,12 +701,15 @@ async def get_all_institute_students(
     query = {"institute_id": ObjectId(institute_id), "role": 4}
     skip = (page - 1) * limit
 
-    cursor = db["studentDetails"].find(query).skip(skip).limit(limit)
+    student_rows = [doc async for doc in db["studentDetails"].find(query).skip(skip).limit(limit)]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in student_rows),
+        {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1},
+    )
+
     result = []
-    async for doc in cursor:
-        u = await db["users"].find_one(
-            {"_id": doc["user_id"]}, {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-        ) or {}
+    for doc in student_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
         result.append({
             "id": str(doc["_id"]),
             "user_id": str(doc["user_id"]),
@@ -749,14 +760,31 @@ async def get_all_tutors(
     elif status == "active":
         query["is_active"] = True
 
-    cursor = db["users"].find(
-        query, {"_id": 1, "fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-    ).skip(skip).limit(limit)
+    tutor_users = [
+        u async for u in db["users"].find(
+            query, {"_id": 1, "fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
+        ).skip(skip).limit(limit)
+    ]
+    uids = [u["_id"] for u in tutor_users]
+
+    # Batched (Phase 4): one query for tutorDetails, one aggregation for the
+    # per-tutor student counts — instead of a find_one + count_documents per row.
+    tutor_by_uid = {
+        t["user_id"]: t
+        async for t in db["tutorDetails"].find({"user_id": {"$in": uids}})
+    }
+    student_counts: Dict[Any, int] = {
+        row["_id"]: row["n"]
+        async for row in db["studentDetails"].aggregate([
+            {"$match": {"tutor_id": {"$in": uids}, "role": 6}},
+            {"$group": {"_id": "$tutor_id", "n": {"$sum": 1}}},
+        ])
+    }
 
     result = []
-    async for u in cursor:
+    for u in tutor_users:
         uid = u["_id"]
-        tutor = await db["tutorDetails"].find_one({"user_id": uid}) or {}
+        tutor = tutor_by_uid.get(uid) or {}
         result.append({
             "id": str(uid),
             "fullName": u.get("fullName"),
@@ -765,7 +793,7 @@ async def get_all_tutors(
             "is_active": u.get("is_active", False),
             "created_at": u.get("created_at"),
             "coaching_name": tutor.get("coaching_name", ""),
-            "student_count": await db["studentDetails"].count_documents({"tutor_id": uid, "role": 6}),
+            "student_count": student_counts.get(uid, 0),
         })
 
     total = await db["users"].count_documents(query)
@@ -850,12 +878,15 @@ async def get_all_tutor_students(
     query = {"tutor_id": ObjectId(tutor_user_id), "role": 6}
     skip = (page - 1) * limit
 
-    cursor = db["studentDetails"].find(query).skip(skip).limit(limit)
+    student_rows = [doc async for doc in db["studentDetails"].find(query).skip(skip).limit(limit)]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in student_rows),
+        {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1},
+    )
+
     result = []
-    async for doc in cursor:
-        u = await db["users"].find_one(
-            {"_id": doc["user_id"]}, {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-        ) or {}
+    for doc in student_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
         result.append({
             "id": str(doc["_id"]),
             "user_id": str(doc["user_id"]),
