@@ -426,12 +426,8 @@ def safe_json_parse(text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 9. last resort: dump the unparseable text for debugging
-    try:
-        with open("bad_llm_json.txt", "w", encoding="utf-8") as f:
-            f.write(cleaned)
-    except Exception:
-        pass
-
-    # 10. give up
-    raise ValueError("Could not parse AI response as JSON. Raw output saved to bad_llm_json.txt")
+    # 9. give up — log a bounded snippet (never write the full raw model
+    #    output to a file on disk: unbounded, and this path is reachable by
+    #    an unauthenticated-ish caller triggering a grading job).
+    logging.warning("safe_json_parse: unparseable AI response (first 500 chars): %s", cleaned[:500])
+    raise ValueError("Could not parse the AI model's response as JSON.")

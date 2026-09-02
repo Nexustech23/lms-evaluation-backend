@@ -306,15 +306,25 @@ def test_weak_jwt_secret_rejected_only_in_production():
 
 
 async def test_deactivated_user_loses_access_before_token_expiry(client_factory, test_db):
+    from app.core.redis_client import bust_account_state
+
     c = await _seed_and_login_user(test_db, client_factory, role=7, name="Soon Disabled")
     assert (await c.get("/me")).status_code == 200
 
-    await test_db["users"].update_one({"fullName": "Soon Disabled"}, {"$set": {"is_active": False}})
+    user = await test_db["users"].find_one({"fullName": "Soon Disabled"})
+    uid = str(user["_id"])
+
+    # The real deactivation endpoints bust the account-state cache; this test
+    # writes to Mongo directly, so bust it here to assert the effect rather
+    # than sleeping out the ~30s cache TTL.
+    await test_db["users"].update_one({"_id": user["_id"]}, {"$set": {"is_active": False}})
+    await bust_account_state(uid)
     assert (await c.get("/me")).status_code == 401
 
     await test_db["users"].update_one(
-        {"fullName": "Soon Disabled"}, {"$set": {"is_active": True, "is_deleted": True}}
+        {"_id": user["_id"]}, {"$set": {"is_active": True, "is_deleted": True}}
     )
+    await bust_account_state(uid)
     assert (await c.get("/me")).status_code == 401
 
 
@@ -369,6 +379,11 @@ async def test_generated_institute_student_password_is_random_and_forces_change(
     login_resp = await student.post("/login", json={"email": email, "password": pwd})
     assert login_resp.status_code == 200
     assert login_resp.json()["user"]["must_change_password"] is True
+
+    # must_change_password is now hard-enforced: everything except the
+    # exempt paths (/me, /profile, /profile/change-password, /logout) is 403.
+    assert (await student.get("/student-academic-filters")).status_code == 403
+    assert (await student.get("/me")).status_code == 200  # exempt
 
     changed = await student.put(
         "/profile/change-password", json={"currentPassword": pwd, "newPassword": "BrandNewPass1!"}
@@ -539,6 +554,53 @@ async def test_relative_grading_is_scoped_to_caller_institute(superadmin_client,
     # A can
     assert (await a.get(f"/relative-grading/{a_id}")).status_code == 200
     assert (await a.put(f"/relative-grading/{grading_id}", json=grading)).status_code == 200
+
+
+# ============================================================
+# 11. Config guards + AI-expression sandbox
+# ============================================================
+
+def test_wildcard_cors_with_credentials_is_rejected():
+    from app.core.config import Settings
+
+    Settings(_env_file=None, CORS_ORIGINS="https://app.example.com,https://admin.example.com")
+    for bad in ("*", "https://a.com,*", " * "):
+        with pytest.raises(Exception):
+            Settings(_env_file=None, CORS_ORIGINS=bad)
+
+
+def test_curve_expression_evaluator_rejects_non_math_constructs():
+    import numpy as np
+
+    from app.services.diagram_render import _eval_curve
+
+    x = np.linspace(-1, 1, 5)
+    # legitimate curve still works
+    assert _eval_curve("sin(x)**2 + 0.5", x).shape == x.shape
+
+    for evil in [
+        "__import__('os').system('id')",
+        "x.__class__.__mro__",
+        "(1).__class__",
+        "[c for c in ().__class__.__bases__]",
+        "open('/etc/passwd')",
+        "eval('1')",
+        "x if x else x",
+    ]:
+        with pytest.raises(ValueError):
+            _eval_curve(evil, x)
+
+
+def test_rate_limiter_ignores_forwarded_headers_unless_trusted():
+    from types import SimpleNamespace
+
+    from app.core import rate_limit
+
+    req = SimpleNamespace(
+        headers={"x-forwarded-for": "1.2.3.4", "x-real-ip": "5.6.7.8"},
+        client=SimpleNamespace(host="10.0.0.1"),
+    )
+    assert rate_limit._client_ip(req) == "10.0.0.1"  # TRUST_PROXY_HEADERS defaults False
 
 
 # ============================================================

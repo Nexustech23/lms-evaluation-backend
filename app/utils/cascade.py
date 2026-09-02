@@ -3,6 +3,8 @@ import logging
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.redis_client import bust_account_state
+
 
 async def cascade_institute_status(db: AsyncIOMotorDatabase, institute_user_id, is_active: bool) -> None:
     """
@@ -30,6 +32,8 @@ async def cascade_institute_status(db: AsyncIOMotorDatabase, institute_user_id, 
             {"_id": {"$in": [ObjectId(uid) for uid in all_ids]}},
             {"$set": {"is_active": is_active}},
         )
+        for uid in all_ids:
+            await bust_account_state(str(uid))
         action = "activated" if is_active else "deactivated"
         logging.info(
             "Cascade %s %d users (faculty + institute_students) under institute %s",
@@ -49,6 +53,8 @@ async def cascade_tutor_status(db: AsyncIOMotorDatabase, tutor_user_id, is_activ
             {"_id": {"$in": [ObjectId(uid) for uid in student_user_ids]}},
             {"$set": {"is_active": is_active}},
         )
+        for uid in student_user_ids:
+            await bust_account_state(str(uid))
         action = "activated" if is_active else "deactivated"
         logging.info(
             "Cascade %s %d tutor_students under tutor %s",

@@ -185,8 +185,11 @@ async def test_login_rejects_invalid_email_format(client):
 
 
 async def test_login_rejects_unknown_user(client):
+    # Same 401 + message as a wrong password — an unknown email must not be
+    # distinguishable (account enumeration).
     resp = await client.post("/login", json={"email": _email("nobody"), "password": PASSWORD})
-    assert resp.status_code == 404
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "Invalid email or password"
 
 
 async def test_login_rejects_wrong_password(test_db, client):

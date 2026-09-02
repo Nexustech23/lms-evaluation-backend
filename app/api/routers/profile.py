@@ -24,7 +24,7 @@ from app.api.deps import (
     require_role,
 )
 from app.core.config import settings
-from app.core.redis_client import revoke_user_tokens
+from app.core.redis_client import bust_account_state, revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
 from app.models.user import serialize_doc
@@ -294,6 +294,9 @@ async def change_password(
     # and — for a first-login forced change — the temporary-password session
     # itself). The client re-authenticates with the new password.
     await revoke_user_tokens(user_id, settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
+    # Drop the cached {must_change_password, is_active} so the next login
+    # isn't blocked by a stale flag for up to ACCOUNT_STATE_TTL seconds.
+    await bust_account_state(user_id)
 
     return {"message": "Password updated successfully"}
 
@@ -452,6 +455,7 @@ async def update_institute(
 
     if institute_data.get("is_active") is not None:
         await db["users"].update_one({"_id": user_object_id}, {"$set": {"is_active": institute_data["is_active"]}})
+        await bust_account_state(str(user_object_id))
         await cascade_institute_status(db, user_object_id, institute_data["is_active"])
 
     await cascade_institute_access(
@@ -795,6 +799,7 @@ async def update_tutor(
             {"_id": tutor_object_id},
             {"$set": {"is_active": is_active, "updated_at": datetime.now(timezone.utc)}},
         )
+        await bust_account_state(str(tutor_object_id))
         await cascade_tutor_status(db, tutor_user_id, is_active)
 
     if user_fields:
@@ -993,6 +998,7 @@ async def update_self_learner(
     if update_fields:
         update_fields["updated_at"] = datetime.now(timezone.utc)
         await db["users"].update_one({"_id": ObjectId(learner_user_id)}, {"$set": update_fields})
+        await bust_account_state(str(learner_user_id))
 
     updated = await db["users"].find_one({"_id": ObjectId(learner_user_id)}, {"password_hash": 0}) or {}
     updated["_id"] = str(updated["_id"])
