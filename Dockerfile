@@ -20,4 +20,17 @@ COPY . .
 
 EXPOSE 5050
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5050"]
+# Multi-process: gunicorn manages N uvicorn workers in one container, so a
+# slow request no longer blocks every other request. Worker count is
+# WEB_CONCURRENCY (default 3) — set it to ~2*vCPU+1. --timeout 120 so a
+# heavy synchronous export isn't killed at gunicorn's 30s default (Perf
+# Phase 2 moves those off the request path entirely). Shell form is used so
+# ${WEB_CONCURRENCY:-3} expands.
+CMD gunicorn app.main:app \
+    -k uvicorn.workers.UvicornWorker \
+    --bind 0.0.0.0:5050 \
+    --workers ${WEB_CONCURRENCY:-3} \
+    --timeout 120 \
+    --graceful-timeout 30 \
+    --access-logfile - \
+    --error-logfile -
