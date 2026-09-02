@@ -205,7 +205,11 @@ _NOTES_TYPE_INSTRUCTIONS = {
     ),
 }
 
-_NOTES_LENGTH_TOKENS = {"5 Pages": 3000, "10 Pages": 5000, "15 Pages": 7000, "Custom": 5000}
+# Output-token budgets per requested length. A styled HTML page is roughly
+# 3–5k tokens, so these are ~page-count × 4k with headroom; generate_html
+# streams, so large values don't risk an HTTP timeout. claude-sonnet-4-6
+# tops out at 128k output.
+_NOTES_LENGTH_TOKENS = {"5 Pages": 20000, "10 Pages": 32000, "15 Pages": 48000, "Custom": 24000}
 
 
 def _build_notes_prompt(prompt: str, extracted_text: str, notes_type: str, notes_length: str) -> str:
@@ -294,7 +298,7 @@ async def _run_homework_job(
             params["prompt"], extracted_text, params["homeworkType"], params["responseStyle"]
         )
         claude_model = "claude-sonnet-4-6"
-        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 5000)
+        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 16000)
         logging.info("[hw:%s] Claude done — %d tokens", job_id, c_usage["total_tokens"])
         await record_ai_usage(
             db, user_id=user_id, provider=Provider.CLAUDE, model=claude_model,
