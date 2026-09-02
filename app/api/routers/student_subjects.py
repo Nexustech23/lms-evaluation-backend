@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import FACULTY, INSTITUTE, INSTITUTE_STUDENT, get_current_identity
+from app.core.cache import cached_get
 from app.db.mongodb import get_database
 from app.models.student_subject_relation import (
     create_student_subject_relation_document,
@@ -154,23 +155,31 @@ async def get_academic_filters(
 
     programme_id = student["programme_id"]
 
-    departments = [
-        {"id": str(dep["_id"]), "name": dep.get("department_name")}
-        async for dep in db["departmentDetails"].find({"programme_id": programme_id, "is_deleted": {"$ne": True}})
-        if dep.get("department_name")
-    ]
+    # Display-only dropdowns keyed to the student's programme — cache under the
+    # student's institute so a hierarchy edit (which busts hcache:v1:*:<inst>*)
+    # clears it. Nothing here feeds a computed mark/grade.
+    async def _load():
+        departments = [
+            {"id": str(dep["_id"]), "name": dep.get("department_name")}
+            async for dep in db["departmentDetails"].find({"programme_id": programme_id, "is_deleted": {"$ne": True}})
+            if dep.get("department_name")
+        ]
 
-    batch_query: Dict[str, Any] = {"programme_id": programme_id, "is_deleted": {"$ne": True}}
-    if department_id and ObjectId.is_valid(department_id):
-        batch_query["department_id"] = ObjectId(department_id)
+        batch_query: Dict[str, Any] = {"programme_id": programme_id, "is_deleted": {"$ne": True}}
+        if department_id and ObjectId.is_valid(department_id):
+            batch_query["department_id"] = ObjectId(department_id)
 
-    batches = [
-        {"id": str(b["_id"]), "name": b.get("batch_name"), "semesters": b.get("semesters")}
-        async for b in db["batchDetails"].find(batch_query)
-        if b.get("batch_name")
-    ]
+        batches = [
+            {"id": str(b["_id"]), "name": b.get("batch_name"), "semesters": b.get("semesters")}
+            async for b in db["batchDetails"].find(batch_query)
+            if b.get("batch_name")
+        ]
+        return {"departments": departments, "batches": batches}
 
-    return {"departments": departments, "batches": batches}
+    return await cached_get(
+        "student_academic_filters", student.get("institute_id") or "unknown", _load,
+        sub_id=f"{identity['user_id']}:{department_id or ''}",
+    )
 
 
 @router.get("/student-groups")
