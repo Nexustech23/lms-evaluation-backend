@@ -13,8 +13,8 @@
 # this addition.
 #
 # Follows this codebase's established async-job convention: Redis-backed
-# job_store.py + BackgroundTasks (same pattern as roadmap.py/ai_tutor.py),
-# rather than the Flask prototype's in-memory dict.
+# job_store.py, with the job executed in the arq worker process (Perf
+# Phase 2 — app/worker.py), rather than the Flask prototype's in-memory dict.
 # ============================================================
 
 import asyncio
@@ -25,11 +25,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import FACULTY, INSTITUTE, get_current_identity
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.utils.uploads import read_upload_capped
@@ -182,7 +183,6 @@ async def get_ingest_status(job_id: str, identity: dict = Depends(get_current_id
 
 @router.post("/upload", dependencies=[Depends(ai_rate_limit)])
 async def upload_course_material(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     course_title: Optional[str] = Form(None),
     course_code: Optional[str] = Form(None),
@@ -200,9 +200,9 @@ async def upload_course_material(
         "status": "processing", "step": "Starting…", "user_id": identity["user_id"],
     })
 
-    background_tasks.add_task(
-        _run_ingest_job, job_id, file_bytes, file.filename or "upload",
-        course_title, course_code, identity["user_id"],
+    await enqueue(
+        "run_ingest_job", job_id, file_bytes, file.filename or "upload",
+        course_title, course_code, identity["user_id"], CM_JOB_PREFIX,
     )
 
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "processing"})

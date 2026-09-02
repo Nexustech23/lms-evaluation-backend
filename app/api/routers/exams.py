@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from bson import ObjectId
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.exam import create_exam_document
@@ -29,7 +30,6 @@ from app.schemas.exams import (
     SetArchiveStatusRequest,
     UploadQuestionPaperRequest,
 )
-from app.services.gemini import extract_and_patch_question_paper_text
 from app.utils.net import SsrfError, safe_get
 from app.utils.query import search_regex
 from app.utils.token_usage import check_institute_token_budget
@@ -119,7 +119,6 @@ async def create_folder(
 @router.post("/upload-question-paper/{folder_id}", dependencies=[Depends(ai_rate_limit)])
 async def upload_question_paper(
     folder_id: str,
-    background_tasks: BackgroundTasks,
     payload: UploadQuestionPaperRequest,
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -162,8 +161,9 @@ async def upload_question_paper(
     )
 
     if budget["allowed"]:
-        background_tasks.add_task(
-            extract_and_patch_question_paper_text, db, folder_object_id, questionpaper_url, str(faculty_id), filename
+        await enqueue(
+            "run_extract_question_paper_text",
+            str(folder_object_id), questionpaper_url, str(faculty_id), filename,
         )
 
     updated_exam = await db["newsavedDocs"].find_one({"_id": folder_object_id})
