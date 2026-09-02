@@ -27,17 +27,17 @@ _RATE_LIMIT_MESSAGE = "Too many requests. Please slow down and try again shortly
 
 
 async def _increment(key: str) -> int:
-    """Fixed-window counter: first hit in a window sets the expiry, every
-    hit after that just increments. Not perfectly atomic against the rare
-    race between INCR and EXPIRE on the very first request in a window, but
-    that only risks a slightly-longer-lived key, never an under-count — an
-    acceptable tradeoff for the same reason the existing token counters in
-    app/utils/token_usage.py accept eventual-consistency-shaped edges."""
+    """Fixed-window counter in a single Redis round-trip: `SET key 0 EX <win>
+    NX` creates the key with its TTL only if absent, then `INCR` bumps it —
+    pipelined together. The TTL is now atomically tied to key creation, so
+    unlike the old INCR-then-conditional-EXPIRE there's no race window, and
+    the window stays fixed (the TTL is never refreshed by later hits)."""
     redis = get_redis()
-    count = await redis.incr(key)
-    if count == 1:
-        await redis.expire(key, WINDOW_SECONDS)
-    return count
+    async with redis.pipeline(transaction=False) as pipe:
+        pipe.set(key, 0, ex=WINDOW_SECONDS, nx=True)
+        pipe.incr(key)
+        _, count = await pipe.execute()
+    return int(count)
 
 
 def _client_ip(request: Request) -> str:
