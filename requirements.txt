@@ -49,3 +49,10 @@ markdown2
 
 # Phase 9 — hybrid RAG (course-material grounding for roadmap generation)
 qdrant-client==1.12.1
+
+# Perf Phase 1 — multi-process web server (Dockerfile CMD)
+gunicorn==23.0.0
+
+# Perf Phase 2 — Redis task queue for AI / PDF / transcript jobs
+# (docker-compose service `worker`: arq app.worker.WorkerSettings)
+arq==0.26.3

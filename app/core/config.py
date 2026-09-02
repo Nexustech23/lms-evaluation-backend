@@ -106,5 +106,31 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
+    # Observability (see app/core/observability.py). PERF_LOG logs one line
+    # per request (method path status duration_ms); SLOW_QUERY_MS logs any
+    # MongoDB command slower than this. Both are cheap; turn PERF_LOG off in
+    # steady-state prod if the log volume is unwanted.
+    PERF_LOG_ENABLED: bool = True
+    PERF_LOG_SLOW_MS: int = 500          # requests slower than this log at WARNING
+    SLOW_QUERY_MS: int = 100             # 0 disables the Mongo command monitor
+
+    # Concurrency (Phase 1). THREAD_POOL_WORKERS sizes the executor used by
+    # asyncio.to_thread for the blocking SDK calls (Gemini/Claude/Playwright/
+    # requests) — per worker process. MONGO_MAX_POOL_SIZE caps Motor's
+    # connection pool per worker. gunicorn worker count is set in the
+    # Dockerfile via WEB_CONCURRENCY, not here.
+    THREAD_POOL_WORKERS: int = 24
+    MONGO_MAX_POOL_SIZE: int = 50
+
+    # Task queue (Phase 2 — see app/core/queue.py + app/worker.py). The AI /
+    # PDF / transcript jobs run in a separate `worker` container instead of
+    # inside the web process.
+    #   "redis"  — enqueue to arq; the worker container executes the job.
+    #   "inline" — run the job body in-process, awaited before the request
+    #              returns (used by the test suite, which has no worker).
+    QUEUE_MODE: str = "redis"
+    ARQ_MAX_JOBS: int = 12               # concurrent jobs per worker process
+    ARQ_JOB_TIMEOUT_SECONDS: int = 1800   # hard cap per job (grading + transcript can be slow)
+
 
 settings = Settings()

@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, require_mycareerguru_access
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.ai_tutor_note import create_note_document, serialize_note, serialize_note_summary
@@ -397,8 +398,11 @@ async def _generate_notes_html(
 
 async def _run_homework_job(
     job_id: str, params: dict, file_bytes: Optional[bytes], filename: str,
-    db: AsyncIOMotorDatabase, user_id: str,
+    user_id: str,
 ) -> None:
+    # Runs in the arq worker process (Phase 2) — source db from the worker's
+    # own Mongo client rather than taking a request-scoped handle as an arg.
+    db = get_database()
     try:
         extracted_text = ""
         warning = None
@@ -464,8 +468,10 @@ async def _run_homework_job(
 
 async def _run_notes_job(
     job_id: str, params: dict, file_bytes: Optional[bytes], filename: str,
-    db: AsyncIOMotorDatabase, user_id: str,
+    user_id: str,
 ) -> None:
+    # Runs in the arq worker process (Phase 2) — see _run_homework_job.
+    db = get_database()
     try:
         extracted_text = ""
         warning = None
@@ -567,13 +573,11 @@ async def _run_notes_job(
 
 @router.post("/homework-help", dependencies=[Depends(ai_rate_limit)])
 async def homework_help(
-    background_tasks: BackgroundTasks,
     prompt: str = Form(""),
     homeworkType: str = Form("Detailed Solution"),
     responseStyle: str = Form("Simple"),
     file: Optional[UploadFile] = File(None),
     identity: dict = Depends(get_current_identity),
-    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
         prompt = prompt.strip()
@@ -602,7 +606,7 @@ async def homework_help(
         })
 
         params = {"prompt": prompt, "homeworkType": homework_type, "responseStyle": response_style}
-        background_tasks.add_task(_run_homework_job, job_id, params, file_bytes, filename, db, identity["user_id"])
+        await enqueue("run_homework_job", job_id, params, file_bytes, filename, identity["user_id"])
 
         logging.info("Homework job %s started.", job_id)
         return JSONResponse(status_code=202, content={
@@ -659,13 +663,11 @@ async def homework_help_status(job_id: str, identity: dict = Depends(get_current
 
 @router.post("/generate-notes", dependencies=[Depends(ai_rate_limit)])
 async def generate_notes(
-    background_tasks: BackgroundTasks,
     prompt: str = Form(""),
     notesType: str = Form("Short Notes"),
     notesLength: str = Form("5 Pages"),
     file: Optional[UploadFile] = File(None),
     identity: dict = Depends(get_current_identity),
-    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
         prompt = prompt.strip()
@@ -694,7 +696,7 @@ async def generate_notes(
         })
 
         params = {"prompt": prompt, "notesType": notes_type, "notesLength": notes_length}
-        background_tasks.add_task(_run_notes_job, job_id, params, file_bytes, filename, db, identity["user_id"])
+        await enqueue("run_notes_job", job_id, params, file_bytes, filename, identity["user_id"])
 
         logging.info("Notes job %s started — type=%s length=%s", job_id, notes_type, notes_length)
         return JSONResponse(status_code=202, content={

@@ -5,7 +5,10 @@ from bson import ObjectId
 from tests.conftest import login, register
 from tests.test_security_fixes import PASSWORD, _register_institute_admin
 
-_EXTRACT_PATCH = "app.api.routers.exams.extract_and_patch_question_paper_text"
+# Phase 2: the text-extraction job runs in the arq worker, which imports this
+# function from its source module at call time — patch it there, not on the
+# exams router (which no longer imports it).
+_EXTRACT_PATCH = "app.services.gemini.extract_and_patch_question_paper_text"
 
 
 async def _faculty_client(superadmin_client, client_factory, test_db):

@@ -15,6 +15,9 @@ def connect_to_mongo() -> None:
         serverSelectionTimeoutMS=5000,
         connectTimeoutMS=5000,
         socketTimeoutMS=20000,
+        maxPoolSize=settings.MONGO_MAX_POOL_SIZE,
+        retryWrites=True,   # idempotent single-doc write retry on transient errors
+        retryReads=True,
     )
     _db = _client[settings.DB_NAME]
     logging.info("MongoDB client created for database '%s'", settings.DB_NAME)
