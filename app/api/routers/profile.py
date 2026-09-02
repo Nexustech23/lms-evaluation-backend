@@ -850,11 +850,20 @@ async def delete_tutor_student(student_id: str, db: AsyncIOMotorDatabase = Depen
 # SELF LEARNERS (role 7) — managed by superadmin
 # ============================================================
 
+def _provider_usage(u: Dict[str, Any], provider: str) -> Dict[str, int]:
+    raw = (u.get("token_usage") or {}).get(provider) or {}
+    return {
+        "input_tokens": int(raw.get("input_tokens") or 0),
+        "output_tokens": int(raw.get("output_tokens") or 0),
+    }
+
+
 @router.get("/self-learners", dependencies=[Depends(require_role(SUPERADMIN))])
 async def get_all_self_learners(
     page: int = Query(1),
     limit: int = Query(10),
     status: str | None = Query(None),
+    sort: str = Query("recent"),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     skip = (page - 1) * limit
@@ -864,12 +873,48 @@ async def get_all_self_learners(
     elif status == "active":
         query["is_active"] = True
 
-    cursor = db["users"].find(
-        query, {"_id": 1, "fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-    ).skip(skip).limit(limit)
+    # Aggregation (rather than a plain find()) so "sort by AI token usage"
+    # can be done server-side against the users.token_usage rollup that
+    # app.services.ai_usage.record_ai_usage keeps up to date on every call.
+    sort_stage: Dict[str, Any]
+    if sort == "tokens_desc":
+        sort_stage = {"_total_tokens": -1}
+    elif sort == "tokens_asc":
+        sort_stage = {"_total_tokens": 1}
+    else:
+        sort_stage = {"created_at": -1}
+
+    pipeline = [
+        {"$match": query},
+        {"$addFields": {
+            "_total_tokens": {
+                "$add": [
+                    {"$ifNull": ["$token_usage.claude.input_tokens", 0]},
+                    {"$ifNull": ["$token_usage.claude.output_tokens", 0]},
+                    {"$ifNull": ["$token_usage.gemini.input_tokens", 0]},
+                    {"$ifNull": ["$token_usage.gemini.output_tokens", 0]},
+                ]
+            }
+        }},
+        {"$sort": sort_stage},
+        {"$facet": {
+            "data": [
+                {"$skip": skip},
+                {"$limit": limit},
+                {"$project": {
+                    "_id": 1, "fullName": 1, "email": 1, "phone": 1,
+                    "is_active": 1, "created_at": 1, "token_usage": 1,
+                }},
+            ],
+            "total": [{"$count": "count"}],
+        }},
+    ]
+
+    facet_result = await db["users"].aggregate(pipeline).to_list(length=1)
+    facet = facet_result[0] if facet_result else {"data": [], "total": []}
 
     result = []
-    async for u in cursor:
+    for u in facet["data"]:
         result.append({
             "id": str(u["_id"]),
             "fullName": u.get("fullName"),
@@ -877,9 +922,13 @@ async def get_all_self_learners(
             "phone": u.get("phone"),
             "is_active": u.get("is_active", False),
             "created_at": u.get("created_at"),
+            "token_usage": {
+                "claude": _provider_usage(u, "claude"),
+                "gemini": _provider_usage(u, "gemini"),
+            },
         })
 
-    total = await db["users"].count_documents(query)
+    total = facet["total"][0]["count"] if facet["total"] else 0
 
     return {"success": True, "page": page, "limit": limit, "total": total, "self_learners": result}
 
@@ -931,7 +980,41 @@ async def get_ai_usage_summary(
         "call_count": sum(r["call_count"] for r in by_feature),
     }
 
-    return {"success": True, "days": days, "byFeature": by_feature, "totals": totals}
+    # Same window, grouped by provider instead of feature — lets the
+    # dashboard show Claude vs Gemini input/output/cost side by side.
+    provider_pipeline = [
+        {"$match": {"created_at": {"$gte": cutoff}}},
+        {"$group": {
+            "_id": "$provider",
+            "input_tokens": {"$sum": "$input_tokens"},
+            "output_tokens": {"$sum": "$output_tokens"},
+            "total_tokens": {"$sum": "$total_tokens"},
+            "cost_usd": {"$sum": "$cost_usd"},
+            "call_count": {"$sum": 1},
+            "distinct_users": {"$addToSet": "$user_id"},
+        }},
+        {"$sort": {"cost_usd": -1}},
+    ]
+
+    by_provider = []
+    async for row in db["aiUsageEvents"].aggregate(provider_pipeline):
+        by_provider.append({
+            "provider": row["_id"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "total_tokens": row["total_tokens"],
+            "cost_usd": round(row["cost_usd"], 4),
+            "call_count": row["call_count"],
+            "distinct_users": len(row["distinct_users"]),
+        })
+
+    return {
+        "success": True,
+        "days": days,
+        "byFeature": by_feature,
+        "byProvider": by_provider,
+        "totals": totals,
+    }
 
 
 @router.put("/self-learner/{learner_user_id}", dependencies=[Depends(require_role(SUPERADMIN))])
