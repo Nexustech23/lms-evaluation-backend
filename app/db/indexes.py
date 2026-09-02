@@ -129,6 +129,15 @@ _INDEXES: dict[str, list[list[tuple[str, int]]]] = {
         [("content_hash", 1)],
         [("course_title", 1)],
         [("course_code", 1)],
+        # Every access path is owner-scoped: the listing query, and the
+        # by-id lookup that gates roadmap grounding. Multikey over the array.
+        [("owner_user_ids", 1)],
+        [("owner_user_ids", 1), ("created_at", -1)],
+    ],
+    "selfLearnerNotes": [
+        # Backs both the history listing (find + sort, no separate lookup
+        # needed) and the ownership check on the preview/delete endpoints.
+        [("user_id", 1), ("created_at", -1)],
     ],
 }
 
