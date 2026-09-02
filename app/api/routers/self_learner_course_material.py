@@ -69,7 +69,7 @@ async def upload_course_material(
 
     background_tasks.add_task(
         _run_ingest_job, job_id, file_bytes, file.filename or "upload",
-        file.content_type or "", course_title, course_code, identity["user_id"],
+        course_title, course_code, identity["user_id"],
         SL_CM_JOB_PREFIX,
     )
 
