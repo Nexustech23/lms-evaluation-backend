@@ -18,6 +18,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import FACULTY, INSTITUTE, INSTITUTE_STUDENT, get_current_identity
 from app.core.cache import cached_get
 from app.db.mongodb import get_database
+from app.utils.batch import load_by_ids
 from app.models.student_subject_relation import (
     create_student_subject_relation_document,
     serialize_student_subject_relation,
@@ -110,17 +111,26 @@ async def get_subjects_by_filters(
     if department and ObjectId.is_valid(department):
         query["department_id"] = ObjectId(department)
 
+    subject_rows = [s async for s in db["subjectDetails"].find(query)]
+
+    # Batched faculty -> user name resolution (Phase 4): two $in queries
+    # instead of two find_one per subject. Same filters, same result.
+    faculty_by_id = await load_by_ids(
+        db, "facultyDetails", (s.get("faculty_id") for s in subject_rows),
+        {"_id": 1, "user_id": 1}, match={"is_deleted": {"$ne": True}},
+    )
+    users_by_id = await load_by_ids(
+        db, "users", (f.get("user_id") for f in faculty_by_id.values()),
+        {"_id": 1, "fullName": 1}, match={"is_deleted": {"$ne": True}},
+    )
+
     subjects = []
-    async for subject in db["subjectDetails"].find(query):
+    for subject in subject_rows:
         faculty_name = None
         if subject.get("faculty_id"):
-            faculty_details = await db["facultyDetails"].find_one({
-                "_id": subject.get("faculty_id"), "is_deleted": {"$ne": True},
-            })
+            faculty_details = faculty_by_id.get(subject.get("faculty_id"))
             if faculty_details and faculty_details.get("user_id"):
-                faculty_user = await db["users"].find_one({
-                    "_id": faculty_details.get("user_id"), "is_deleted": {"$ne": True},
-                })
+                faculty_user = users_by_id.get(faculty_details.get("user_id"))
                 if faculty_user:
                     faculty_name = faculty_user.get("fullName")
 
@@ -293,21 +303,33 @@ async def get_student_enrolled_subjects(
 
     relations = [r async for r in db["StudentSubjectRelationModel"].find(relation_query)]
 
+    # Batched subject -> faculty -> user resolution (Phase 4): three $in
+    # queries total instead of three find_one per enrolled subject. Same
+    # is_deleted filters, same result and order.
+    subjects_by_id = await load_by_ids(
+        db, "subjectDetails", (r.get("subject_id") for r in relations),
+        match={"is_deleted": {"$ne": True}},
+    )
+    faculty_by_id = await load_by_ids(
+        db, "facultyDetails", (s.get("faculty_id") for s in subjects_by_id.values()),
+        {"_id": 1, "user_id": 1}, match={"is_deleted": {"$ne": True}},
+    )
+    users_by_id = await load_by_ids(
+        db, "users", (f.get("user_id") for f in faculty_by_id.values()),
+        {"_id": 1, "fullName": 1}, match={"is_deleted": {"$ne": True}},
+    )
+
     subjects = []
     for relation in relations:
-        subject = await db["subjectDetails"].find_one({"_id": relation.get("subject_id"), "is_deleted": {"$ne": True}})
+        subject = subjects_by_id.get(relation.get("subject_id"))
         if not subject:
             continue
 
         faculty_name = None
         if subject.get("faculty_id"):
-            faculty_details = await db["facultyDetails"].find_one({
-                "_id": subject.get("faculty_id"), "is_deleted": {"$ne": True},
-            })
+            faculty_details = faculty_by_id.get(subject.get("faculty_id"))
             if faculty_details and faculty_details.get("user_id"):
-                faculty_user = await db["users"].find_one({
-                    "_id": faculty_details.get("user_id"), "is_deleted": {"$ne": True},
-                })
+                faculty_user = users_by_id.get(faculty_details.get("user_id"))
                 if faculty_user:
                     faculty_name = faculty_user.get("fullName")
 
