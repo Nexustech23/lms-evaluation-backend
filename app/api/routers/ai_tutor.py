@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Set, Tuple
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -39,6 +39,8 @@ from app.services.gemini import extract_text_from_file, generate_content_from_fi
 from app.services.imagekit import upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
+from app.services.roadmap_ai import fence_user_text
+from app.utils.uploads import read_upload_capped
 
 router = APIRouter(
     prefix="/api/ai-tutor",
@@ -147,7 +149,7 @@ def _build_homework_prompt(prompt: str, extracted_text: str, homework_type: str,
     if extracted_text:
         homework_content = f"\n\nHOMEWORK CONTENT (extracted from uploaded file):\n{extracted_text}"
     if prompt:
-        homework_content += f"\n\nADDITIONAL INSTRUCTIONS FROM STUDENT:\n{prompt}"
+        homework_content += fence_user_text("Additional Instructions From Student", prompt)
 
     return f"""You are an expert academic tutor helping a student with their homework.
     CURRENT DATE: {current_date}
@@ -214,7 +216,7 @@ def _build_notes_prompt(prompt: str, extracted_text: str, notes_type: str, notes
     if extracted_text:
         study_content += f"\n\nSTUDY MATERIAL (extracted from uploaded file):\n{extracted_text}"
     if prompt:
-        study_content += f"\n\nTOPIC / INSTRUCTIONS FROM STUDENT:\n{prompt}"
+        study_content += fence_user_text("Topic / Instructions From Student", prompt)
 
     return f"""You are an expert academic notes creator and study assistant.
 CURRENT DATE: {current_date}
@@ -311,7 +313,7 @@ async def _run_homework_job(
         )
         logging.info("[hw:%s] Uploaded -> %s", job_id, upload["url"])
 
-        await set_job(HW_JOB_PREFIX, job_id, {
+        await update_job(HW_JOB_PREFIX, job_id, {
             "status": "completed",
             "step": "done",
             "solution_url": upload["url"],
@@ -324,7 +326,7 @@ async def _run_homework_job(
 
     except Exception as e:
         logging.error("[hw:%s] Job failed: %s", job_id, e, exc_info=True)
-        await set_job(HW_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
+        await update_job(HW_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
 
 
 async def _run_notes_job(
@@ -370,7 +372,7 @@ async def _run_notes_job(
         )
         logging.info("[notes:%s] Uploaded -> %s", job_id, upload["url"])
 
-        await set_job(NOTES_JOB_PREFIX, job_id, {
+        await update_job(NOTES_JOB_PREFIX, job_id, {
             "status": "completed",
             "step": "done",
             "solution_url": upload["url"],
@@ -383,7 +385,7 @@ async def _run_notes_job(
 
     except Exception as e:
         logging.error("[notes:%s] Job failed: %s", job_id, e, exc_info=True)
-        await set_job(NOTES_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
+        await update_job(NOTES_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
 
 
 # ============================================================
@@ -417,11 +419,14 @@ async def homework_help(
                 return JSONResponse(status_code=400, content={
                     "error": f"Unsupported file type '.{ext}'. Accepted: PDF, DOCX, PNG, JPG, JPEG, WEBP."
                 })
-            file_bytes = await file.read()
+            file_bytes = await read_upload_capped(file)
             filename = fname
 
         job_id = str(uuid.uuid4())
-        await set_job(HW_JOB_PREFIX, job_id, {"status": "processing", "step": "starting", "job_id": job_id})
+        await set_job(HW_JOB_PREFIX, job_id, {
+            "status": "processing", "step": "starting", "job_id": job_id,
+            "user_id": identity["user_id"],
+        })
 
         params = {"prompt": prompt, "homeworkType": homework_type, "responseStyle": response_style}
         background_tasks.add_task(_run_homework_job, job_id, params, file_bytes, filename, db, identity["user_id"])
@@ -433,15 +438,17 @@ async def homework_help(
             "message": "Generation started. Poll /api/ai-tutor/homework-help/status/<jobId>.",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("homework_help error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/homework-help/status/{job_id}")
-async def homework_help_status(job_id: str):
+async def homework_help_status(job_id: str, identity: dict = Depends(get_current_identity)):
     job = await get_job(HW_JOB_PREFIX, job_id)
-    if job is None:
+    if job is None or job.get("user_id") != identity["user_id"]:
         return JSONResponse(status_code=404, content={"error": "Job not found. It may have expired or never existed."})
 
     status = job.get("status", "unknown")
@@ -499,11 +506,14 @@ async def generate_notes(
                 return JSONResponse(status_code=400, content={
                     "error": f"Unsupported file type '.{ext}'. Accepted: PDF, DOCX."
                 })
-            file_bytes = await file.read()
+            file_bytes = await read_upload_capped(file)
             filename = fname
 
         job_id = str(uuid.uuid4())
-        await set_job(NOTES_JOB_PREFIX, job_id, {"status": "processing", "step": "starting", "job_id": job_id})
+        await set_job(NOTES_JOB_PREFIX, job_id, {
+            "status": "processing", "step": "starting", "job_id": job_id,
+            "user_id": identity["user_id"],
+        })
 
         params = {"prompt": prompt, "notesType": notes_type, "notesLength": notes_length}
         background_tasks.add_task(_run_notes_job, job_id, params, file_bytes, filename, db, identity["user_id"])
@@ -515,15 +525,17 @@ async def generate_notes(
             "message": "Generation started. Poll /api/ai-tutor/generate-notes/status/<jobId>.",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("generate_notes error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/generate-notes/status/{job_id}")
-async def generate_notes_status(job_id: str):
+async def generate_notes_status(job_id: str, identity: dict = Depends(get_current_identity)):
     job = await get_job(NOTES_JOB_PREFIX, job_id)
-    if job is None:
+    if job is None or job.get("user_id") != identity["user_id"]:
         return JSONResponse(status_code=404, content={"error": "Job not found. It may have expired or never existed."})
 
     status = job.get("status", "unknown")

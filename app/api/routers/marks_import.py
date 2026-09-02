@@ -13,6 +13,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import get_current_identity, resolve_current_institute_id
 from app.db.mongodb import get_database
 from app.utils.excel_import_helper import read_marks_excel
+from app.utils.uploads import read_upload_capped
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["marks-import"])
 
@@ -31,7 +32,7 @@ async def import_marks_excel(
     if not ObjectId.is_valid(batch_id):
         raise HTTPException(status_code=400, detail="Valid batch_id is required")
 
-    file_bytes = await file.read()
+    file_bytes = await read_upload_capped(file)
 
     try:
         students = read_marks_excel(BytesIO(file_bytes))
