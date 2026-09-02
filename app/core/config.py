@@ -106,5 +106,13 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
+    # Observability (see app/core/observability.py). PERF_LOG logs one line
+    # per request (method path status duration_ms); SLOW_QUERY_MS logs any
+    # MongoDB command slower than this. Both are cheap; turn PERF_LOG off in
+    # steady-state prod if the log volume is unwanted.
+    PERF_LOG_ENABLED: bool = True
+    PERF_LOG_SLOW_MS: int = 500          # requests slower than this log at WARNING
+    SLOW_QUERY_MS: int = 100             # 0 disables the Mongo command monitor
+
 
 settings = Settings()

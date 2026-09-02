@@ -35,6 +35,7 @@ from app.api.routers import (
     transcripts,
 )
 from app.core.config import settings
+from app.core.observability import RequestTimingMiddleware, install_slow_query_logging
 from app.core.rate_limit import GlobalRateLimitMiddleware
 from app.core.redis_client import close_redis_connection, connect_to_redis
 from app.db.indexes import ensure_indexes
@@ -59,6 +60,8 @@ async def lifespan(app: FastAPI):
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+    # Must register the command listener BEFORE the Mongo client is created.
+    install_slow_query_logging()
     connect_to_mongo()
     await ping_mongo()
     await ensure_ai_usage_indexes(get_database())
@@ -89,6 +92,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registered last => outermost => measures total wall-clock per request,
+# including every other middleware. Adds an X-Response-Time-ms header.
+app.add_middleware(RequestTimingMiddleware)
 
 
 # FastAPI's HTTPException(detail=...) natively produces {"detail": ...}, but
