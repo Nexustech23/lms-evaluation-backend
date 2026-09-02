@@ -293,7 +293,7 @@ async def _run_homework_job(
         full_prompt = _build_homework_prompt(
             params["prompt"], extracted_text, params["homeworkType"], params["responseStyle"]
         )
-        claude_model = "claude-sonnet-4-20250514"
+        claude_model = "claude-sonnet-4-6"
         html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 5000)
         logging.info("[hw:%s] Claude done — %d tokens", job_id, c_usage["total_tokens"])
         await record_ai_usage(
@@ -351,7 +351,7 @@ async def _run_notes_job(
             params["prompt"], extracted_text, params["notesType"], params["notesLength"]
         )
         max_tokens = _NOTES_LENGTH_TOKENS.get(params["notesLength"], 5000)
-        claude_model = "claude-sonnet-4-20250514"
+        claude_model = "claude-sonnet-4-6"
         html_content, c_usage = await asyncio.to_thread(
             generate_html, full_prompt, claude_model, max_tokens
         )
@@ -466,7 +466,10 @@ async def homework_help_status(job_id: str, identity: dict = Depends(get_current
         }
 
     if status == "failed":
-        return JSONResponse(status_code=500, content={
+        # 200, not 500: the status check itself succeeded — the job failed.
+        # Returning 5xx makes the frontend poller treat it as "couldn't reach
+        # the server" instead of surfacing job.error.
+        return JSONResponse(status_code=200, content={
             "success": False, "status": "failed", "error": job.get("error", "Unknown error."),
         })
 
@@ -553,7 +556,10 @@ async def generate_notes_status(job_id: str, identity: dict = Depends(get_curren
         }
 
     if status == "failed":
-        return JSONResponse(status_code=500, content={
+        # 200, not 500: the status check itself succeeded — the job failed.
+        # Returning 5xx makes the frontend poller treat it as "couldn't reach
+        # the server" instead of surfacing job.error.
+        return JSONResponse(status_code=200, content={
             "success": False, "status": "failed", "error": job.get("error", "Unknown error."),
         })
 
