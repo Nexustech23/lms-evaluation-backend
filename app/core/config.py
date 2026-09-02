@@ -114,5 +114,13 @@ class Settings(BaseSettings):
     PERF_LOG_SLOW_MS: int = 500          # requests slower than this log at WARNING
     SLOW_QUERY_MS: int = 100             # 0 disables the Mongo command monitor
 
+    # Concurrency (Phase 1). THREAD_POOL_WORKERS sizes the executor used by
+    # asyncio.to_thread for the blocking SDK calls (Gemini/Claude/Playwright/
+    # requests) — per worker process. MONGO_MAX_POOL_SIZE caps Motor's
+    # connection pool per worker. gunicorn worker count is set in the
+    # Dockerfile via WEB_CONCURRENCY, not here.
+    THREAD_POOL_WORKERS: int = 24
+    MONGO_MAX_POOL_SIZE: int = 50
+
 
 settings = Settings()

@@ -49,3 +49,6 @@ markdown2
 
 # Phase 9 — hybrid RAG (course-material grounding for roadmap generation)
 qdrant-client==1.12.1
+
+# Perf Phase 1 — multi-process web server (Dockerfile CMD)
+gunicorn==23.0.0

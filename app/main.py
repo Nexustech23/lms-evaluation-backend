@@ -60,6 +60,15 @@ async def lifespan(app: FastAPI):
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+    # Blocking SDK calls (Gemini/Claude/Playwright/requests) go through
+    # asyncio.to_thread; the default executor is only cpu+4 threads, which
+    # serialises them under any concurrency. Size it explicitly.
+    from concurrent.futures import ThreadPoolExecutor
+
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=settings.THREAD_POOL_WORKERS, thread_name_prefix="blk")
+    )
+
     # Must register the command listener BEFORE the Mongo client is created.
     install_slow_query_logging()
     connect_to_mongo()
