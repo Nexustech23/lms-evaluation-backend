@@ -98,6 +98,12 @@ class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
         if not settings.RATE_LIMIT_ENABLED:
             return await call_next(request)
 
+        # Don't spend a Redis round-trip on liveness probes or CORS preflight
+        # — a load balancer hitting /health every few seconds would otherwise
+        # eat into the per-IP budget, and OPTIONS carries no auth or body.
+        if request.method == "OPTIONS" or request.url.path in ("/health", "/"):
+            return await call_next(request)
+
         try:
             key = f"ratelimit:global:ip:{_client_ip(request)}"
             count = await _increment(key)

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routers import (
@@ -36,6 +37,7 @@ from app.api.routers import (
 from app.core.config import settings
 from app.core.rate_limit import GlobalRateLimitMiddleware
 from app.core.redis_client import close_redis_connection, connect_to_redis
+from app.db.indexes import ensure_indexes
 from app.db.mongodb import close_mongo_connection, connect_to_mongo, get_database, ping_mongo
 from app.services.ai_usage import ensure_ai_usage_indexes
 
@@ -60,6 +62,7 @@ async def lifespan(app: FastAPI):
     connect_to_mongo()
     await ping_mongo()
     await ensure_ai_usage_indexes(get_database())
+    await ensure_indexes(get_database())
     connect_to_redis()
     yield
     await close_redis_connection()
@@ -67,6 +70,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LMS Evaluation API", lifespan=lifespan)
+
+# Compress large JSON responses (CO/PO matrices, transcript lists,
+# filter-data, result exports). Registered innermost so it compresses the
+# final body after every other middleware has run.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Registered before CORSMiddleware so CORS ends up as the outer layer (FastAPI
 # wraps middleware in reverse registration order) — otherwise a 429 response
