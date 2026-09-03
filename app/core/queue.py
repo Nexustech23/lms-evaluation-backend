@@ -11,10 +11,13 @@
 # client contract is identical (POST returns a job_id, poll job-status).
 #
 # QUEUE_MODE:
-#   "redis"  (default) — enqueue to arq; the worker container runs it.
-#   "inline" — run the job body immediately in-process (used by the test
-#              suite, which has no worker; matches the old BackgroundTasks
-#              "job is done by the time you poll" behaviour).
+#   "inline" (default) — run the job body immediately in the web process,
+#              awaited before the request returns. No worker container
+#              needed; matches the old BackgroundTasks "job is done by the
+#              time you poll" behaviour. Also what the test suite uses.
+#   "redis"  — enqueue to arq; a running lms-worker container runs the job
+#              off the request path. Opt in via .env + the compose "queue"
+#              profile when you want jobs off the web tier.
 # ============================================================
 from __future__ import annotations
 

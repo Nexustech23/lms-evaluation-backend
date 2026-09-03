@@ -22,15 +22,19 @@ EXPOSE 5050
 
 # Multi-process: gunicorn manages N uvicorn workers in one container, so a
 # slow request no longer blocks every other request. Worker count is
-# WEB_CONCURRENCY (default 3) — set it to ~2*vCPU+1. --timeout 120 so a
-# heavy synchronous export isn't killed at gunicorn's 30s default (Perf
-# Phase 2 moves those off the request path entirely). Shell form is used so
+# WEB_CONCURRENCY (default 3) — set it to ~2*vCPU+1. Shell form is used so
 # ${WEB_CONCURRENCY:-3} expands.
+#
+# --timeout 900: with QUEUE_MODE=inline (the default) the AI / PDF /
+# transcript jobs run inside the request that started them, so gunicorn
+# must not kill the worker mid-job. 15 min covers the longest single job
+# (grading + transcript, roadmap generation). When QUEUE_MODE=redis and
+# the lms-worker container handles jobs, this can be lowered again.
 CMD gunicorn app.main:app \
     -k uvicorn.workers.UvicornWorker \
     --bind 0.0.0.0:5050 \
     --workers ${WEB_CONCURRENCY:-3} \
-    --timeout 120 \
-    --graceful-timeout 30 \
+    --timeout 900 \
+    --graceful-timeout 60 \
     --access-logfile - \
     --error-logfile -

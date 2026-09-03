@@ -122,8 +122,10 @@ _FUNCTIONS = [
     run_refresh_transcript,
 ]
 
-# Used by app/core/queue.py in QUEUE_MODE="inline" (the test suite) to run a
-# job body directly in-process instead of shipping it to Redis.
+# Used by app/core/queue.py in QUEUE_MODE="inline" (the default, and the
+# test suite) to run a job body directly in-process instead of shipping it
+# to Redis. This module's WorkerSettings is only loaded when a lms-worker
+# container actually runs (QUEUE_MODE="redis").
 JOB_REGISTRY = {fn.__name__: fn for fn in _FUNCTIONS}
 
 
