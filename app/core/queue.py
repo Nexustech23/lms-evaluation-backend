@@ -8,12 +8,14 @@
 # job_id, poll job-status).
 #
 # QUEUE_MODE:
-#   "inline" (default) — run the job in THIS process as a background task
-#              (asyncio.create_task): enqueue() returns immediately, the
-#              request responds right away, the job runs after. Same
-#              behaviour as the pre-Phase-2 FastAPI BackgroundTasks. No
-#              worker container needed. A web-process restart mid-job loses
-#              that job (no retry) — acceptable for this deployment.
+#   "inline" (default) — run the job in THIS process, after the response is
+#              sent. When the caller passes its request `BackgroundTasks`,
+#              the job is scheduled via Starlette's BackgroundTasks (the
+#              exact pre-Phase-2 mechanism — uvicorn awaits it as part of
+#              the response lifecycle). Otherwise it falls back to a bare
+#              asyncio.create_task. enqueue() returns immediately either
+#              way. No worker container needed. A web-process restart
+#              mid-job loses that job (no retry) — acceptable here.
 #   "inline_sync" — run the job inline and AWAIT it before returning. Only
 #              for the test suite, which POSTs a job then immediately polls
 #              its status and expects it finished.
@@ -71,15 +73,22 @@ async def _run_inline(job_name: str, args: tuple) -> None:
         logger.exception("inline job %r crashed", job_name)
 
 
-async def enqueue(job_name: str, *args: Any) -> None:
+async def enqueue(job_name: str, *args: Any, background_tasks: Any = None) -> None:
     """Dispatch a background job. Returns as soon as the job is scheduled —
     it does NOT wait for the job to finish (except in QUEUE_MODE=inline_sync,
-    used by tests)."""
+    used by tests).
+
+    Pass the request's `BackgroundTasks` as `background_tasks` in inline mode
+    so the job runs through Starlette's proven response-lifecycle mechanism
+    rather than a bare asyncio task.
+    """
     mode = settings.QUEUE_MODE
 
     if mode in _INLINE_MODES:
         if mode == "inline_sync":
             await _run_inline(job_name, args)
+        elif background_tasks is not None:
+            background_tasks.add_task(_run_inline, job_name, args)
         else:
             task = asyncio.create_task(_run_inline(job_name, args))
             _pending.add(task)

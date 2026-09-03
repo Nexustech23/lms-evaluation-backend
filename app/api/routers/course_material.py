@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -189,6 +189,7 @@ async def get_ingest_status(job_id: str, identity: dict = Depends(get_current_id
 
 @router.post("/upload", dependencies=[Depends(ai_rate_limit)])
 async def upload_course_material(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     course_title: Optional[str] = Form(None),
     course_code: Optional[str] = Form(None),
@@ -209,6 +210,7 @@ async def upload_course_material(
     await enqueue(
         "run_ingest_job", job_id, file_bytes, file.filename or "upload",
         course_title, course_code, identity["user_id"], CM_JOB_PREFIX,
+        background_tasks=background_tasks,
     )
 
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "processing"})

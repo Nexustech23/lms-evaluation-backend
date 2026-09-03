@@ -27,7 +27,7 @@ from math import ceil
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -391,6 +391,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
 @router.post("/question-paper/generate-ai", dependencies=[Depends(ai_rate_limit)])
 async def generate_question_paper_ai(
+    background_tasks: BackgroundTasks,
     prompt: str = Form(""),
     departmentName: str = Form(""),
     subjectName: str = Form("Subject"),
@@ -490,7 +491,8 @@ async def generate_question_paper_ai(
             "coursePlanner": cp_bytes, "coursePlannerFilename": cp_filename,
         }
 
-        await enqueue("run_question_paper_generation", job_id, params, job_file_bytes)
+        await enqueue("run_question_paper_generation", job_id, params, job_file_bytes,
+                      background_tasks=background_tasks)
 
         return JSONResponse(status_code=202, content={
             "success": True,
