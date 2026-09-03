@@ -123,12 +123,19 @@ class Settings(BaseSettings):
     MONGO_MAX_POOL_SIZE: int = 50
 
     # Task queue (Phase 2 — see app/core/queue.py + app/worker.py). The AI /
-    # PDF / transcript jobs run in a separate `worker` container instead of
-    # inside the web process.
-    #   "redis"  — enqueue to arq; the worker container executes the job.
-    #   "inline" — run the job body in-process, awaited before the request
-    #              returns (used by the test suite, which has no worker).
-    QUEUE_MODE: str = "redis"
+    # PDF / transcript jobs can run in a separate `worker` container or
+    # in-process.
+    #   "inline" — run the job body in the web process, awaited before the
+    #              request returns. No worker container needed; this is the
+    #              default so a plain `docker compose up` (web + redis, no
+    #              worker) works out of the box, and it's what the test suite
+    #              uses. The Dockerfile's gunicorn --timeout is sized for the
+    #              longest inline job.
+    #   "redis"  — enqueue to arq; a running `lms-worker` container executes
+    #              the job off the request path. Set QUEUE_MODE=redis in .env
+    #              and start the worker (docker compose up -d lms-worker) when
+    #              you want jobs off the web tier / horizontally scalable.
+    QUEUE_MODE: str = "inline"
     ARQ_MAX_JOBS: int = 12               # concurrent jobs per worker process
     ARQ_JOB_TIMEOUT_SECONDS: int = 1800   # hard cap per job (grading + transcript can be slow)
 
