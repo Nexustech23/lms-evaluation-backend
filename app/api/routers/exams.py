@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -119,6 +119,7 @@ async def create_folder(
 @router.post("/upload-question-paper/{folder_id}", dependencies=[Depends(ai_rate_limit)])
 async def upload_question_paper(
     folder_id: str,
+    background_tasks: BackgroundTasks,
     payload: UploadQuestionPaperRequest,
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -164,6 +165,7 @@ async def upload_question_paper(
         await enqueue(
             "run_extract_question_paper_text",
             str(folder_object_id), questionpaper_url, str(faculty_id), filename,
+            background_tasks=background_tasks,
         )
 
     updated_exam = await db["newsavedDocs"].find_one({"_id": folder_object_id})

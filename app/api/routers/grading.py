@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -307,6 +307,7 @@ async def _run_evaluation_job(
 
 @router.post("/evaluate-answer-script", dependencies=[Depends(bulk_grading_rate_limit)])
 async def evaluate_answer_script(
+    background_tasks: BackgroundTasks,
     payload: EvaluateAnswerScriptRequest,
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -335,7 +336,8 @@ async def evaluate_answer_script(
     await set_job(EVAL_JOB_PREFIX, job_id, {"status": "processing", "progress": 0, "step": "Starting evaluation"})
 
     await enqueue(
-        "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id)
+        "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
+        background_tasks=background_tasks,
     )
 
     return JSONResponse(status_code=202, content={
