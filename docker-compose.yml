@@ -24,13 +24,18 @@ services:
     # the fixed host `ports` mapping above, put nginx/traefik in front on
     # 5050, and `docker compose up -d --scale lms-backend-fastapi=3`.
 
-  # Perf Phase 2 — executes the AI / PDF / transcript jobs that the web
-  # container enqueues to Redis (arq). Same image and env as the web
-  # service; no ports (not an HTTP server). Scale it independently of the
-  # web tier: `docker compose up -d --scale lms-worker=3`.
+  # Perf Phase 2 — OPTIONAL. Only needed when QUEUE_MODE=redis (default is
+  # "inline", where the web container runs jobs itself). Behind the "queue"
+  # compose profile, so a plain `docker compose up -d` does NOT start it.
+  #
+  # To move AI / PDF / transcript jobs off the web tier:
+  #   1. set QUEUE_MODE=redis in .env
+  #   2. docker compose --profile queue up -d
+  # Scale it independently: docker compose --profile queue up -d --scale lms-worker=3
   lms-worker:
     build: .
     command: arq app.worker.WorkerSettings
+    profiles: ["queue"]
     env_file:
       - .env
     restart: unless-stopped

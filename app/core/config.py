@@ -127,12 +127,20 @@ class Settings(BaseSettings):
     MONGO_MAX_POOL_SIZE: int = 50
 
     # Task queue (Phase 2 — see app/core/queue.py + app/worker.py). The AI /
-    # PDF / transcript jobs run in a separate `worker` container instead of
-    # inside the web process.
-    #   "redis"  — enqueue to arq; the worker container executes the job.
-    #   "inline" — run the job body in-process, awaited before the request
-    #              returns (used by the test suite, which has no worker).
-    QUEUE_MODE: str = "redis"
+    # PDF / transcript jobs can run in a separate `worker` container or
+    # in-process.
+    #   "inline" (default) — run the job in the web process as a background
+    #              task; the request responds immediately and the job runs
+    #              after. No worker container needed, so a plain
+    #              `docker compose up` works out of the box. Same model as
+    #              the pre-Phase-2 FastAPI BackgroundTasks (a restart mid-job
+    #              loses that job — no retry).
+    #   "inline_sync" — inline but awaited before responding. Test suite only.
+    #   "redis"  — enqueue to arq; a running `lms-worker` container executes
+    #              the job off the request path. Set QUEUE_MODE=redis in .env
+    #              and `docker compose --profile queue up -d` when you want
+    #              jobs off the web tier / horizontally scalable.
+    QUEUE_MODE: str = "inline"
     ARQ_MAX_JOBS: int = 12               # concurrent jobs per worker process
     ARQ_JOB_TIMEOUT_SECONDS: int = 1800   # hard cap per job (grading + transcript can be slow)
 

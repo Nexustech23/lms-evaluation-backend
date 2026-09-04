@@ -10,11 +10,12 @@ from app.core.config import settings
 from app.core.security import hash_password
 from app.models.user import create_user_document
 
-# The test suite has no arq worker running. Force jobs to execute in-process,
-# awaited before the enqueueing request returns — this reproduces the old
-# BackgroundTasks behaviour tests rely on (POST a job, then immediately GET
-# its status and see it already "completed").
-settings.QUEUE_MODE = "inline"
+# The test suite has no arq worker running, and it POSTs a job then
+# immediately GETs its status expecting it finished. "inline_sync" runs the
+# job in-process AND awaits it before the enqueueing request returns.
+# (Production default is "inline" — fire-and-forget background task — which
+# would not be done by the time these tests poll.)
+settings.QUEUE_MODE = "inline_sync"
 
 # Dedicated, hardcoded, never-production database name. The real .env points
 # MONGODB_URI at the same server the Flask backend uses in production

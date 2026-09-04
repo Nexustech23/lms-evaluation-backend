@@ -573,6 +573,7 @@ async def _run_notes_job(
 
 @router.post("/homework-help", dependencies=[Depends(ai_rate_limit)])
 async def homework_help(
+    background_tasks: BackgroundTasks,
     prompt: str = Form(""),
     homeworkType: str = Form("Detailed Solution"),
     responseStyle: str = Form("Simple"),
@@ -606,7 +607,8 @@ async def homework_help(
         })
 
         params = {"prompt": prompt, "homeworkType": homework_type, "responseStyle": response_style}
-        await enqueue("run_homework_job", job_id, params, file_bytes, filename, identity["user_id"])
+        await enqueue("run_homework_job", job_id, params, file_bytes, filename, identity["user_id"],
+                      background_tasks=background_tasks)
 
         logging.info("Homework job %s started.", job_id)
         return JSONResponse(status_code=202, content={
@@ -663,6 +665,7 @@ async def homework_help_status(job_id: str, identity: dict = Depends(get_current
 
 @router.post("/generate-notes", dependencies=[Depends(ai_rate_limit)])
 async def generate_notes(
+    background_tasks: BackgroundTasks,
     prompt: str = Form(""),
     notesType: str = Form("Short Notes"),
     notesLength: str = Form("5 Pages"),
@@ -696,7 +699,8 @@ async def generate_notes(
         })
 
         params = {"prompt": prompt, "notesType": notes_type, "notesLength": notes_length}
-        await enqueue("run_notes_job", job_id, params, file_bytes, filename, identity["user_id"])
+        await enqueue("run_notes_job", job_id, params, file_bytes, filename, identity["user_id"],
+                      background_tasks=background_tasks)
 
         logging.info("Notes job %s started — type=%s length=%s", job_id, notes_type, notes_length)
         return JSONResponse(status_code=202, content={
