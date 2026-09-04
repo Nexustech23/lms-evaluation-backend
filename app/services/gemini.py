@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from google.genai import types as genai_types
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.utils.net import safe_get
 from app.utils.token_usage import increment_institute_gemini_tokens
 
 _client: genai.Client | None = None
@@ -85,14 +87,19 @@ def _extract_text_from_doc(file_bytes: bytes) -> str:
             doc_path = os.path.join(tmp_dir, "input.doc")
             with open(doc_path, "wb") as f:
                 f.write(file_bytes)
-            ret = os.system(
-                f"libreoffice --headless --convert-to txt:Text --outdir {tmp_dir} {doc_path} > /dev/null 2>&1"
+            # subprocess with an argument list + no shell: nothing here is
+            # shell-interpreted, and a hung LibreOffice can't block forever.
+            proc = subprocess.run(
+                ["libreoffice", "--headless", "--convert-to", "txt:Text", "--outdir", tmp_dir, doc_path],
+                capture_output=True,
+                timeout=120,
+                check=False,
             )
             txt_path = os.path.join(tmp_dir, "input.txt")
-            if ret == 0 and os.path.exists(txt_path):
+            if proc.returncode == 0 and os.path.exists(txt_path):
                 with open(txt_path, "r", errors="replace") as f:
                     return f.read()
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         logging.warning("LibreOffice .doc fallback failed: %s", e)
 
     raw = file_bytes.decode("latin-1", errors="replace")
@@ -415,7 +422,8 @@ def generate_content_from_file(
 
 
 # ==========================================
-# BACKGROUND JOB (FastAPI BackgroundTasks, not a raw Thread)
+# BACKGROUND JOB — runs in the arq worker process (Perf Phase 2), enqueued
+# by exams.upload_question_paper via app.core.queue.enqueue.
 # ==========================================
 
 async def extract_and_patch_question_paper_text(
@@ -428,9 +436,8 @@ async def extract_and_patch_question_paper_text(
     try:
         logging.info("[qp-extract] Downloading file for folder %s", folder_id)
 
-        resp = await asyncio.to_thread(requests.get, question_paper_url, timeout=60)
-        resp.raise_for_status()
-        file_bytes = resp.content
+        # SSRF-checked: rejects internal / cloud-metadata addresses and redirects.
+        file_bytes = await asyncio.to_thread(lambda: safe_get(question_paper_url, timeout=60))
 
         logging.info("[qp-extract] Extracting text for folder %s (type=%s)", folder_id, _file_ext(filename))
 

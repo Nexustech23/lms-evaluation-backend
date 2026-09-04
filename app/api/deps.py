@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Tuple
 
 import jwt
@@ -6,6 +7,11 @@ from fastapi import Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.core.redis_client import (
+    get_cached_account_state,
+    set_cached_account_state,
+    tokens_revoked_after,
+)
 from app.core.security import decode_access_token
 from app.db.mongodb import get_database
 from app.models.user import (
@@ -29,7 +35,10 @@ from app.models.user import (
 # IDENTITY (equivalent to @jwt_required() + get_jwt_identity()/get_jwt())
 # ============================================================
 
-def get_current_identity(request: Request) -> dict:
+async def get_current_identity(
+    request: Request,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> dict:
     token = request.cookies.get(settings.JWT_COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authentication token")
@@ -42,10 +51,63 @@ def get_current_identity(request: Request) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     user_id = payload.get("sub")
-    if not user_id:
+    if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    return {"user_id": user_id, "role": payload.get("role")}
+    # A valid signature is no longer enough on its own: the account must
+    # still exist and be active, must not predate a logout / forced-logout /
+    # password change, and (when flagged) must have changed a temporary
+    # password before doing anything else. This state is cached in Redis for
+    # ACCOUNT_STATE_TTL seconds so it isn't a Mongo round-trip on every
+    # request; a Redis/Mongo error fails OPEN (unknown -> not blocked).
+    state = await _resolve_account_state(db, user_id)
+    if state.get("blocked"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive")
+
+    cutoff = await tokens_revoked_after(user_id)
+    if cutoff is not None:
+        iat = payload.get("iat", 0)
+        if isinstance(iat, (int, float)) and iat < cutoff:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
+
+    if state.get("must_change_password") and request.url.path not in _PASSWORD_CHANGE_EXEMPT_PATHS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change required. Set a new password to continue.",
+        )
+
+    return {"user_id": user_id, "role": payload.get("role", state.get("role"))}
+
+
+# Endpoints reachable while must_change_password is set (so the user can
+# actually change it and the client can render the prompt).
+_PASSWORD_CHANGE_EXEMPT_PATHS = {"/me", "/logout", "/profile", "/profile/change-password"}
+
+
+async def _resolve_account_state(db: AsyncIOMotorDatabase, user_id: str) -> dict:
+    cached = await get_cached_account_state(user_id)
+    if cached is not None:
+        return cached
+
+    try:
+        user = await db["users"].find_one(
+            {"_id": ObjectId(user_id)},
+            {"is_active": 1, "is_deleted": 1, "role": 1, "must_change_password": 1},
+        )
+    except Exception:
+        logging.warning("get_current_identity: users lookup failed for %s — failing open", user_id)
+        return {}  # fail open — unknown state, not treated as blocked
+
+    if not user:
+        state = {"blocked": True}
+    else:
+        state = {
+            "blocked": user.get("is_deleted") is True or not user.get("is_active", True),
+            "must_change_password": bool(user.get("must_change_password", False)),
+            "role": user.get("role"),
+        }
+    await set_cached_account_state(user_id, state)
+    return state
 
 
 def require_role(*allowed_roles: int):
@@ -227,3 +289,24 @@ async def validate_entity_ownership(
         return None, {"error": "Access denied or entity not found"}, 403
 
     return entity, None, None
+
+
+async def require_entity_in_institute(
+    collection: AsyncIOMotorCollection, entity_id: str, institute_id: ObjectId
+) -> dict:
+    """
+    Raising variant of validate_entity_ownership, for the many ID-addressed
+    routes (institute_hierarchy.py's get/update/delete of school / programme /
+    department / batch / subject) that previously acted on any ObjectId with
+    no tenant check — a cross-institute IDOR.
+
+    Returns the entity document only when it exists AND belongs to
+    institute_id. Otherwise raises:
+      - 400 when entity_id is malformed
+      - 404 when it's missing OR owned by another institute (deliberately
+        indistinguishable, so a caller can't enumerate other tenants' ids)
+    """
+    entity, err, code = await validate_entity_ownership(collection, entity_id, institute_id)
+    if err:
+        raise HTTPException(status_code=400 if code == 400 else 404, detail=err["error"])
+    return entity

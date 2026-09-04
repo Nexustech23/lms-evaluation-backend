@@ -23,9 +23,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from fastapi.responses import JSONResponse
 
 from app.api.deps import get_current_identity, require_mycareerguru_access
-from app.api.routers.course_material import _run_ingest_job
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.services.job_store import get_job, set_job
+from app.utils.uploads import read_upload_capped
 
 router = APIRouter(
     prefix="/api/self-learner/course-material",
@@ -57,7 +58,7 @@ async def upload_course_material(
     course_code: Optional[str] = Form(None),
     identity: dict = Depends(get_current_identity),
 ):
-    file_bytes = await file.read()
+    file_bytes = await read_upload_capped(file)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
@@ -66,10 +67,10 @@ async def upload_course_material(
         "status": "processing", "step": "Starting…", "user_id": identity["user_id"],
     })
 
-    background_tasks.add_task(
-        _run_ingest_job, job_id, file_bytes, file.filename or "upload",
-        course_title, course_code, identity["user_id"],
-        SL_CM_JOB_PREFIX,
+    await enqueue(
+        "run_ingest_job", job_id, file_bytes, file.filename or "upload",
+        course_title, course_code, identity["user_id"], SL_CM_JOB_PREFIX,
+        background_tasks=background_tasks,
     )
 
     logger.info(

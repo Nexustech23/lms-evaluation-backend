@@ -6,6 +6,7 @@
 # ============================================================
 
 import re
+import secrets
 from typing import Any, Dict
 
 from bson import ObjectId
@@ -13,7 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user
+from app.core.config import settings
 from app.core.rate_limit import login_rate_limit
+from app.core.redis_client import revoke_user_tokens
 from app.core.security import create_access_token, hash_password, set_access_cookie, unset_access_cookie, verify_password
 from app.db.mongodb import get_database
 from app.models.faculty import create_faculty_document
@@ -39,6 +42,10 @@ ROLE_NAME_TO_NUMBER = {
 }
 
 PENDING_APPROVAL_ROLES = {5, 7}  # tutor, self_learner
+
+# Precomputed once at import so an "unknown email" login still pays one
+# bcrypt verification (constant-ish timing vs. a real wrong-password login).
+_DUMMY_PASSWORD_HASH = hash_password("not-a-real-password-timing-equalizer")
 
 
 def _validate_color(color) -> str:
@@ -201,14 +208,26 @@ async def _register_institute_student(db, data, password_hash, current_user_iden
     # test coverage for this path): `or` catches both cases.
     institute_short_name = re.sub(r"[^a-z0-9]", "", (institute.get("short_name") or "college").strip().lower())
     clean_name = re.sub(r"[^a-z0-9]", "", data["fullName"].split()[0].strip().lower())
-    college_email = f"{clean_name}.{institute_short_name}@gmail.com"
 
-    default_password = data.get("password") or f"{institute_short_name}@123"
+    # Unique login id: append a numeric suffix on collision instead of hard
+    # failing (two students named "John" at the same institute must both
+    # enroll). Not @gmail.com — that namespace isn't ours and the address is
+    # never actually mailed; it's only a login handle.
+    base_local = f"{clean_name}.{institute_short_name}"
+    college_email = f"{base_local}@{settings.STUDENT_EMAIL_DOMAIN}"
+    _suffix = 1
+    while await db["users"].find_one({"email": college_email.lower(), "is_deleted": {"$ne": True}}):
+        _suffix += 1
+        college_email = f"{base_local}{_suffix}@{settings.STUDENT_EMAIL_DOMAIN}"
+
+    # Password: use the caller-supplied one if given, otherwise a per-student
+    # random one-time password. NEVER a guessable institute-wide default
+    # (the old "shortname@123" let anyone who knew the short name log in as
+    # every student). A generated password forces a change on first login.
+    supplied_password = data.get("password")
+    password_was_generated = not supplied_password
+    default_password = supplied_password or secrets.token_urlsafe(9)
     password_hash = hash_password(default_password)
-
-    existing_user = await db["users"].find_one({"email": college_email.lower(), "is_deleted": {"$ne": True}})
-    if existing_user:
-        return {"error": "College email already exists"}, 400
 
     existing_student = await db["studentDetails"].find_one({
         "roll_no": data.get("roll_no"),
@@ -234,6 +253,11 @@ async def _register_institute_student(db, data, password_hash, current_user_iden
         },
         password_hash,
     )
+    if password_was_generated:
+        # Frontend must route this user to a mandatory password-change screen
+        # on next login (flag is surfaced in /login and /me, cleared by
+        # PUT /profile/change-password).
+        user_doc["must_change_password"] = True
 
     user_result = await db["users"].insert_one(user_doc)
     user_id = user_result.inserted_id
@@ -273,6 +297,7 @@ async def _register_institute_student(db, data, password_hash, current_user_iden
         "college_email": college_email,
         "default_password": default_password,
         "login_email": college_email,
+        "must_change_password": password_was_generated,
     }, 201
 
 
@@ -389,7 +414,11 @@ async def register(
         if await db["users"].find_one({"email": email.lower()}):
             raise HTTPException(status_code=400, detail="A user with this email already exists")
 
-        password_hash = hash_password(password)
+        # institute_student is the one role whose password may be omitted (an
+        # auto-generated one-time password is issued in _register_institute_student,
+        # which derives its own hash and ignores this value). Every other role's
+        # schema requires a password, so this is never None for them.
+        password_hash = hash_password(password) if password else None
         current_user_identity = identity["user_id"]
 
         if role == 2:
@@ -432,11 +461,16 @@ async def login(
         password = payload.password
 
         user = await db["users"].find_one({"email": email, "is_deleted": False})
+        # One response for "no such account" and "wrong password" so an
+        # attacker can't enumerate which emails are registered. When the
+        # account is absent, still run one bcrypt verification against a
+        # fixed dummy hash so the response timing doesn't give it away.
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            verify_password(password, _DUMMY_PASSWORD_HASH)
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         if not verify_password(password, user["password_hash"]):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         if not user.get("is_active", True):
             if user.get("role") in PENDING_APPROVAL_ROLES:
@@ -448,6 +482,7 @@ async def login(
         serialized_user = serialize_user(user)
         serialized_user["hasCOAccess"] = user.get("hasCOAccess", False)
         serialized_user["hasQPGAccess"] = user.get("hasQPGAccess", False)
+        serialized_user["must_change_password"] = bool(user.get("must_change_password", False))
 
         set_access_cookie(response, access_token)
 
@@ -478,6 +513,7 @@ async def get_me(
         serialized_user = serialize_user(user)
         serialized_user["hasCOAccess"] = user.get("hasCOAccess", False)
         serialized_user["hasQPGAccess"] = user.get("hasQPGAccess", False)
+        serialized_user["must_change_password"] = bool(user.get("must_change_password", False))
 
         if role == 2:
             institute = await db["instituteDetails"].find_one(
@@ -537,6 +573,11 @@ async def get_me(
 
 @router.post("/logout")
 async def logout(response: Response, identity: dict = Depends(get_current_identity)):
+    # Clearing the cookie only stops THIS client from sending the token; the
+    # token itself stays valid until it expires. Record a revocation cutoff
+    # so a copy of the token (stolen, or kept in another client) is rejected
+    # by get_current_identity from now on.
+    await revoke_user_tokens(identity["user_id"], settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
     unset_access_cookie(response)
     return {"message": "Logged out successfully"}
 
@@ -554,17 +595,27 @@ async def bulk_student_enrollment(
     students = payload.students
 
     success_count = 0
+    enrolled = []
     failed_students = []
 
     for index, student in enumerate(students):
         try:
-            password = student.get("password")
-            password_hash = hash_password(password) if password else hash_password("changeme123")
-
-            body, code = await _register_institute_student(db, student, password_hash, identity["user_id"])
+            # password_hash here is ignored by _register_institute_student
+            # (it derives its own from student["password"] or a generated
+            # one-time password), passed only to satisfy the shared signature.
+            body, code = await _register_institute_student(
+                db, student, hash_password(secrets.token_urlsafe(9)), identity["user_id"]
+            )
 
             if code == 201:
                 success_count += 1
+                enrolled.append({
+                    "row": index + 1,
+                    "student": student.get("fullName", "Unknown"),
+                    "college_email": body.get("college_email"),
+                    "default_password": body.get("default_password"),
+                    "must_change_password": body.get("must_change_password", False),
+                })
             else:
                 failed_students.append({
                     "row": index + 1,
@@ -582,5 +633,6 @@ async def bulk_student_enrollment(
         "message": f"{success_count} students enrolled successfully",
         "success_count": success_count,
         "failed_count": len(failed_students),
+        "enrolled": enrolled,
         "failed_students": failed_students,
     }

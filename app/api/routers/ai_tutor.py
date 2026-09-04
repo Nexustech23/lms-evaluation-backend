@@ -25,16 +25,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Set, Tuple
 
-<<<<<<< Updated upstream
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
-=======
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
->>>>>>> Stashed changes
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, require_mycareerguru_access
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.ai_tutor_note import create_note_document, serialize_note, serialize_note_summary
@@ -52,12 +49,9 @@ from app.services.roadmap_ai import is_gemini_quota_error
 from app.services.imagekit import delete_imagekit_file, upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
-<<<<<<< Updated upstream
-=======
 from app.services.rag.pdf_extract import extract_pdf_text
 from app.services.roadmap_ai import fence_user_text
 from app.utils.uploads import read_upload_capped
->>>>>>> Stashed changes
 
 router = APIRouter(
     prefix="/api/ai-tutor",
@@ -216,7 +210,7 @@ def _build_homework_prompt(prompt: str, extracted_text: str, homework_type: str,
     if extracted_text:
         homework_content = f"\n\nHOMEWORK CONTENT (extracted from uploaded file):\n{extracted_text}"
     if prompt:
-        homework_content += f"\n\nADDITIONAL INSTRUCTIONS FROM STUDENT:\n{prompt}"
+        homework_content += fence_user_text("Additional Instructions From Student", prompt)
 
     return f"""You are an expert academic tutor helping a student with their homework.
     CURRENT DATE: {current_date}
@@ -272,7 +266,11 @@ _NOTES_TYPE_INSTRUCTIONS = {
     ),
 }
 
-_NOTES_LENGTH_TOKENS = {"5 Pages": 3000, "10 Pages": 5000, "15 Pages": 7000, "Custom": 5000}
+# Output-token budgets per requested length. A styled HTML page is roughly
+# 3–5k tokens, so these are ~page-count × 4k with headroom; generate_html
+# streams, so large values don't risk an HTTP timeout. claude-sonnet-4-6
+# tops out at 128k output.
+_NOTES_LENGTH_TOKENS = {"5 Pages": 20000, "10 Pages": 32000, "15 Pages": 48000, "Custom": 24000}
 
 
 def _build_notes_prompt(prompt: str, extracted_text: str, notes_type: str, notes_length: str) -> str:
@@ -283,7 +281,7 @@ def _build_notes_prompt(prompt: str, extracted_text: str, notes_type: str, notes
     if extracted_text:
         study_content += f"\n\nSTUDY MATERIAL (extracted from uploaded file):\n{extracted_text}"
     if prompt:
-        study_content += f"\n\nTOPIC / INSTRUCTIONS FROM STUDENT:\n{prompt}"
+        study_content += fence_user_text("Topic / Instructions From Student", prompt)
 
     return f"""You are an expert academic notes creator and study assistant.
 CURRENT DATE: {current_date}
@@ -400,8 +398,11 @@ async def _generate_notes_html(
 
 async def _run_homework_job(
     job_id: str, params: dict, file_bytes: Optional[bytes], filename: str,
-    db: AsyncIOMotorDatabase, user_id: str,
+    user_id: str,
 ) -> None:
+    # Runs in the arq worker process (Phase 2) — source db from the worker's
+    # own Mongo client rather than taking a request-scoped handle as an arg.
+    db = get_database()
     try:
         extracted_text = ""
         warning = None
@@ -428,8 +429,8 @@ async def _run_homework_job(
         full_prompt = _build_homework_prompt(
             params["prompt"], extracted_text, params["homeworkType"], params["responseStyle"]
         )
-        claude_model = "claude-sonnet-4-20250514"
-        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 5000)
+        claude_model = "claude-sonnet-4-6"
+        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 16000)
         logging.info("[hw:%s] Claude done — %d tokens", job_id, c_usage["total_tokens"])
         await record_ai_usage(
             db, user_id=user_id, provider=Provider.CLAUDE, model=claude_model,
@@ -448,7 +449,7 @@ async def _run_homework_job(
         )
         logging.info("[hw:%s] Uploaded -> %s", job_id, upload["url"])
 
-        await set_job(HW_JOB_PREFIX, job_id, {
+        await update_job(HW_JOB_PREFIX, job_id, {
             "status": "completed",
             "step": "done",
             "solution_url": upload["url"],
@@ -462,13 +463,15 @@ async def _run_homework_job(
 
     except Exception as e:
         logging.error("[hw:%s] Job failed: %s", job_id, e, exc_info=True)
-        await set_job(HW_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
+        await update_job(HW_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
 
 
 async def _run_notes_job(
     job_id: str, params: dict, file_bytes: Optional[bytes], filename: str,
-    db: AsyncIOMotorDatabase, user_id: str,
+    user_id: str,
 ) -> None:
+    # Runs in the arq worker process (Phase 2) — see _run_homework_job.
+    db = get_database()
     try:
         extracted_text = ""
         warning = None
@@ -495,14 +498,8 @@ async def _run_notes_job(
             params["prompt"], extracted_text, params["notesType"], params["notesLength"]
         )
         max_tokens = _NOTES_LENGTH_TOKENS.get(params["notesLength"], 5000)
-<<<<<<< Updated upstream
-        claude_model = "claude-sonnet-4-20250514"
-        html_content, c_usage = await asyncio.to_thread(
-            generate_html, full_prompt, claude_model, max_tokens
-=======
         html_content, c_usage, provider, model = await _generate_notes_html(
             job_id, full_prompt, max_tokens, has_document=bool(extracted_text)
->>>>>>> Stashed changes
         )
         await record_ai_usage(
             db, user_id=user_id, provider=provider, model=model,
@@ -521,9 +518,6 @@ async def _run_notes_job(
         )
         logging.info("[notes:%s] Uploaded -> %s", job_id, upload["url"])
 
-<<<<<<< Updated upstream
-        await set_job(NOTES_JOB_PREFIX, job_id, {
-=======
         # Durable record. The Redis job above is the polling contract while
         # generation is in flight and expires after JOB_TTL (1 hour) — this
         # is what makes the result reachable afterward: a page refresh, a
@@ -556,7 +550,6 @@ async def _run_notes_job(
             logging.error("[notes:%s] Failed to persist note to history: %s", job_id, e, exc_info=True)
 
         await update_job(NOTES_JOB_PREFIX, job_id, {
->>>>>>> Stashed changes
             "status": "completed",
             "step": "done",
             "solution_url": upload["url"],
@@ -571,7 +564,7 @@ async def _run_notes_job(
 
     except Exception as e:
         logging.error("[notes:%s] Job failed: %s", job_id, e, exc_info=True)
-        await set_job(NOTES_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
+        await update_job(NOTES_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
 
 
 # ============================================================
@@ -586,7 +579,6 @@ async def homework_help(
     responseStyle: str = Form("Simple"),
     file: Optional[UploadFile] = File(None),
     identity: dict = Depends(get_current_identity),
-    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
         prompt = prompt.strip()
@@ -605,14 +597,18 @@ async def homework_help(
                 return JSONResponse(status_code=400, content={
                     "error": f"Unsupported file type '.{ext}'. Accepted: PDF, DOCX, PNG, JPG, JPEG, WEBP."
                 })
-            file_bytes = await file.read()
+            file_bytes = await read_upload_capped(file)
             filename = fname
 
         job_id = str(uuid.uuid4())
-        await set_job(HW_JOB_PREFIX, job_id, {"status": "processing", "step": "starting", "job_id": job_id})
+        await set_job(HW_JOB_PREFIX, job_id, {
+            "status": "processing", "step": "starting", "job_id": job_id,
+            "user_id": identity["user_id"],
+        })
 
         params = {"prompt": prompt, "homeworkType": homework_type, "responseStyle": response_style}
-        background_tasks.add_task(_run_homework_job, job_id, params, file_bytes, filename, db, identity["user_id"])
+        await enqueue("run_homework_job", job_id, params, file_bytes, filename, identity["user_id"],
+                      background_tasks=background_tasks)
 
         logging.info("Homework job %s started.", job_id)
         return JSONResponse(status_code=202, content={
@@ -621,15 +617,17 @@ async def homework_help(
             "message": "Generation started. Poll /api/ai-tutor/homework-help/status/<jobId>.",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("homework_help error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/homework-help/status/{job_id}")
-async def homework_help_status(job_id: str):
+async def homework_help_status(job_id: str, identity: dict = Depends(get_current_identity)):
     job = await get_job(HW_JOB_PREFIX, job_id)
-    if job is None:
+    if job is None or job.get("user_id") != identity["user_id"]:
         return JSONResponse(status_code=404, content={"error": "Job not found. It may have expired or never existed."})
 
     status = job.get("status", "unknown")
@@ -649,7 +647,10 @@ async def homework_help_status(job_id: str):
         }
 
     if status == "failed":
-        return JSONResponse(status_code=500, content={
+        # 200, not 500: the status check itself succeeded — the job failed.
+        # Returning 5xx makes the frontend poller treat it as "couldn't reach
+        # the server" instead of surfacing job.error.
+        return JSONResponse(status_code=200, content={
             "success": False, "status": "failed", "error": job.get("error", "Unknown error."),
         })
 
@@ -670,7 +671,6 @@ async def generate_notes(
     notesLength: str = Form("5 Pages"),
     file: Optional[UploadFile] = File(None),
     identity: dict = Depends(get_current_identity),
-    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
         prompt = prompt.strip()
@@ -689,14 +689,18 @@ async def generate_notes(
                 return JSONResponse(status_code=400, content={
                     "error": f"Unsupported file type '.{ext}'. Accepted: PDF, DOCX."
                 })
-            file_bytes = await file.read()
+            file_bytes = await read_upload_capped(file)
             filename = fname
 
         job_id = str(uuid.uuid4())
-        await set_job(NOTES_JOB_PREFIX, job_id, {"status": "processing", "step": "starting", "job_id": job_id})
+        await set_job(NOTES_JOB_PREFIX, job_id, {
+            "status": "processing", "step": "starting", "job_id": job_id,
+            "user_id": identity["user_id"],
+        })
 
         params = {"prompt": prompt, "notesType": notes_type, "notesLength": notes_length}
-        background_tasks.add_task(_run_notes_job, job_id, params, file_bytes, filename, db, identity["user_id"])
+        await enqueue("run_notes_job", job_id, params, file_bytes, filename, identity["user_id"],
+                      background_tasks=background_tasks)
 
         logging.info("Notes job %s started — type=%s length=%s", job_id, notes_type, notes_length)
         return JSONResponse(status_code=202, content={
@@ -705,15 +709,17 @@ async def generate_notes(
             "message": "Generation started. Poll /api/ai-tutor/generate-notes/status/<jobId>.",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("generate_notes error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/generate-notes/status/{job_id}")
-async def generate_notes_status(job_id: str):
+async def generate_notes_status(job_id: str, identity: dict = Depends(get_current_identity)):
     job = await get_job(NOTES_JOB_PREFIX, job_id)
-    if job is None:
+    if job is None or job.get("user_id") != identity["user_id"]:
         return JSONResponse(status_code=404, content={"error": "Job not found. It may have expired or never existed."})
 
     status = job.get("status", "unknown")
@@ -738,7 +744,10 @@ async def generate_notes_status(job_id: str):
         }
 
     if status == "failed":
-        return JSONResponse(status_code=500, content={
+        # 200, not 500: the status check itself succeeded — the job failed.
+        # Returning 5xx makes the frontend poller treat it as "couldn't reach
+        # the server" instead of surfacing job.error.
+        return JSONResponse(status_code=200, content={
             "success": False, "status": "failed", "error": job.get("error", "Unknown error."),
         })
 

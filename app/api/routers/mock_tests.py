@@ -31,6 +31,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, require_mycareerguru_access
 from app.api.routers.roadmap import _resolve_grounding
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.ai_usage_event import Feature, Provider
@@ -185,7 +186,8 @@ async def create_mock_test(
         doc.get("subjectName") or "General", doc.get("topic"), doc["difficulty"],
         doc["questionCount"], doc["questionTypes"], doc["marksPerQuestion"],
     )
-    background_tasks.add_task(_run_generation, test_id, prompt, identity["user_id"])
+    await enqueue("run_mock_generation", str(test_id), prompt, identity["user_id"],
+                  background_tasks=background_tasks)
 
     return {
         "success": True,
@@ -197,7 +199,8 @@ async def create_mock_test(
 
 
 async def _create_roadmap_test(
-    background_tasks: BackgroundTasks, payload: MockTestCreateRequest,
+    background_tasks: BackgroundTasks,
+    payload: MockTestCreateRequest,
     student_id: ObjectId, user_id: str, db: AsyncIOMotorDatabase,
 ) -> Dict[str, Any]:
     if not payload.roadmap_id or not ObjectId.is_valid(payload.roadmap_id):
@@ -252,7 +255,8 @@ async def _create_roadmap_test(
     prompt = build_auto_test_prompt(
         subject, week_title, subtopic_names, counts, payload.custom_prompt, grounding_context=grounding_context,
     )
-    background_tasks.add_task(_run_roadmap_generation, test_id, prompt, user_id, grounding_context is not None)
+    await enqueue("run_roadmap_mock_generation", str(test_id), prompt, user_id, grounding_context is not None,
+                  background_tasks=background_tasks)
 
     return {
         "success": True,

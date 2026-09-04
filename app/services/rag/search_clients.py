@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import html
 import logging
-import os
 import re
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
 import requests
+
+from app.core.config import settings
 
 logger = logging.getLogger("app.services.rag.search_clients")
 
@@ -45,7 +46,7 @@ def search_youtube(query: str, max_results: int = 5) -> list[dict]:
     making a request if it's unset, so this feature degrades cleanly for
     anyone who hasn't configured a key yet.
     """
-    api_key = os.getenv("YOUTUBE_API_KEY", "")
+    api_key = settings.YOUTUBE_API_KEY
     if not api_key:
         logger.warning("search_youtube skipped: YOUTUBE_API_KEY not set")
         return []

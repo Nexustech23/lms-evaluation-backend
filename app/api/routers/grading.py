@@ -16,15 +16,16 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-import requests
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.queue import enqueue
 from app.core.rate_limit import bulk_grading_rate_limit
 from app.db.mongodb import get_database
+from app.utils.net import safe_get
 from app.schemas.grading import EvaluateAnswerScriptRequest
 from app.services.grading import (
     extract_answer_text_with_gemini,
@@ -45,9 +46,8 @@ EVAL_JOB_PREFIX = "job:"
 
 
 def _download_pdf(url: str) -> bytes:
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    return resp.content
+    # SSRF-checked: rejects internal / metadata addresses and redirects.
+    return safe_get(url, timeout=60)
 
 
 async def _resolve_institute_id(db: AsyncIOMotorDatabase, exam: dict) -> ObjectId:
@@ -335,8 +335,9 @@ async def evaluate_answer_script(
     job_id = str(uuid.uuid4())
     await set_job(EVAL_JOB_PREFIX, job_id, {"status": "processing", "progress": 0, "step": "Starting evaluation"})
 
-    background_tasks.add_task(
-        _run_evaluation_job, job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id)
+    await enqueue(
+        "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
+        background_tasks=background_tasks,
     )
 
     return JSONResponse(status_code=202, content={

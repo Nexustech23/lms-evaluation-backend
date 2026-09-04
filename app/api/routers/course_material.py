@@ -13,8 +13,8 @@
 # this addition.
 #
 # Follows this codebase's established async-job convention: Redis-backed
-# job_store.py + BackgroundTasks (same pattern as roadmap.py/ai_tutor.py),
-# rather than the Flask prototype's in-memory dict.
+# job_store.py, with the job executed in the arq worker process (Perf
+# Phase 2 — app/worker.py), rather than the Flask prototype's in-memory dict.
 # ============================================================
 
 import asyncio
@@ -30,8 +30,10 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import FACULTY, INSTITUTE, get_current_identity
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
+from app.utils.uploads import read_upload_capped
 from app.models.ai_usage_event import Feature, Provider
 from app.services.ai_usage import record_ai_usage
 from app.services.gemini import extract_text_from_file
@@ -196,7 +198,7 @@ async def upload_course_material(
     if identity.get("role") not in (INSTITUTE, FACULTY):
         raise HTTPException(status_code=403, detail="Only institute admin or faculty can upload course material")
 
-    file_bytes = await file.read()
+    file_bytes = await read_upload_capped(file)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
@@ -205,9 +207,10 @@ async def upload_course_material(
         "status": "processing", "step": "Starting…", "user_id": identity["user_id"],
     })
 
-    background_tasks.add_task(
-        _run_ingest_job, job_id, file_bytes, file.filename or "upload",
-        course_title, course_code, identity["user_id"],
+    await enqueue(
+        "run_ingest_job", job_id, file_bytes, file.filename or "upload",
+        course_title, course_code, identity["user_id"], CM_JOB_PREFIX,
+        background_tasks=background_tasks,
     )
 
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "processing"})

@@ -23,6 +23,8 @@ from app.api.deps import (
     get_current_user_and_institute,
     require_role,
 )
+from app.core.config import settings
+from app.core.redis_client import bust_account_state, revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
 from app.models.user import serialize_doc
@@ -34,6 +36,7 @@ from app.schemas.profile import (
     SelfLearnerUpdateRequest,
     TutorUpdateRequest,
 )
+from app.utils.batch import load_by_ids
 from app.utils.cascade import cascade_institute_access, cascade_institute_status, cascade_tutor_status
 
 router = APIRouter(tags=["profile"])
@@ -281,8 +284,20 @@ async def change_password(
     new_hash = hash_password(payload.newPassword)
     await db["users"].update_one(
         {"_id": ObjectId(user_id)},
-        {"$set": {"password_hash": new_hash, "updated_at": datetime.now(timezone.utc)}},
+        {"$set": {
+            "password_hash": new_hash,
+            "must_change_password": False,
+            "updated_at": datetime.now(timezone.utc),
+        }},
     )
+
+    # Invalidate every session issued before this change (any other device,
+    # and — for a first-login forced change — the temporary-password session
+    # itself). The client re-authenticates with the new password.
+    await revoke_user_tokens(user_id, settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
+    # Drop the cached {must_change_password, is_active} so the next login
+    # isn't blocked by a stale flag for up to ACCOUNT_STATE_TTL seconds.
+    await bust_account_state(user_id)
 
     return {"message": "Password updated successfully"}
 
@@ -347,9 +362,17 @@ async def get_all_institutes(
 
 
 @router.get("/institute/{user_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
-async def get_institute(user_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def get_institute(
+    user_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user ID")
+
+    # SUPERADMIN may read any institute; an INSTITUTE admin only its own.
+    if identity.get("role") == INSTITUTE and user_id != identity["user_id"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
     institute = await db["instituteDetails"].find_one({"user_id": ObjectId(user_id), "is_deleted": {"$ne": True}})
     if not institute:
@@ -433,6 +456,7 @@ async def update_institute(
 
     if institute_data.get("is_active") is not None:
         await db["users"].update_one({"_id": user_object_id}, {"$set": {"is_active": institute_data["is_active"]}})
+        await bust_account_state(str(user_object_id))
         await cascade_institute_status(db, user_object_id, institute_data["is_active"])
 
     await cascade_institute_access(
@@ -482,11 +506,22 @@ async def get_all_faculties(
         if programme and programme.get("school_id"):
             query["school_id"] = programme["school_id"]
 
+    faculty_rows = [doc async for doc in db["facultyDetails"].find(query).sort("created_at", -1)]
+
+    # Batched enrichment (Phase 4): one $in for users, one for schools,
+    # instead of a find_one per faculty row.
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in faculty_rows),
+        {"fullName": 1, "email": 1, "phone": 1, "is_active": 1},
+    )
+    schools_by_id = await load_by_ids(
+        db, "schoolDetails", (d.get("school_id") for d in faculty_rows),
+        {"school_name": 1, "school_code": 1},
+    )
+
     result = []
-    async for doc in db["facultyDetails"].find(query).sort("created_at", -1):
-        u = await db["users"].find_one(
-            {"_id": doc["user_id"]}, {"fullName": 1, "email": 1, "phone": 1, "is_active": 1}
-        ) or {}
+    for doc in faculty_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
 
         if search and search.strip():
             search_lower = search.strip().lower()
@@ -502,11 +537,7 @@ async def get_all_faculties(
             result.append({"id": str(doc["_id"]), "user_id": str(doc["user_id"]), "fullName": u.get("fullName")})
             continue
 
-        school = None
-        if doc.get("school_id"):
-            school = await db["schoolDetails"].find_one(
-                {"_id": doc["school_id"]}, {"school_name": 1, "school_code": 1}
-            )
+        school = schools_by_id.get(doc["school_id"]) if doc.get("school_id") else None
 
         result.append({
             "id": str(doc["_id"]),
@@ -545,18 +576,37 @@ async def get_all_faculties(
     }
 
 
+async def _faculty_in_caller_scope(db: AsyncIOMotorDatabase, faculty_id: str, identity: dict) -> Dict[str, Any]:
+    """SUPERADMIN may target any faculty; an INSTITUTE admin only faculty of
+    their own institute. Raises 400/403/404 as appropriate; returns the doc."""
+    if not ObjectId.is_valid(faculty_id):
+        raise HTTPException(status_code=400, detail="Invalid faculty ID")
+
+    query: Dict[str, Any] = {"_id": ObjectId(faculty_id)}
+    if identity.get("role") == INSTITUTE:
+        _, institute_id, error = await get_current_user_and_institute(identity, db)
+        if error:
+            message, code = error
+            raise HTTPException(status_code=code, detail=message)
+        query["institute_id"] = institute_id
+
+    faculty_doc = await db["facultyDetails"].find_one(query)
+    if not faculty_doc:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+    return faculty_doc
+
+
 @router.put("/faculty/{faculty_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
 async def update_faculty(
     faculty_id: str,
     payload: FacultyUpdateRequest = FacultyUpdateRequest(),
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     data = payload.model_dump(exclude_unset=True)
-    if not ObjectId.is_valid(faculty_id):
-        raise HTTPException(status_code=400, detail="Invalid faculty ID")
 
-    faculty_doc = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id), "is_deleted": {"$ne": True}})
-    if not faculty_doc:
+    faculty_doc = await _faculty_in_caller_scope(db, faculty_id, identity)
+    if faculty_doc.get("is_deleted"):
         raise HTTPException(status_code=404, detail="Faculty not found")
 
     user_id = faculty_doc.get("user_id")
@@ -617,13 +667,12 @@ async def update_faculty(
 
 
 @router.delete("/faculty/{faculty_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
-async def delete_faculty(faculty_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(faculty_id):
-        raise HTTPException(status_code=400, detail="Invalid faculty ID")
-
-    faculty_doc = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id)})
-    if not faculty_doc:
-        raise HTTPException(status_code=404, detail="Faculty not found")
+async def delete_faculty(
+    faculty_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    faculty_doc = await _faculty_in_caller_scope(db, faculty_id, identity)
 
     fid = faculty_doc["_id"]
     uid = faculty_doc["user_id"]
@@ -652,12 +701,15 @@ async def get_all_institute_students(
     query = {"institute_id": ObjectId(institute_id), "role": 4}
     skip = (page - 1) * limit
 
-    cursor = db["studentDetails"].find(query).skip(skip).limit(limit)
+    student_rows = [doc async for doc in db["studentDetails"].find(query).skip(skip).limit(limit)]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in student_rows),
+        {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1},
+    )
+
     result = []
-    async for doc in cursor:
-        u = await db["users"].find_one(
-            {"_id": doc["user_id"]}, {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-        ) or {}
+    for doc in student_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
         result.append({
             "id": str(doc["_id"]),
             "user_id": str(doc["user_id"]),
@@ -708,14 +760,31 @@ async def get_all_tutors(
     elif status == "active":
         query["is_active"] = True
 
-    cursor = db["users"].find(
-        query, {"_id": 1, "fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-    ).skip(skip).limit(limit)
+    tutor_users = [
+        u async for u in db["users"].find(
+            query, {"_id": 1, "fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
+        ).skip(skip).limit(limit)
+    ]
+    uids = [u["_id"] for u in tutor_users]
+
+    # Batched (Phase 4): one query for tutorDetails, one aggregation for the
+    # per-tutor student counts — instead of a find_one + count_documents per row.
+    tutor_by_uid = {
+        t["user_id"]: t
+        async for t in db["tutorDetails"].find({"user_id": {"$in": uids}})
+    }
+    student_counts: Dict[Any, int] = {
+        row["_id"]: row["n"]
+        async for row in db["studentDetails"].aggregate([
+            {"$match": {"tutor_id": {"$in": uids}, "role": 6}},
+            {"$group": {"_id": "$tutor_id", "n": {"$sum": 1}}},
+        ])
+    }
 
     result = []
-    async for u in cursor:
+    for u in tutor_users:
         uid = u["_id"]
-        tutor = await db["tutorDetails"].find_one({"user_id": uid}) or {}
+        tutor = tutor_by_uid.get(uid) or {}
         result.append({
             "id": str(uid),
             "fullName": u.get("fullName"),
@@ -724,7 +793,7 @@ async def get_all_tutors(
             "is_active": u.get("is_active", False),
             "created_at": u.get("created_at"),
             "coaching_name": tutor.get("coaching_name", ""),
-            "student_count": await db["studentDetails"].count_documents({"tutor_id": uid, "role": 6}),
+            "student_count": student_counts.get(uid, 0),
         })
 
     total = await db["users"].count_documents(query)
@@ -758,6 +827,7 @@ async def update_tutor(
             {"_id": tutor_object_id},
             {"$set": {"is_active": is_active, "updated_at": datetime.now(timezone.utc)}},
         )
+        await bust_account_state(str(tutor_object_id))
         await cascade_tutor_status(db, tutor_user_id, is_active)
 
     if user_fields:
@@ -808,12 +878,15 @@ async def get_all_tutor_students(
     query = {"tutor_id": ObjectId(tutor_user_id), "role": 6}
     skip = (page - 1) * limit
 
-    cursor = db["studentDetails"].find(query).skip(skip).limit(limit)
+    student_rows = [doc async for doc in db["studentDetails"].find(query).skip(skip).limit(limit)]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in student_rows),
+        {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1},
+    )
+
     result = []
-    async for doc in cursor:
-        u = await db["users"].find_one(
-            {"_id": doc["user_id"]}, {"fullName": 1, "email": 1, "phone": 1, "is_active": 1, "created_at": 1}
-        ) or {}
+    for doc in student_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
         result.append({
             "id": str(doc["_id"]),
             "user_id": str(doc["user_id"]),
@@ -1039,6 +1112,7 @@ async def update_self_learner(
     if update_fields:
         update_fields["updated_at"] = datetime.now(timezone.utc)
         await db["users"].update_one({"_id": ObjectId(learner_user_id)}, {"$set": update_fields})
+        await bust_account_state(str(learner_user_id))
 
     updated = await db["users"].find_one({"_id": ObjectId(learner_user_id)}, {"password_hash": 0}) or {}
     updated["_id"] = str(updated["_id"])

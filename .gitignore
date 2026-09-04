@@ -1,7 +1,9 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .env
 
 # runtime debug artifact from safe_json_parse() — never commit this
 bad_llm_json.txt
+.vscode

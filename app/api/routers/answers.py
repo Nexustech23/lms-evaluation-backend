@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.queue import enqueue
 from app.db.mongodb import get_database
 from app.models.answer import validate_questionwise
 from app.schemas.answers import (
@@ -23,7 +24,6 @@ from app.schemas.answers import (
     UploadAnswerScriptRequest,
 )
 from app.services.imagekit import delete_imagekit_file, get_imagekit_auth_params
-from app.utils.transcript_generation_helper import refresh_transcript_for_exam
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["answers"])
 
@@ -172,7 +172,11 @@ async def imagekit_auth():
 # =====================================================
 
 @router.post("/save-self-evaluation")
-async def save_self_evaluation(payload: SelfEvaluationRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def save_self_evaluation(
+    background_tasks: BackgroundTasks,
+    payload: SelfEvaluationRequest,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     answer_id = payload.answer_id
     questionwise_marking = payload.questionwise_marking
 
@@ -197,7 +201,8 @@ async def save_self_evaluation(payload: SelfEvaluationRequest, db: AsyncIOMotorD
 
     if result.modified_count == 1:
         if answer and answer.get("exam_id"):
-            asyncio.create_task(refresh_transcript_for_exam(db, answer["exam_id"]))
+            await enqueue("run_refresh_transcript", str(answer["exam_id"]),
+                          background_tasks=background_tasks)
         return {"success": True, "total_final_marks": total_final_marks}
 
     raise HTTPException(status_code=500, detail="Failed to save evaluation")
@@ -210,6 +215,7 @@ async def save_self_evaluation(payload: SelfEvaluationRequest, db: AsyncIOMotorD
 @router.post("/manual-marks-entry/{exam_id}")
 async def manual_marks_entry(
     exam_id: str,
+    background_tasks: BackgroundTasks,
     payload: ManualMarksEntryRequest,
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -355,6 +361,7 @@ async def manual_marks_entry(
             saved += 1
 
     if saved:
-        asyncio.create_task(refresh_transcript_for_exam(db, ObjectId(exam_id)))
+        await enqueue("run_refresh_transcript", str(exam_id),
+                      background_tasks=background_tasks)
 
     return {"success": True, "saved_count": saved}

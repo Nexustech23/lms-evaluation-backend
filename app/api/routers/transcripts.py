@@ -44,6 +44,7 @@ from app.models.relative_grading import build_grading_config
 from app.models.transcript import get_imports, get_semesters, serialize_semester
 from app.schemas.transcripts import TranscriptGenerateRequest
 from app.utils.transcript_excel_helper import build_transcript_documents, parse_transcript_workbook
+from app.utils.uploads import read_upload_capped
 from app.utils.transcript_generation_helper import generate_transcript_for_semester
 
 router = APIRouter(prefix="/transcript", dependencies=[Depends(get_current_identity)], tags=["transcripts"])
@@ -178,7 +179,7 @@ async def preview_transcript_import(
         if not await _grading_config(institute_id, db):
             raise HTTPException(status_code=404, detail="Relative grading configuration not found")
 
-        payload = await file.read()
+        payload = await read_upload_capped(file)
         parsed = parse_transcript_workbook(file.filename or "", payload)
         return {
             "success": True,
@@ -211,7 +212,7 @@ async def confirm_transcript_import(
         if not grading_config:
             raise HTTPException(status_code=404, detail="Relative grading configuration not found")
 
-        payload = await file.read()
+        payload = await read_upload_capped(file)
         parsed = parse_transcript_workbook(file.filename or "", payload)
         documents = build_transcript_documents(parsed, grading_config, institute_id, batch["_id"], import_id)
         if not documents:

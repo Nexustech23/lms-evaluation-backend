@@ -25,10 +25,11 @@
 # `week.autoTest = {config, questions[], generatedAt}`, regenerated fresh
 # per attempt rather than long-term cached like notes.
 #
-# Async curriculum generation still uses the existing Redis-backed
-# job_store.py + BackgroundTasks pattern (matching ai_tutor.py/pomodoro.py).
-# Job-status endpoint (GET /status/{job_id}) stays scoped to the requesting
-# user (embedded user_id at creation, checked on lookup).
+# Async curriculum generation uses the Redis-backed job_store.py; the job
+# itself runs in the arq worker process (Perf Phase 2 — see app/worker.py),
+# enqueued via app.core.queue.enqueue. Job-status endpoint
+# (GET /status/{job_id}) stays scoped to the requesting user (embedded
+# user_id at creation, checked on lookup).
 # ============================================================
 
 import asyncio
@@ -48,6 +49,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
 from app.api.deps import get_current_identity, require_mycareerguru_access
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.ai_usage_event import Feature, Provider
@@ -495,10 +497,11 @@ async def create_roadmap(
         "status": "processing", "step": "Starting…", "user_id": identity["user_id"],
     })
 
-    background_tasks.add_task(
-        _run_create_roadmap_job, job_id, identity["user_id"], subject, goal,
+    await enqueue(
+        "run_create_roadmap", job_id, identity["user_id"], subject, goal,
         skill_level, daily_study_time, revision_frequency, assessment_score,
         payload.doc_id, payload.custom_instruction,
+        background_tasks=background_tasks,
     )
 
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "processing"})

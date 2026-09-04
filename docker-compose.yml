@@ -13,7 +13,34 @@ services:
       - "5050:5050"
     env_file:
       - .env
+    environment:
+      # gunicorn worker processes inside this one container. ~2*vCPU+1.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-3}
     restart: unless-stopped
+    networks:
+      - lms-shared
+    # To run MULTIPLE backend containers behind a load balancer instead of
+    # (or in addition to) more gunicorn workers: remove `container_name` and
+    # the fixed host `ports` mapping above, put nginx/traefik in front on
+    # 5050, and `docker compose up -d --scale lms-backend-fastapi=3`.
+
+  # Perf Phase 2 — OPTIONAL. Only needed when QUEUE_MODE=redis (default is
+  # "inline", where the web container runs jobs itself). Behind the "queue"
+  # compose profile, so a plain `docker compose up -d` does NOT start it.
+  #
+  # To move AI / PDF / transcript jobs off the web tier:
+  #   1. set QUEUE_MODE=redis in .env
+  #   2. docker compose --profile queue up -d
+  # Scale it independently: docker compose --profile queue up -d --scale lms-worker=3
+  lms-worker:
+    build: .
+    command: arq app.worker.WorkerSettings
+    profiles: ["queue"]
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - lms-backend-fastapi
     networks:
       - lms-shared
 

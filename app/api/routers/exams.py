@@ -5,20 +5,22 @@
 # ============================================================
 
 import asyncio
+import concurrent.futures
 import io
 import json
+import logging
 import math
 import zipfile
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-import requests
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.exam import create_exam_document
@@ -28,7 +30,8 @@ from app.schemas.exams import (
     SetArchiveStatusRequest,
     UploadQuestionPaperRequest,
 )
-from app.services.gemini import extract_and_patch_question_paper_text
+from app.utils.net import SsrfError, safe_get
+from app.utils.query import search_regex
 from app.utils.token_usage import check_institute_token_budget
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["exams"])
@@ -159,8 +162,10 @@ async def upload_question_paper(
     )
 
     if budget["allowed"]:
-        background_tasks.add_task(
-            extract_and_patch_question_paper_text, db, folder_object_id, questionpaper_url, str(faculty_id), filename
+        await enqueue(
+            "run_extract_question_paper_text",
+            str(folder_object_id), questionpaper_url, str(faculty_id), filename,
+            background_tasks=background_tasks,
         )
 
     updated_exam = await db["newsavedDocs"].find_one({"_id": folder_object_id})
@@ -240,14 +245,15 @@ async def get_all_folders(
         {"$unwind": {"path": "$faculty", "preserveNullAndEmptyArrays": True}},
     ]
 
-    if search:
+    search_clause = search_regex(search)
+    if search_clause:
         pipeline.append({
             "$match": {
                 "$or": [
-                    {"folder_name": {"$regex": search, "$options": "i"}},
-                    {"exam_title": {"$regex": search, "$options": "i"}},
-                    {"subject.subject_name": {"$regex": search, "$options": "i"}},
-                    {"subject.subject_code": {"$regex": search, "$options": "i"}},
+                    {"folder_name": search_clause},
+                    {"exam_title": search_clause},
+                    {"subject.subject_name": search_clause},
+                    {"subject.subject_code": search_clause},
                 ]
             }
         })
@@ -359,13 +365,28 @@ async def get_exams_using_subjectid(subject_id: str, db: AsyncIOMotorDatabase = 
     if not exams:
         raise HTTPException(status_code=404, detail="No exams found for this subject")
 
+    # One aggregation for every exam's sheet counts (Phase 4) instead of two
+    # count_documents per exam. "$type" == "missing" only when evaluated_at
+    # is absent, matching the old {"$exists": True} filter (both count nulls).
+    exam_ids = [e["_id"] for e in exams]
+    sheet_counts = {
+        row["_id"]: row
+        async for row in db["answerDetails"].aggregate([
+            {"$match": {"exam_id": {"$in": exam_ids}}},
+            {"$group": {
+                "_id": "$exam_id",
+                "total": {"$sum": 1},
+                "evaluated": {"$sum": {"$cond": [{"$eq": [{"$type": "$evaluated_at"}, "missing"]}, 0, 1]}},
+            }},
+        ])
+    }
+
     response = []
     for exam in exams:
         exam_id = exam["_id"]
-        total_sheets = await db["answerDetails"].count_documents({"exam_id": exam_id})
-        evaluated_sheets = await db["answerDetails"].count_documents(
-            {"exam_id": exam_id, "evaluated_at": {"$exists": True}}
-        )
+        counts = sheet_counts.get(exam_id) or {}
+        total_sheets = counts.get("total", 0)
+        evaluated_sheets = counts.get("evaluated", 0)
         progress = round((evaluated_sheets / total_sheets) * 100, 2) if total_sheets > 0 else 0
 
         response.append({
@@ -538,28 +559,37 @@ async def download_folder(folder_id: str, db: AsyncIOMotorDatabase = Depends(get
     if not answers:
         raise HTTPException(status_code=404, detail="No answer scripts found in this folder")
 
+    def _fetch(url: str) -> bytes:
+        try:
+            return safe_get(url, timeout=60)
+        except SsrfError as exc:
+            logging.warning("download-folder: skipping unsafe url: %s", exc)
+            return b""
+
     def _build_zip() -> bytes:
+        # Build the (zip path, url) work list in the same order as before,
+        # fetch every URL concurrently, then assemble the zip. Same entries,
+        # same PDF bytes, same order — only the network fetches parallelize.
+        jobs: list[tuple[str, str]] = []
+        for answer in answers:
+            filename = answer.get("filename", "AnswerScript.pdf")
+            if not filename.lower().endswith(".pdf"):
+                filename = f"{filename}.pdf"
+            student_name = filename.replace(".pdf", "").replace(".PDF", "")
+
+            if answer.get("answer_script_url"):
+                jobs.append((f"{student_name}/{filename}", answer["answer_script_url"]))
+            if answer.get("evaluated_report_url"):
+                jobs.append((f"{student_name}/{student_name}_result.pdf", answer["evaluated_report_url"]))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            contents = list(pool.map(lambda j: _fetch(j[1]), jobs))
+
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for answer in answers:
-                filename = answer.get("filename", "AnswerScript.pdf")
-                if not filename.lower().endswith(".pdf"):
-                    filename = f"{filename}.pdf"
-
-                student_name = filename.replace(".pdf", "").replace(".PDF", "")
-                student_folder = f"{student_name}/"
-
-                answer_script_url = answer.get("answer_script_url")
-                if answer_script_url:
-                    resp = requests.get(answer_script_url, timeout=60, allow_redirects=True)
-                    if resp.status_code == 200 and resp.content[:4] == b"%PDF":
-                        zip_file.writestr(f"{student_folder}{filename}", resp.content)
-
-                evaluated_report_url = answer.get("evaluated_report_url")
-                if evaluated_report_url:
-                    resp = requests.get(evaluated_report_url, timeout=60, allow_redirects=True)
-                    if resp.status_code == 200 and resp.content[:4] == b"%PDF":
-                        zip_file.writestr(f"{student_folder}{student_name}_result.pdf", resp.content)
+            for (zip_path, _url), content in zip(jobs, contents):
+                if content[:4] == b"%PDF":
+                    zip_file.writestr(zip_path, content)
 
         zip_buffer.seek(0)
         return zip_buffer.read()

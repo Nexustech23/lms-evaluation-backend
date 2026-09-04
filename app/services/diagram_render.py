@@ -13,6 +13,7 @@
 # (no import/exec/open/dunder-attribute access), not just the namespace.
 # ============================================================
 
+import ast
 import logging
 import math
 import os
@@ -26,7 +27,6 @@ matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
-from asteval import Interpreter
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -373,22 +373,50 @@ def _render_biology_placeholder(spec: Dict[str, Any]) -> bytes:
 
 _CURVE_SYMBOLS = {
     "sin": np.sin, "cos": np.cos, "tan": np.tan, "sqrt": np.sqrt,
-    "log": np.log, "exp": np.exp, "abs": np.abs, "pi": np.pi, "e": np.e,
+    "log": np.log, "exp": np.exp, "abs": np.abs, "pi": float(np.pi), "e": float(np.e),
     "asin": np.arcsin, "acos": np.arccos, "atan": np.arctan,
     "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
 }
 
+# Only these AST node types may appear in a curve expression. This is an
+# allow-list validator, not a sandbox-by-namespace: attribute access,
+# subscripting, comprehensions, lambdas, calls to anything but the curve
+# functions above, walrus, f-strings, etc. are all rejected before eval.
+_ALLOWED_CURVE_NODES = (
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Load,
+    ast.Call, ast.Tuple, ast.List,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+)
+_ALLOWED_CURVE_NAMES = set(_CURVE_SYMBOLS) | {"x"}
+
 
 def _eval_curve(expr: str, x: np.ndarray) -> np.ndarray:
-    """AST-restricted curve evaluator (asteval) — replaces Flask's raw eval()."""
-    aeval = Interpreter()
-    aeval.symtable.update(_CURVE_SYMBOLS)
-    aeval.symtable["x"] = x
-    aeval.symtable["np"] = np
-    result = aeval(expr)
-    if aeval.error:
-        raise ValueError(aeval.error[0].get_error()[1])
-    return result
+    """Evaluate an AI-generated curve expression (e.g. "sin(x)**2") safely.
+
+    The expression is parsed and every AST node checked against a strict
+    allow-list (arithmetic + the whitelisted math functions over `x` only)
+    before it is compiled and eval'd with an empty builtins namespace. No
+    attribute access, no imports, no calls to anything outside _CURVE_SYMBOLS.
+    """
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"invalid expression: {exc}") from exc
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_CURVE_NODES):
+            raise ValueError(f"expression uses a disallowed construct: {type(node).__name__}")
+        if isinstance(node, ast.Name) and node.id not in _ALLOWED_CURVE_NAMES:
+            raise ValueError(f"unknown name in expression: {node.id!r}")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in _CURVE_SYMBOLS:
+                raise ValueError("expression may only call the built-in math functions")
+            if node.keywords:
+                raise ValueError("keyword arguments are not allowed in curve expressions")
+
+    code = compile(tree, "<curve>", "eval")
+    return eval(code, {"__builtins__": {}}, {**_CURVE_SYMBOLS, "x": x})  # noqa: S307 - AST allow-listed above
 
 
 def _render_graph(spec: Dict[str, Any]) -> bytes:

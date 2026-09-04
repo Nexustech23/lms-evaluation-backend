@@ -32,8 +32,10 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
+from app.utils.uploads import read_upload_capped
 from app.models.question_paper import build_create_document, build_update_fields, serialize_question_paper
 from app.schemas.question_paper import (
     QuestionPaperSaveRequest,
@@ -436,7 +438,7 @@ async def generate_question_paper_ai(
             if not _is_accepted(fname):
                 ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else "unknown"
                 return JSONResponse(status_code=400, content={"error": f"Unsupported question bank file type '.{ext}'."})
-            qb_bytes = await questionBank.read()
+            qb_bytes = await read_upload_capped(questionBank)
             qb_filename = fname
 
         if not prompt and not qb_bytes:
@@ -455,7 +457,7 @@ async def generate_question_paper_ai(
         if coursePlanner:
             fname = coursePlanner.filename or "upload"
             if _is_accepted(fname):
-                cp_bytes = await coursePlanner.read()
+                cp_bytes = await read_upload_capped(coursePlanner)
                 cp_filename = fname
             else:
                 logging.warning("Unsupported course planner file type for '%s' — dropped.", fname)
@@ -489,7 +491,8 @@ async def generate_question_paper_ai(
             "coursePlanner": cp_bytes, "coursePlannerFilename": cp_filename,
         }
 
-        background_tasks.add_task(_run_generation_job, job_id, params, job_file_bytes)
+        await enqueue("run_question_paper_generation", job_id, params, job_file_bytes,
+                      background_tasks=background_tasks)
 
         return JSONResponse(status_code=202, content={
             "success": True,
@@ -796,7 +799,7 @@ async def upload_question_paper_docx(
     if not filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Only .docx files are accepted")
 
-    file_bytes = await docx.read()
+    file_bytes = await read_upload_capped(docx)
 
     import mammoth
     result = await asyncio.to_thread(mammoth.convert_to_html, BytesIO(file_bytes))
