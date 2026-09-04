@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_API_KEY: str = ""
 
+    # Roadmap "Learning Resources" feature (app/services/rag/search_clients.py).
+    # Optional — search_youtube() degrades to [] when unset.
+    YOUTUBE_API_KEY: str = ""
+
     # Rate limiting (see app/core/rate_limit.py). All windows are 60s.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_GLOBAL_PER_MINUTE: int = 200          # per IP, applied to every request

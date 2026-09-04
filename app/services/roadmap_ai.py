@@ -479,7 +479,13 @@ async def validate_and_repair_diagram(
         logger.warning("mermaid diagram repair call failed (dropping diagram): %s", e)
         return ""
 
-    return repaired if _is_valid_mermaid_diagram(repaired) else ""
+    if _is_valid_mermaid_diagram(repaired):
+        return repaired
+    logger.warning(
+        "mermaid diagram repair produced still-invalid syntax (dropping diagram): original=%r repaired=%r",
+        diagram, repaired,
+    )
+    return ""
 
 
 def log_style_requirement_gaps(notes: Dict[str, Any], dominant_style: str, week: int, subtopic_idx: int) -> None:
