@@ -76,7 +76,11 @@ def _parse_quiz_attempt_id(attempt_id: str) -> Optional[Tuple[str, int, datetime
 
 
 def _date_filter(time_range: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
+    # Naive UTC, not tz-aware: Motor returns naive datetimes for BSON fields
+    # here (mongodb.py doesn't set tz_aware=True), and this same cutoff is
+    # reused below (line ~121) to filter quizHistory entries in plain Python
+    # comparisons — mixing naive and aware datetimes there raises TypeError.
+    now = datetime.utcnow()
     if time_range == "week":
         return {"submitted_at": {"$gte": now - timedelta(days=7)}}
     if time_range == "month":
