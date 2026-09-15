@@ -17,16 +17,20 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import (
     FACULTY,
     INSTITUTE,
+    INSTITUTE_STUDENT,
+    SELF_LEARNER,
     SUPERADMIN,
     TUTOR,
     get_current_identity,
     get_current_user_and_institute,
     require_role,
+    resolve_current_institute_id,
 )
 from app.core.config import settings
 from app.core.redis_client import bust_account_state, revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
+from app.models.ai_usage_event import feature_label
 from app.models.user import serialize_doc
 from app.schemas.profile import (
     ChangePasswordRequest,
@@ -742,6 +746,64 @@ async def delete_institute_student(student_id: str, db: AsyncIOMotorDatabase = D
     return {"success": True, "message": f"Institute student deleted (student_id: {student_id}, user_id: {uid})"}
 
 
+@router.get(
+    "/institute-students/activity-logs",
+    dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE, FACULTY))],
+)
+async def get_institute_student_activity_logs(
+    page: int = Query(1),
+    limit: int = Query(20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """MyCareerGuru/self-learning activity for this institute's own students
+    only — action + timestamp, no AI token/cost data (that's superadmin-only,
+    see /self-learners/activity-logs). Sourced from aiUsageEvents, which
+    already only ever contains self-learning-surface AI calls (see the
+    collection docstring in app.models.ai_usage_event).
+
+    Uses resolve_current_institute_id (institute-then-faculty fallback)
+    rather than get_current_user_and_institute, since this endpoint's role
+    gate above also allows FACULTY callers, who have no instituteDetails
+    doc of their own."""
+    institute_id = await resolve_current_institute_id(identity, db)
+
+    student_ids = [
+        doc["user_id"]
+        async for doc in db["studentDetails"].find(
+            {"institute_id": ObjectId(institute_id), "role": INSTITUTE_STUDENT}, {"user_id": 1}
+        )
+    ]
+    if not student_ids:
+        return {"success": True, "page": page, "limit": limit, "total": 0, "logs": []}
+
+    skip = (page - 1) * limit
+    query = {"user_id": {"$in": student_ids}}
+
+    event_rows = [
+        doc async for doc in
+        db["aiUsageEvents"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    ]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in event_rows), {"fullName": 1, "email": 1},
+    )
+
+    logs = []
+    for doc in event_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
+        logs.append({
+            "student_name": u.get("fullName"),
+            "student_email": u.get("email"),
+            "feature": doc.get("feature"),
+            "action": feature_label(doc.get("feature")),
+            "created_at": doc.get("created_at"),
+        })
+
+    total = await db["aiUsageEvents"].count_documents(query)
+
+    return {"success": True, "page": page, "limit": limit, "total": total, "logs": logs}
+
+
 # ============================================================
 # TUTORS (role 5) — managed by superadmin
 # ============================================================
@@ -1088,6 +1150,97 @@ async def get_ai_usage_summary(
         "byProvider": by_provider,
         "totals": totals,
     }
+
+
+@router.get("/self-learners/activity-logs", dependencies=[Depends(require_role(SUPERADMIN))])
+async def get_self_learner_activity_logs(
+    page: int = Query(1),
+    limit: int = Query(20),
+    email: str | None = Query(None),
+    institute_id: str | None = Query(
+        None,
+        description=(
+            "An institute admin's user_id (same id /institutes and "
+            "PUT /institute/{user_id} use) to narrow to that institute's "
+            "students; 'independent' for self-learners only"
+        ),
+    ),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Per-student MyCareerGuru/self-learning activity across everyone who
+    can use it — independent self-learners (role 7) and institute-provisioned
+    students (role 4) alike — with AI provider/token/cost included. Superadmin
+    only; institutes get the action+timestamp-only variant at
+    /institute-students/activity-logs. Optional `email` narrows to one
+    student; optional `institute_id` narrows to one institute's students (or,
+    as 'independent', to self-learners with no institute at all)."""
+    if institute_id == "independent":
+        role_filter: Dict[str, Any] = {"role": SELF_LEARNER}
+    elif institute_id:
+        if not ObjectId.is_valid(institute_id):
+            raise HTTPException(status_code=400, detail="Invalid institute_id")
+        # `institute_id` here is the institute admin's own user_id (as used
+        # by /institutes and PUT /institute/{user_id}), but studentDetails
+        # rows are stamped with instituteDetails' own _id (see
+        # app.api.deps.get_current_user_and_institute) — a different
+        # ObjectId — so resolve admin user_id -> instituteDetails._id first.
+        institute_doc = await db["instituteDetails"].find_one(
+            {"user_id": ObjectId(institute_id)}, {"_id": 1},
+        )
+        if not institute_doc:
+            raise HTTPException(status_code=404, detail="Institute not found")
+        student_docs = [
+            d async for d in db["studentDetails"].find(
+                {"institute_id": institute_doc["_id"], "role": INSTITUTE_STUDENT}, {"user_id": 1},
+            )
+        ]
+        role_filter = {"_id": {"$in": [d["user_id"] for d in student_docs]}}
+    else:
+        role_filter = {"role": {"$in": [INSTITUTE_STUDENT, SELF_LEARNER]}}
+
+    user_query: Dict[str, Any] = dict(role_filter)
+    if email:
+        user_query["email"] = {"$regex": re.escape(email), "$options": "i"}
+
+    matching_users = [
+        u async for u in db["users"].find(user_query, {"_id": 1})
+    ]
+    student_ids = [u["_id"] for u in matching_users]
+    if not student_ids:
+        return {"success": True, "page": page, "limit": limit, "total": 0, "logs": []}
+
+    skip = (page - 1) * limit
+    query = {"user_id": {"$in": student_ids}}
+
+    event_rows = [
+        doc async for doc in
+        db["aiUsageEvents"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    ]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in event_rows), {"fullName": 1, "email": 1, "role": 1},
+    )
+
+    logs = []
+    for doc in event_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
+        logs.append({
+            "student_name": u.get("fullName"),
+            "student_email": u.get("email"),
+            "student_role": "institute_student" if u.get("role") == INSTITUTE_STUDENT else "self_learner",
+            "feature": doc.get("feature"),
+            "action": feature_label(doc.get("feature")),
+            "provider": doc.get("provider"),
+            "model": doc.get("model"),
+            "input_tokens": doc.get("input_tokens"),
+            "output_tokens": doc.get("output_tokens"),
+            "total_tokens": doc.get("total_tokens"),
+            "cost_usd": round(doc.get("cost_usd") or 0, 4),
+            "created_at": doc.get("created_at"),
+        })
+
+    total = await db["aiUsageEvents"].count_documents(query)
+
+    return {"success": True, "page": page, "limit": limit, "total": total, "logs": logs}
 
 
 @router.put("/self-learner/{learner_user_id}", dependencies=[Depends(require_role(SUPERADMIN))])

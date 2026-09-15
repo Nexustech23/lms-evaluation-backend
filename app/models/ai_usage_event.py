@@ -56,6 +56,38 @@ class Feature:
     RAG_RETRIEVE = "rag_retrieve"
 
 
+# Human-readable label per Feature code, for activity-log dashboards
+# (app/api/routers/profile.py's /institute-students/activity-logs and
+# /self-learners/activity-logs). Kept next to Feature so the two stay in
+# sync — every Feature constant should have an entry here.
+FEATURE_LABELS: Dict[str, str] = {
+    Feature.ROADMAP_CURRICULUM: "Generated roadmap",
+    Feature.ROADMAP_PRE_ASSESSMENT: "Took pre-assessment quiz",
+    Feature.ROADMAP_NOTES: "Generated topic notes",
+    Feature.ROADMAP_RESOURCES: "Fetched learning resources",
+    Feature.ROADMAP_QUIZ_GENERATE: "Generated week quiz",
+    Feature.ROADMAP_QUIZ_GRADING: "Quiz auto-graded",
+    Feature.ROADMAP_PRACTICE_QUESTIONS: "Generated practice questions",
+    Feature.ROADMAP_PRACTICE_EVALUATE: "Practice answer evaluated",
+    Feature.ROADMAP_DIAGRAM_REPAIR: "Regenerated roadmap diagram",
+    Feature.SELF_REVIEW_HOMEWORK_HELP: "Asked AI Tutor for homework help",
+    Feature.SELF_REVIEW_HOMEWORK_EXTRACTION: "Uploaded homework for AI Tutor",
+    Feature.SELF_REVIEW_NOTES: "Generated AI Tutor notes",
+    Feature.SELF_REVIEW_NOTES_EXTRACTION: "Uploaded material for AI Tutor notes",
+    Feature.TEST_ENGINE_GENERATE: "Generated practice test",
+    Feature.TEST_ENGINE_GRADING: "Practice test graded",
+    Feature.DETAILED_FEEDBACK: "Viewed detailed feedback",
+    Feature.RAG_INGEST_EXTRACTION: "Uploaded course material",
+    Feature.RAG_EMBEDDING: "Course material indexed",
+    Feature.RAG_SUMMARIZE: "Course material summarized",
+    Feature.RAG_RETRIEVE: "Course material referenced",
+}
+
+
+def feature_label(feature: str) -> str:
+    return FEATURE_LABELS.get(feature, feature)
+
+
 def create_ai_usage_event_document(
     *,
     user_id: str,
