@@ -184,10 +184,59 @@ immediately AFTER the question text:
 
 One block per visual element. NEVER use ASCII art, plain-text tables, or raw
 LaTeX strings outside these blocks.
-IMPORTANT: The JSON inside <<<DIAGRAM>>> blocks must be valid JSON. Include a
-"type" field (one of: data_table, math_expression, chemical_equation,
-electrical_circuit, graph, plant_cell, binary_tree, network_graph) and a
-"title" field describing the visual.
+IMPORTANT: The JSON inside <<<DIAGRAM>>> blocks must be valid JSON. Every
+block needs a "type" field and a "title" field describing the visual — AND
+the type-specific fields below. A spec missing its required fields renders
+as a blank placeholder in the final document, so always include the full
+payload, not just type/title.
+
+  "type": "data_table"          ALSO requires:
+      "headers": [...], "rows": [[...], [...], ...]
+
+  "type": "math_expression"     ALSO requires:
+      "expressions": ["x^2 + 2x + 1", "\\\\frac{a}{b}", ...]   (LaTeX, one per line)
+
+  "type": "chemical_equation"   ALSO requires:
+      "equations": ["2H2 + O2 -> 2H2O"], "notes": ["optional annotation", ...]
+
+  "type": "electrical_circuit"  ALSO requires:
+      "elements": [ {"type": "battery|resistor|capacitor|inductor|source|ground|
+                      switch|diode|led|bulb|line",
+                      "direction": "right|left|up|down",
+                      "label": "e.g. R1 = 10kΩ"}, ... ]
+      Example: {"type":"electrical_circuit","title":"RC Circuit","elements":[
+        {"type":"battery","direction":"up","label":"V=5V"},
+        {"type":"resistor","direction":"right","label":"R=10kΩ"},
+        {"type":"capacitor","direction":"down","label":"C=100µF"},
+        {"type":"line","direction":"left"}]}
+
+  "type": "graph"               ALSO requires:
+      "xlabel", "ylabel", "xrange": [min, max],
+      "curves": [ {"expression": "sin(x)**2", "label": "f(x)"}, ... ]
+      (expression may only use x and: sin cos tan sqrt log exp abs pi e asin
+      acos atan sinh cosh tanh, plus + - * / ** — nothing else is evaluated)
+
+  "type": "binary_tree"         ALSO requires:
+      "nodes": [ {"id": "8", "left": "3", "right": "10"}, {"id": "3", "left": "1", "right": "6"},
+                 {"id": "1"}, {"id": "6"}, {"id": "10"} ]
+
+  "type": "network_graph"       ALSO requires:
+      "nodes": [...], "edges": [ {"from": "A", "to": "B", "weight": 5}, ... ], "directed": true|false
+
+  "type": "mermaid_diagram"     ALSO requires:
+      "mermaid": "<valid Mermaid syntax>"
+      Use this for anything the other types don't cover — flowcharts, block/
+      system diagrams, ER diagrams, state diagrams, sequence diagrams, class
+      diagrams.
+      Example: {"type":"mermaid_diagram","title":"Process Scheduling Flow",
+        "mermaid":"flowchart TD\\n  A[Process Arrives] --> B{CPU Free?}\\n  B -- Yes --> C[Dispatch]\\n  B -- No --> D[Ready Queue]"}
+
+  "type": "plant_cell" (or any other illustrative/anatomical diagram — a
+                         labeled cross-section, an organ, a physical
+                         apparatus) — these CANNOT be auto-drawn accurately,
+                         so instead of a picture you get a labeled checklist
+                         for whoever edits the exported document. ALSO requires:
+      "labels": {"A": "Cell wall", "B": "Chloroplast", ...}, "notes": ["optional", ...]
 
 ═══════════════════════════════════════════════════════
 END OF DIAGRAM RULES
