@@ -164,6 +164,31 @@ def _embed_docx_table(doc: Document, spec: Dict[str, Any]) -> None:
     doc.add_paragraph()
 
 
+_mathtext_parser = None
+
+
+def _mathtext_renders(latex: str) -> bool:
+    """True if matplotlib's mathtext engine can render `latex` without
+    raising. mathtext is only a LIMITED LaTeX subset (no \\boxed, \\text,
+    \\begin{...}, \\overline, etc.) and — critically — doesn't raise at
+    ax.text() time; the parse is deferred until the figure is actually
+    drawn/saved, by which point a bad expression has already crashed the
+    whole image (draw_diagram's generic except then shows a raw
+    ParseFatalException dump instead of a clean per-expression fallback).
+    Parsing eagerly here, before anything is added to the real figure,
+    catches it early enough to fall back gracefully instead.
+    """
+    global _mathtext_parser
+    if _mathtext_parser is None:
+        from matplotlib.mathtext import MathTextParser
+        _mathtext_parser = MathTextParser("agg")
+    try:
+        _mathtext_parser.parse(latex)
+        return True
+    except Exception:
+        return False
+
+
 def _render_math_expression(spec: Dict[str, Any]) -> bytes:
     title = spec.get("title", "")
     expressions = spec.get("expressions", [])
@@ -179,14 +204,17 @@ def _render_math_expression(spec: Dict[str, Any]) -> bytes:
         ax.set_title(title, fontsize=12, weight="bold", pad=8)
     step = 1.0 / (n + 1)
     for i, expr in enumerate(expressions):
-        latex = expr.strip()
-        if not (latex.startswith("$") and latex.endswith("$")):
-            latex = f"${latex}$"
+        raw = expr.strip()
+        latex = raw if (raw.startswith("$") and raw.endswith("$")) else f"${raw}$"
         y = 1.0 - (i + 1) * step
-        try:
+        if _mathtext_renders(latex):
             ax.text(0.5, y, latex, ha="center", va="center", fontsize=15, transform=ax.transAxes)
-        except Exception:
-            ax.text(0.5, y, expr, ha="center", va="center", fontsize=13, transform=ax.transAxes)
+        else:
+            # Not renderable as mathtext (e.g. used \boxed, \text, \begin{...})
+            # — fall back to plain text instead of crashing the whole image.
+            plain = raw.strip("$")
+            ax.text(0.5, y, plain, ha="center", va="center", fontsize=13,
+                     style="italic", color="#555555", transform=ax.transAxes)
     return _fig_to_png(fig)
 
 

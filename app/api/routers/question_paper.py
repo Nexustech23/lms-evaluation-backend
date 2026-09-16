@@ -195,6 +195,11 @@ payload, not just type/title.
 
   "type": "math_expression"     ALSO requires:
       "expressions": ["x^2 + 2x + 1", "\\\\frac{a}{b}", ...]   (LaTeX, one per line)
+      Rendered by matplotlib, which only supports a LIMITED LaTeX subset —
+      \\frac, \\sqrt, subscripts/superscripts, Greek letters (\\eta, \\gamma,
+      \\Delta), \\sum, \\int, \\left(\\right) are fine. Do NOT use \\boxed,
+      \\text, \\begin{...}\\end{...}, \\overline, or \\substack — matplotlib
+      cannot parse those and the expression will render as plain text instead.
 
   "type": "chemical_equation"   ALSO requires:
       "equations": ["2H2 + O2 -> 2H2O"], "notes": ["optional annotation", ...]
