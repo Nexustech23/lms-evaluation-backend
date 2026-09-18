@@ -288,6 +288,29 @@ def _grade_letter(percentage: float) -> str:
     return "F"
 
 
+def _status_label(flags: Dict[str, Any]) -> tuple:
+    """Single priority-ordered status for the summary table + its pill color
+    (matching the original Flask-era report: unanswered beats incomplete
+    beats irrelevant beats a clean "Evaluated")."""
+    if flags.get("unanswered"):
+        return "Not Attempted", "#dc2626", "#fee2e2"
+    if flags.get("incomplete"):
+        return "Incomplete", "#b45309", "#fef3c7"
+    if flags.get("irrelevant"):
+        return "Irrelevant", "#6b7280", "#f3f4f6"
+    return "Evaluated", "#15803d", "#dcfce7"
+
+
+def _score_bar_color(percentage: float) -> str:
+    if percentage < 25:
+        return "#ef4444"
+    if percentage < 50:
+        return "#f97316"
+    if percentage < 75:
+        return "#3b82f6"
+    return "#22c55e"
+
+
 def generate_evaluation_report_html(
     grading_json: Dict[str, Any], student_name: str = "Student", total_max_marks: Optional[float] = None
 ) -> str:
@@ -298,40 +321,63 @@ def generate_evaluation_report_html(
     max_marks = total_max_marks if total_max_marks is not None else summary.get("total_max_marks", 0)
     percentage = round((total_ai_marks / max_marks) * 100, 2) if max_marks else 0
     grade = _grade_letter(percentage)
+    attempted = summary.get("questions_attempted", "-")
+    total_q = summary.get("questions_total", len(questions))
 
+    # ── Question-wise Summary table ──────────────────────────────────────
+    summary_rows = []
+    for q in questions:
+        flags = q.get("flags", {}) or {}
+        status_text, status_fg, status_bg = _status_label(flags)
+        summary_rows.append(f"""
+<tr>
+  <td>{q.get('question_no', '')}</td>
+  <td>{q.get('max_marks', 0)}</td>
+  <td><strong>{q.get('ai_awarded_marks', 0)}</strong></td>
+  <td><span class="status-pill" style="color:{status_fg};background:{status_bg};">{status_text}</span></td>
+</tr>""")
+
+    # ── Detailed per-question analysis ───────────────────────────────────
     question_blocks = []
     for q in questions:
         flags = q.get("flags", {}) or {}
         flag_badges = "".join(
-            f'<span class="badge">{name}</span>'
-            for name, on in [("Incomplete", flags.get("incomplete")), ("Irrelevant", flags.get("irrelevant")),
-                              ("Unanswered", flags.get("unanswered")), ("Repetitive", flags.get("repetitive"))]
+            f'<span class="badge">{icon} {name}</span>'
+            for name, icon, on in [
+                ("Not Attempted", "&#10060;", flags.get("unanswered")),
+                ("Incomplete", "&#9888;", flags.get("incomplete")),
+                ("Irrelevant", "&#8960;", flags.get("irrelevant")),
+                ("Repetitive", "&#8635;", flags.get("repetitive")),
+            ]
             if on
         )
 
+        q_marks = q.get("ai_awarded_marks", 0)
+        q_max = q.get("max_marks", 0) or 1
+        q_pct = round((q_marks / q_max) * 100, 1) if q_max else 0
+        bar_color = _score_bar_color(q_pct)
+
+        co_rows = "".join(
+            f"<tr><td><span class=\"co-chip\">{_escape_html(c.get('co_code'))}</span></td>"
+            f"<td>{c.get('ai_marks', 0)}</td><td>{_escape_html(c.get('remarks'))}</td></tr>"
+            for c in (q.get("cos") or [])
+        )
         param_rows = "".join(
             f"<tr><td>{_escape_html(p.get('name'))}</td><td>{p.get('weight_percentage', 0)}%</td>"
             f"<td>{p.get('ai_score', 0)}</td><td>{_escape_html(p.get('remarks'))}</td></tr>"
             for p in (q.get("parameters") or [])
         )
-        co_rows = "".join(
-            f"<tr><td>{_escape_html(c.get('co_code'))}</td><td>{c.get('ai_marks', 0)} / {c.get('max_marks', 0)}</td>"
-            f"<td>{_escape_html(c.get('remarks'))}</td></tr>"
-            for c in (q.get("cos") or [])
-        )
 
         question_blocks.append(f"""
 <div class="question">
-  <div class="q-header">
-    <span class="q-no">Q{q.get('question_no', '')}</span>
-    <span class="q-marks">{q.get('ai_awarded_marks', 0)} / {q.get('max_marks', 0)}</span>
-    {flag_badges}
-  </div>
-  {f'<table class="param-table"><tr><th>Parameter</th><th>Weight</th><th>Score</th><th>Remarks</th></tr>{param_rows}</table>' if param_rows else ''}
-  {f'<table class="co-table"><tr><th>CO</th><th>Marks</th><th>Remarks</th></tr>{co_rows}</table>' if co_rows else ''}
-  <div class="block"><strong>Reasoning:</strong> {_escape_html(q.get('reasoning'))}</div>
-  <div class="block"><strong>Feedback:</strong> {_escape_html(q.get('feedback'))}</div>
-  <div class="block"><strong>Improvement:</strong> {_escape_html(q.get('improvement'))}</div>
+  <div class="q-title">Question {q.get('question_no', '')}</div>
+  <div class="q-badges">{flag_badges}</div>
+  <div class="score-bar" style="background:{bar_color};">{q_marks} / {q_max} <span class="pct">({q_pct}%)</span></div>
+  {f'<div class="section-label">&#128218; CO-wise Marks</div><table class="co-table"><tr><th>CO Code</th><th>Marks Awarded</th><th>Remarks</th></tr>{co_rows}</table>' if co_rows else ''}
+  {f'<div class="section-label">&#128202; Parameter-wise Breakdown</div><table class="param-table"><tr><th>Parameter</th><th>Weight</th><th>Score</th><th>Remarks</th></tr>{param_rows}</table>' if param_rows else ''}
+  <div class="callout callout-green"><div class="callout-label">&#128269; Reasoning</div>{_escape_html(q.get('reasoning'))}</div>
+  <div class="callout callout-blue"><div class="callout-label">&#128172; Feedback</div>{_escape_html(q.get('feedback'))}</div>
+  <div class="callout callout-orange"><div class="callout-label">&#127919; How to Improve</div>{_escape_html(q.get('improvement'))}</div>
 </div>""")
 
     return f"""<!DOCTYPE html>
@@ -340,33 +386,66 @@ def generate_evaluation_report_html(
 <meta charset="utf-8">
 <style>
   body {{ font-family: Arial, sans-serif; color: #111827; margin: 24px; }}
-  h1 {{ color: #1d4ed8; font-size: 20px; margin-bottom: 4px; }}
-  .meta {{ color: #6b7280; font-size: 12px; margin-bottom: 16px; }}
-  .summary {{ display: flex; gap: 24px; background: #eff6ff; border-radius: 6px; padding: 12px 16px; margin-bottom: 20px; }}
-  .summary .stat {{ text-align: center; }}
-  .summary .stat .label {{ font-size: 10px; color: #64748b; text-transform: uppercase; }}
-  .summary .stat .value {{ font-size: 18px; font-weight: bold; color: #1e3a8a; }}
-  .question {{ border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px 16px; margin-bottom: 14px; }}
-  .q-header {{ display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }}
-  .q-no {{ font-weight: bold; color: #1d4ed8; }}
-  .q-marks {{ font-weight: bold; }}
-  .badge {{ background: #fef3c7; color: #92400e; font-size: 10px; padding: 2px 6px; border-radius: 4px; }}
+  .banner {{ background: #22c55e; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px; }}
+  .banner h1 {{ color: #ffffff; font-size: 24px; margin: 0 0 6px 0; }}
+  .banner .meta {{ color: #ecfdf5; font-size: 12px; }}
+  .top-stats {{ display: flex; align-items: center; gap: 24px; margin-bottom: 24px; }}
+  .grade-circle {{ width: 64px; height: 64px; border-radius: 50%; background: #3b82f6; color: #fff;
+                    display: flex; align-items: center; justify-content: center; font-size: 26px; font-weight: bold; flex-shrink: 0; }}
+  .stat {{ }}
+  .stat .label {{ font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: bold; }}
+  .stat .value {{ font-size: 16px; font-weight: bold; color: #111827; }}
+  .summary-title {{ font-size: 14px; font-weight: bold; margin: 20px 0 8px; text-align: center; }}
   table {{ width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 11px; }}
-  table th, table td {{ border: 1px solid #e2e8f0; padding: 4px 6px; text-align: left; }}
-  table th {{ background: #f8fafc; }}
-  .block {{ font-size: 11px; margin-top: 6px; }}
+  table th, table td {{ border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }}
+  .summary-table th {{ background: #1f2937; color: #fff; text-align: center; }}
+  .summary-table td {{ text-align: center; }}
+  .status-pill {{ font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: bold; }}
+  .section-heading {{ font-size: 15px; font-weight: bold; margin: 24px 0 4px; padding-bottom: 6px; border-bottom: 2px solid #22c55e; }}
+  .question {{ border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }}
+  .q-title {{ font-weight: bold; font-size: 14px; margin-bottom: 4px; }}
+  .q-badges {{ margin-bottom: 8px; }}
+  .badge {{ display: inline-block; background: #f3f4f6; color: #4b5563; font-size: 10px; padding: 2px 8px; border-radius: 10px; margin-right: 4px; }}
+  .score-bar {{ color: #fff; font-weight: bold; text-align: center; border-radius: 6px; padding: 10px; margin: 8px 0; font-size: 14px; }}
+  .score-bar .pct {{ font-weight: normal; font-size: 11px; }}
+  .section-label {{ font-size: 11px; font-weight: bold; color: #374151; margin: 10px 0 4px; }}
+  .co-table th {{ background: #ea580c; color: #fff; }}
+  .param-table th {{ background: #1f2937; color: #fff; }}
+  .co-chip {{ background: #ffedd5; color: #c2410c; font-weight: bold; font-size: 10px; padding: 2px 6px; border-radius: 4px; }}
+  .callout {{ border-radius: 6px; padding: 8px 12px; margin-top: 8px; font-size: 11px; border-left: 4px solid; }}
+  .callout-label {{ font-weight: bold; margin-bottom: 4px; }}
+  .callout-green {{ background: #f0fdf4; border-color: #22c55e; }}
+  .callout-blue {{ background: #eff6ff; border-color: #3b82f6; }}
+  .callout-orange {{ background: #fff7ed; border-color: #f97316; }}
+  .footer {{ text-align: center; color: #9ca3af; font-size: 10px; margin-top: 28px; }}
 </style>
 </head>
 <body>
-  <h1>Evaluation Report</h1>
-  <div class="meta">Student: {_escape_html(student_name)}</div>
-  <div class="summary">
-    <div class="stat"><div class="label">Total Marks</div><div class="value">{total_ai_marks} / {max_marks}</div></div>
-    <div class="stat"><div class="label">Percentage</div><div class="value">{percentage}%</div></div>
-    <div class="stat"><div class="label">Grade</div><div class="value">{grade}</div></div>
-    <div class="stat"><div class="label">Attempted</div><div class="value">{summary.get('questions_attempted', '-')} / {summary.get('questions_total', len(questions))}</div></div>
+  <div class="banner">
+    <h1>EVALUATION REPORT</h1>
+    <div class="meta"><strong>Student:</strong> {_escape_html(student_name)}</div>
   </div>
+
+  <div class="top-stats">
+    <div class="grade-circle">{grade}</div>
+    <div class="stat"><div class="label">Score</div><div class="value">{total_ai_marks} / {max_marks}</div></div>
+    <div class="stat"><div class="label">Percentage</div><div class="value">{percentage}%</div></div>
+    <div class="stat"><div class="label">Attempted</div><div class="value">{attempted} / {total_q}</div></div>
+  </div>
+
+  <div class="summary-title">Question-wise Summary</div>
+  <table class="summary-table">
+    <tr><th>Q. No.</th><th>Max Marks</th><th>Marks Obtained</th><th>Status</th></tr>
+    {"".join(summary_rows)}
+  </table>
+
+  <div class="section-heading">Detailed Question-wise Analysis</div>
   {"".join(question_blocks)}
+
+  <div class="footer">
+    <div>Note: This is an AI-generated evaluation.</div>
+    <div>Generated by Gradelytics | &copy; 2025</div>
+  </div>
 </body>
 </html>"""
 

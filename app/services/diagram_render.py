@@ -19,6 +19,7 @@ import math
 import os
 import tempfile
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict
 
 # matplotlib MUST be set to Agg before any other matplotlib/schemdraw import.
@@ -596,6 +597,107 @@ def _render_network_graph(spec: Dict[str, Any]) -> bytes:
     return _fig_to_png(fig)
 
 
+_MERMAID_JS_PATH = Path(__file__).resolve().parent.parent / "assets" / "mermaid.min.js"
+_mermaid_js_cache: str | None = None
+
+
+def _load_mermaid_js() -> str:
+    global _mermaid_js_cache
+    if _mermaid_js_cache is None:
+        _mermaid_js_cache = _MERMAID_JS_PATH.read_text(encoding="utf-8")
+    return _mermaid_js_cache
+
+
+_MERMAID_HTML_SHELL = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  #wrap { display: inline-block; padding: 20px 28px; font-family: -apple-system, "Segoe UI", Arial, sans-serif; }
+  #title { font-size: 15px; font-weight: 700; text-align: center; margin-bottom: 10px; color: #1a1a1a; }
+</style></head>
+<body><div id="wrap"><div id="title"></div><div id="container"></div></div></body></html>"""
+
+
+def _render_mermaid(spec: Dict[str, Any]) -> bytes:
+    """Renders spec["mermaid"] (Mermaid diagram syntax — flowcharts, block/
+    system diagrams, ER diagrams, state diagrams, sequence diagrams, class
+    diagrams: anything the typed renderers above don't cover) to a PNG via
+    headless Chromium.
+
+    Sync Playwright, not async — same reason as app/services/pdf_render.py:
+    the async API launches Chromium via asyncio.create_subprocess_exec on
+    whatever event loop is running, which fails under uvicorn's Windows
+    event loop policy. This function is only ever reached through
+    draw_diagram()/embed_diagram(), both already documented "run via
+    asyncio.to_thread()" — same convention as pdf_render.render_html_to_pdf.
+
+    mermaid.js is vendored locally (app/assets/mermaid.min.js, copied from
+    the frontend's own node_modules/mermaid build) so this never depends on
+    network access or an external CDN — no new SSRF surface, no version
+    drift from whatever a CDN happens to serve that day. securityLevel:
+    "strict" is Mermaid's own XSS sanitiser, same choice the frontend's
+    MermaidDiagram.js component makes for the identical reason (rendered
+    SVG here isn't attacker-controlled — it comes from Claude's structured
+    output — but strict mode costs nothing and matches the frontend).
+    """
+    title = spec.get("title", "")
+    code = spec.get("mermaid", "")
+    if not str(code).strip():
+        return _render_biology_placeholder({
+            "title": title or "Diagram",
+            "labels": {},
+            "notes": ["No Mermaid syntax was provided for this diagram."],
+        })
+
+    from playwright.sync_api import sync_playwright
+
+    from app.services.pdf_render import _guard_request
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 1400, "height": 1000}, device_scale_factor=2)
+                page.route("**/*", _guard_request)
+                page.set_content(_MERMAID_HTML_SHELL, wait_until="load")
+                page.add_script_tag(content=_load_mermaid_js())
+                result = page.evaluate(
+                    """async ({ code, title }) => {
+                        try {
+                            mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "strict" });
+                            const { svg } = await mermaid.render("diagram", code);
+                            document.getElementById("container").innerHTML = svg;
+                            if (title) document.getElementById("title").textContent = title;
+                            return { ok: true };
+                        } catch (e) {
+                            return { ok: false, error: String((e && e.message) || e) };
+                        }
+                    }""",
+                    {"code": str(code), "title": title},
+                )
+                if not result.get("ok"):
+                    logging.warning("mermaid render failed: %s", result.get("error"))
+                    return _render_biology_placeholder({
+                        "title": title or "Diagram",
+                        "labels": {},
+                        "notes": [
+                            f"Mermaid syntax error: {result.get('error')}",
+                            "Please insert this diagram manually during document editing.",
+                        ],
+                    })
+                page.wait_for_timeout(150)  # let the SVG finish painting before capture
+                return page.locator("#wrap").screenshot()
+            finally:
+                browser.close()
+    except Exception as e:
+        logging.error("mermaid render failed to launch: %s", e)
+        return _render_biology_placeholder({
+            "title": title or "Diagram",
+            "labels": {},
+            "notes": [f"Diagram rendering failed: {e}", "Please insert this diagram manually during document editing."],
+        })
+
+
 def draw_diagram(spec: Dict[str, Any]) -> bytes:
     """Dispatch on spec['type'] -> PNG bytes. Never raises — falls back to an error image."""
     dtype = str(spec.get("type", "generic")).lower()
@@ -608,6 +710,8 @@ def draw_diagram(spec: Dict[str, Any]) -> bytes:
             return _render_chemical_equation(spec)
         elif dtype in ("electrical_circuit", "circuit"):
             return _render_electrical_circuit(spec)
+        elif dtype in ("mermaid_diagram", "mermaid", "flowchart", "block_diagram"):
+            return _render_mermaid(spec)
         elif dtype == "graph":
             return _render_graph(spec)
         elif dtype in ("binary_tree", "tree", "binary_search_tree"):
@@ -631,6 +735,10 @@ _WIDTH_MAP = {
     "chemical_equation": Inches(6.0),
     "electrical_circuit": Inches(5.5),
     "graph": Inches(6.0),
+    "mermaid_diagram": Inches(6.0),
+    "mermaid": Inches(6.0),
+    "flowchart": Inches(6.0),
+    "block_diagram": Inches(6.0),
 }
 
 
