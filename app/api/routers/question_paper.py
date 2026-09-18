@@ -49,10 +49,13 @@ from app.services.docx_from_text import build_docx
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.imagekit import delete_imagekit_file, upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.utils.token_usage import (
     check_institute_token_budget,
     increment_institute_claude_tokens,
     increment_institute_gemini_tokens,
+    resolve_institute_id_for_faculty,
 )
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["question-paper"])
@@ -310,6 +313,9 @@ Instructions must be written as plain numbered lines only — no bullet points o
 async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> None:
     db = get_database()
     faculty_id = params["faculty_id"]
+    user_id = params.get("user_id")
+    institute_id = await resolve_institute_id_for_faculty(db, faculty_id)
+    institute_id_str = str(institute_id) if institute_id else None
 
     try:
         extracted_text = ""
@@ -323,6 +329,12 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             await increment_institute_gemini_tokens(
                 db, faculty_id, g_usage["prompt_tokens"], g_usage["candidate_tokens"]
             )
+            if user_id:
+                await record_ai_usage(
+                    db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                    feature=Feature.QP_QUESTION_BANK_EXTRACTION, usage=g_usage,
+                    job_id=job_id, institute_id=institute_id_str,
+                )
 
         if file_bytes.get("coursePlanner"):
             await update_job(QP_JOB_PREFIX, job_id, {"step": "extracting_course_planner"})
@@ -332,6 +344,12 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             await increment_institute_gemini_tokens(
                 db, faculty_id, g_usage2["prompt_tokens"], g_usage2["candidate_tokens"]
             )
+            if user_id:
+                await record_ai_usage(
+                    db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                    feature=Feature.QP_COURSE_PLANNER_EXTRACTION, usage=g_usage2,
+                    job_id=job_id, institute_id=institute_id_str,
+                )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "generating_paper"})
         full_prompt = _build_claude_prompt(
@@ -343,6 +361,12 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
         paper_text = re.sub(r"^-{3}BEGIN PAPER-{3}\s*", "", paper_text_raw)
         paper_text = re.sub(r"\s*-{3}END PAPER-{3}$", "", paper_text).strip()
         await increment_institute_claude_tokens(db, faculty_id, c_usage["input_tokens"], c_usage["output_tokens"])
+        if user_id:
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
+                feature=Feature.QP_GENERATION, usage=c_usage,
+                job_id=job_id, institute_id=institute_id_str,
+            )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "building_docx"})
         docx_bytes = await asyncio.to_thread(
@@ -417,7 +441,7 @@ async def generate_question_paper_ai(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     try:
-        _, faculty_id = await _require_faculty(identity, db)
+        user, faculty_id = await _require_faculty(identity, db)
         prompt = prompt.strip()
 
         co_list: list = []
@@ -484,6 +508,7 @@ async def generate_question_paper_ai(
             "sections": sections_list,
             "prompt": prompt,
             "faculty_id": str(faculty_id),
+            "user_id": str(user["_id"]),
             "co_list": co_list,
         }
         job_file_bytes = {

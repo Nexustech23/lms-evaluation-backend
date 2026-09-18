@@ -164,7 +164,7 @@ async def upload_question_paper(
     if budget["allowed"]:
         await enqueue(
             "run_extract_question_paper_text",
-            str(folder_object_id), questionpaper_url, str(faculty_id), filename,
+            str(folder_object_id), questionpaper_url, str(faculty_id), filename, str(user["_id"]),
             background_tasks=background_tasks,
         )
 

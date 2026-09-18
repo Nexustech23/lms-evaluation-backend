@@ -30,7 +30,7 @@ from app.core.config import settings
 from app.core.redis_client import bust_account_state, revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
-from app.models.ai_usage_event import feature_label
+from app.models.ai_usage_event import FACULTY_FEATURES, STUDENT_FEATURES, feature_label
 from app.models.user import serialize_doc
 from app.schemas.profile import (
     ChangePasswordRequest,
@@ -580,6 +580,139 @@ async def get_all_faculties(
     }
 
 
+@router.get(
+    "/faculty/activity-logs",
+    dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE, FACULTY))],
+)
+async def get_faculty_activity_logs(
+    page: int = Query(1),
+    limit: int = Query(20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Question-paper-generation / grading AI activity for this institute's
+    own faculty only — action + timestamp, no AI token/cost data (that's
+    superadmin-only, see /faculty/activity-logs/all). Mirrors
+    /institute-students/activity-logs exactly, scoped to facultyDetails
+    instead of studentDetails."""
+    institute_id = await resolve_current_institute_id(identity, db)
+
+    faculty_ids = [
+        doc["user_id"]
+        async for doc in db["facultyDetails"].find(
+            {"institute_id": ObjectId(institute_id)}, {"user_id": 1}
+        )
+    ]
+    if not faculty_ids:
+        return {"success": True, "page": page, "limit": limit, "total": 0, "logs": []}
+
+    skip = (page - 1) * limit
+    query = {"user_id": {"$in": faculty_ids}}
+
+    event_rows = [
+        doc async for doc in
+        db["aiUsageEvents"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    ]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in event_rows), {"fullName": 1, "email": 1},
+    )
+
+    logs = []
+    for doc in event_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
+        logs.append({
+            "faculty_name": u.get("fullName"),
+            "faculty_email": u.get("email"),
+            "feature": doc.get("feature"),
+            "action": feature_label(doc.get("feature")),
+            "created_at": doc.get("created_at"),
+        })
+
+    total = await db["aiUsageEvents"].count_documents(query)
+
+    return {"success": True, "page": page, "limit": limit, "total": total, "logs": logs}
+
+
+@router.get("/faculty/activity-logs/all", dependencies=[Depends(require_role(SUPERADMIN))])
+async def get_all_faculty_activity_logs(
+    page: int = Query(1),
+    limit: int = Query(20),
+    email: str | None = Query(None),
+    institute_id: str | None = Query(
+        None,
+        description=(
+            "An institute admin's user_id (same id /institutes and "
+            "PUT /institute/{user_id} use) to narrow to that institute's faculty"
+        ),
+    ),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Per-faculty question-paper-generation / grading AI activity across
+    every institute, with provider/token/cost included. Superadmin only;
+    institutes get the action+timestamp-only variant at
+    /faculty/activity-logs. Mirrors /self-learners/activity-logs exactly,
+    scoped to role=FACULTY instead of role in {institute_student, self_learner}."""
+    if institute_id:
+        if not ObjectId.is_valid(institute_id):
+            raise HTTPException(status_code=400, detail="Invalid institute_id")
+        institute_doc = await db["instituteDetails"].find_one(
+            {"user_id": ObjectId(institute_id)}, {"_id": 1},
+        )
+        if not institute_doc:
+            raise HTTPException(status_code=404, detail="Institute not found")
+        faculty_docs = [
+            d async for d in db["facultyDetails"].find(
+                {"institute_id": institute_doc["_id"]}, {"user_id": 1},
+            )
+        ]
+        role_filter: Dict[str, Any] = {"_id": {"$in": [d["user_id"] for d in faculty_docs]}}
+    else:
+        role_filter = {"role": FACULTY}
+
+    user_query: Dict[str, Any] = dict(role_filter)
+    if email:
+        user_query["email"] = {"$regex": re.escape(email), "$options": "i"}
+
+    matching_users = [
+        u async for u in db["users"].find(user_query, {"_id": 1})
+    ]
+    faculty_ids = [u["_id"] for u in matching_users]
+    if not faculty_ids:
+        return {"success": True, "page": page, "limit": limit, "total": 0, "logs": []}
+
+    skip = (page - 1) * limit
+    query = {"user_id": {"$in": faculty_ids}}
+
+    event_rows = [
+        doc async for doc in
+        db["aiUsageEvents"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    ]
+    users_by_id = await load_by_ids(
+        db, "users", (d["user_id"] for d in event_rows), {"fullName": 1, "email": 1},
+    )
+
+    logs = []
+    for doc in event_rows:
+        u = users_by_id.get(doc["user_id"]) or {}
+        logs.append({
+            "faculty_name": u.get("fullName"),
+            "faculty_email": u.get("email"),
+            "feature": doc.get("feature"),
+            "action": feature_label(doc.get("feature")),
+            "provider": doc.get("provider"),
+            "model": doc.get("model"),
+            "input_tokens": doc.get("input_tokens"),
+            "output_tokens": doc.get("output_tokens"),
+            "total_tokens": doc.get("total_tokens"),
+            "cost_usd": round(doc.get("cost_usd") or 0, 4),
+            "created_at": doc.get("created_at"),
+        })
+
+    total = await db["aiUsageEvents"].count_documents(query)
+
+    return {"success": True, "page": page, "limit": limit, "total": total, "logs": logs}
+
+
 async def _faculty_in_caller_scope(db: AsyncIOMotorDatabase, faculty_id: str, identity: dict) -> Dict[str, Any]:
     """SUPERADMIN may target any faculty; an INSTITUTE admin only faculty of
     their own institute. Raises 400/403/404 as appropriate; returns the doc."""
@@ -1074,15 +1207,22 @@ async def get_all_self_learners(
 # spanning both MyCareerGuru individuals and institute-side AI usage.
 # ============================================================
 
+_SCOPE_FEATURES = {"students": STUDENT_FEATURES, "faculty": FACULTY_FEATURES}
+
+
 @router.get("/ai-usage", dependencies=[Depends(require_role(SUPERADMIN))])
 async def get_ai_usage_summary(
     days: int = Query(30, ge=1, le=365),
+    scope: str = Query("students", description="'students', 'faculty', or 'all'"),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    match_stage: Dict[str, Any] = {"created_at": {"$gte": cutoff}}
+    if scope in _SCOPE_FEATURES:
+        match_stage["feature"] = {"$in": list(_SCOPE_FEATURES[scope])}
 
     pipeline = [
-        {"$match": {"created_at": {"$gte": cutoff}}},
+        {"$match": match_stage},
         {"$group": {
             "_id": "$feature",
             "input_tokens": {"$sum": "$input_tokens"},
@@ -1115,10 +1255,11 @@ async def get_ai_usage_summary(
         "call_count": sum(r["call_count"] for r in by_feature),
     }
 
-    # Same window, grouped by provider instead of feature — lets the
-    # dashboard show Claude vs Gemini input/output/cost side by side.
+    # Same window (and scope filter), grouped by provider instead of
+    # feature — lets the dashboard show Claude vs Gemini input/output/cost
+    # side by side.
     provider_pipeline = [
-        {"$match": {"created_at": {"$gte": cutoff}}},
+        {"$match": match_stage},
         {"$group": {
             "_id": "$provider",
             "input_tokens": {"$sum": "$input_tokens"},
@@ -1146,6 +1287,7 @@ async def get_ai_usage_summary(
     return {
         "success": True,
         "days": days,
+        "scope": scope,
         "byFeature": by_feature,
         "byProvider": by_provider,
         "totals": totals,

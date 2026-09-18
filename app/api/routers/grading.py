@@ -37,6 +37,8 @@ from app.services.grading import (
 from app.services.imagekit import upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.utils.token_usage import aggregate_grading_tokens, check_institute_token_budget, save_grading_tokens_to_institute
 from app.utils.transcript_generation_helper import refresh_transcript_for_exam
 
@@ -74,7 +76,8 @@ async def _fail(job_id: str, message: str) -> None:
 # ============================================================
 
 async def _run_evaluation_job(
-    job_id: str, exam_id: str, answer_id: str, generate_transcript_pdf: bool, faculty_id: str
+    job_id: str, exam_id: str, answer_id: str, generate_transcript_pdf: bool, faculty_id: str,
+    user_id: str = None,
 ) -> None:
     db = get_database()
 
@@ -127,6 +130,7 @@ async def _run_evaluation_job(
             return
 
         institute_id = await _resolve_institute_id(db, exam)
+        institute_id_str = str(institute_id) if institute_id else None
 
         # Step 2 — download
         await set_job(EVAL_JOB_PREFIX, job_id, {
@@ -138,6 +142,12 @@ async def _run_evaluation_job(
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 30, "step": "Extracting student answer text"})
         answer_text, ans_gemini_tokens = await asyncio.to_thread(extract_answer_text_with_gemini, student_pdf_bytes)
         gemini_calls = [ans_gemini_tokens]
+        if user_id:
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.GEMINI, model=ans_gemini_tokens["model"],
+                feature=Feature.GRADING_ANSWER_OCR, usage=ans_gemini_tokens,
+                job_id=job_id, institute_id=institute_id_str,
+            )
 
         # Step 4 — grading (+ transcript, in parallel when requested)
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 50, "step": "AI grading in progress"})
@@ -149,12 +159,24 @@ async def _run_evaluation_job(
                 asyncio.to_thread(generate_transcript_html_with_claude, answer_text, student_name),
             )
             claude_calls = [grade_claude_tokens, transcript_claude_tokens]
+            if user_id:
+                await record_ai_usage(
+                    db, user_id=user_id, provider=Provider.CLAUDE, model=transcript_claude_tokens["model"],
+                    feature=Feature.GRADING_TRANSCRIPT_GENERATION, usage=transcript_claude_tokens,
+                    job_id=job_id, institute_id=institute_id_str,
+                )
         else:
             grading_result_raw, grade_claude_tokens = await asyncio.to_thread(
                 grade_with_claude, question_text, answer_text, evaluation_rules
             )
             transcript_html = None
             claude_calls = [grade_claude_tokens]
+        if user_id:
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.CLAUDE, model=grade_claude_tokens["model"],
+                feature=Feature.GRADING_ANSWER_EVALUATION, usage=grade_claude_tokens,
+                job_id=job_id, institute_id=institute_id_str,
+            )
 
         grading_json = safe_json_parse(grading_result_raw)
 
@@ -337,6 +359,7 @@ async def evaluate_answer_script(
 
     await enqueue(
         "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
+        str(user["_id"]),
         background_tasks=background_tasks,
     )
 

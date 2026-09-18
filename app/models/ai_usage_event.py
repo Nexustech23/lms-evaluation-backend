@@ -55,6 +55,19 @@ class Feature:
     RAG_SUMMARIZE = "rag_summarize"
     RAG_RETRIEVE = "rag_retrieve"
 
+    # Faculty — question paper generation (app/api/routers/question_paper.py)
+    QP_QUESTION_BANK_EXTRACTION = "qp_question_bank_extraction"
+    QP_COURSE_PLANNER_EXTRACTION = "qp_course_planner_extraction"
+    QP_GENERATION = "qp_generation"
+
+    # Faculty — answer-script grading (app/api/routers/grading.py)
+    GRADING_ANSWER_OCR = "grading_answer_ocr"
+    GRADING_ANSWER_EVALUATION = "grading_answer_evaluation"
+    GRADING_TRANSCRIPT_GENERATION = "grading_transcript_generation"
+
+    # Faculty — exam question-paper text extraction (app/services/gemini.py)
+    EXAM_QUESTION_PAPER_EXTRACTION = "exam_question_paper_extraction"
+
 
 # Human-readable label per Feature code, for activity-log dashboards
 # (app/api/routers/profile.py's /institute-students/activity-logs and
@@ -81,11 +94,36 @@ FEATURE_LABELS: Dict[str, str] = {
     Feature.RAG_EMBEDDING: "Course material indexed",
     Feature.RAG_SUMMARIZE: "Course material summarized",
     Feature.RAG_RETRIEVE: "Course material referenced",
+    Feature.QP_QUESTION_BANK_EXTRACTION: "Extracted question bank",
+    Feature.QP_COURSE_PLANNER_EXTRACTION: "Extracted course planner",
+    Feature.QP_GENERATION: "Generated question paper",
+    Feature.GRADING_ANSWER_OCR: "Extracted answer script text",
+    Feature.GRADING_ANSWER_EVALUATION: "Graded answer script",
+    Feature.GRADING_TRANSCRIPT_GENERATION: "Generated answer transcript",
+    Feature.EXAM_QUESTION_PAPER_EXTRACTION: "Extracted question paper text",
 }
 
 
 def feature_label(feature: str) -> str:
     return FEATURE_LABELS.get(feature, feature)
+
+
+# Which surface (student-facing MyCareerGuru vs faculty-facing exam tooling)
+# a feature belongs to — used by GET /ai-usage's `scope` filter and the
+# admin/super-admin Activity Logs pages' Students/Faculty tab, so both can
+# split the shared aiUsageEvents ledger without duplicating a feature list
+# in the frontend.
+FACULTY_FEATURES = frozenset({
+    Feature.QP_QUESTION_BANK_EXTRACTION,
+    Feature.QP_COURSE_PLANNER_EXTRACTION,
+    Feature.QP_GENERATION,
+    Feature.GRADING_ANSWER_OCR,
+    Feature.GRADING_ANSWER_EVALUATION,
+    Feature.GRADING_TRANSCRIPT_GENERATION,
+    Feature.EXAM_QUESTION_PAPER_EXTRACTION,
+})
+
+STUDENT_FEATURES = frozenset(FEATURE_LABELS) - FACULTY_FEATURES
 
 
 def create_ai_usage_event_document(

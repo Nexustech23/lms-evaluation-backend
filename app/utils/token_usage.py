@@ -153,7 +153,7 @@ async def save_grading_tokens_to_institute(
         logging.error("save_grading_tokens_to_institute error: %s", e)
 
 
-async def _resolve_institute_id_for_faculty(db: AsyncIOMotorDatabase, faculty_id: str) -> Optional[ObjectId]:
+async def resolve_institute_id_for_faculty(db: AsyncIOMotorDatabase, faculty_id: str) -> Optional[ObjectId]:
     faculty = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id)})
     if not faculty:
         return None
@@ -187,7 +187,7 @@ async def check_institute_token_budget(
         ],
       }
     """
-    institute_id = await _resolve_institute_id_for_faculty(db, faculty_id)
+    institute_id = await resolve_institute_id_for_faculty(db, faculty_id)
     if not institute_id:
         return {"allowed": True, "message": None, "warnings": []}
 

@@ -9,7 +9,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import requests
 from bson import ObjectId
@@ -18,8 +18,10 @@ from google.genai import types as genai_types
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.models.ai_usage_event import Feature, Provider
+from app.services.ai_usage import record_ai_usage
 from app.utils.net import safe_get
-from app.utils.token_usage import increment_institute_gemini_tokens
+from app.utils.token_usage import increment_institute_gemini_tokens, resolve_institute_id_for_faculty
 
 _client: genai.Client | None = None
 
@@ -432,6 +434,7 @@ async def extract_and_patch_question_paper_text(
     question_paper_url: str,
     faculty_id: str,
     filename: str = "file.pdf",
+    user_id: Optional[str] = None,
 ) -> None:
     try:
         logging.info("[qp-extract] Downloading file for folder %s", folder_id)
@@ -454,6 +457,13 @@ async def extract_and_patch_question_paper_text(
         await increment_institute_gemini_tokens(
             db, faculty_id, token_usage["prompt_tokens"], token_usage["candidate_tokens"]
         )
+        if user_id:
+            institute_id = await resolve_institute_id_for_faculty(db, faculty_id)
+            await record_ai_usage(
+                db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                feature=Feature.EXAM_QUESTION_PAPER_EXTRACTION, usage=token_usage,
+                institute_id=str(institute_id) if institute_id else None,
+            )
 
         logging.info("[qp-extract] Done for folder %s", folder_id)
 

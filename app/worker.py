@@ -56,19 +56,19 @@ async def run_ingest_job(ctx, job_id, file_bytes, filename, course_title, course
     await _run_ingest_job(job_id, file_bytes, filename, course_title, course_code, user_id, job_prefix)
 
 
-async def run_extract_question_paper_text(ctx, folder_id, question_paper_url, faculty_id, filename):
+async def run_extract_question_paper_text(ctx, folder_id, question_paper_url, faculty_id, filename, user_id=None):
     from app.db.mongodb import get_database
     from app.services.gemini import extract_and_patch_question_paper_text
 
     await extract_and_patch_question_paper_text(
-        get_database(), ObjectId(folder_id), question_paper_url, faculty_id, filename
+        get_database(), ObjectId(folder_id), question_paper_url, faculty_id, filename, user_id
     )
 
 
-async def run_evaluation_job(ctx, job_id, exam_id, answer_id, generate_transcript_pdf, faculty_id):
+async def run_evaluation_job(ctx, job_id, exam_id, answer_id, generate_transcript_pdf, faculty_id, user_id=None):
     from app.api.routers.grading import _run_evaluation_job
 
-    await _run_evaluation_job(job_id, exam_id, answer_id, generate_transcript_pdf, faculty_id)
+    await _run_evaluation_job(job_id, exam_id, answer_id, generate_transcript_pdf, faculty_id, user_id)
 
 
 async def run_mock_generation(ctx, test_id, prompt, user_id):

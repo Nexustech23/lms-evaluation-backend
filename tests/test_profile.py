@@ -377,3 +377,109 @@ async def test_self_learner_activity_logs_independent_filter_excludes_institute_
     body = resp.json()
     assert body["total"] == 1
     assert body["logs"][0]["student_role"] == "self_learner"
+
+
+# ============================================================
+# FACULTY ACTIVITY LOGS — /faculty/activity-logs (institute-scoped, no
+# tokens/cost) and /faculty/activity-logs/all (superadmin, with tokens/cost)
+# ============================================================
+
+async def _register_faculty(institute_client, test_db, name: str) -> str:
+    import uuid
+
+    email = f"faculty-{uuid.uuid4().hex[:10]}@test.local"
+    await register(
+        institute_client, role="faculty", fullName=name, email=email,
+        password=PASSWORD, school_id=str(ObjectId()),
+    )
+    # Unlike institute_student, faculty registration keeps the email as
+    # supplied — no college-email rewrite — so a plain lookup is enough.
+    user = await test_db["users"].find_one({"email": email})
+    return str(user["_id"])
+
+
+async def test_faculty_activity_logs_requires_institute_role(superadmin_client, client_factory, test_db):
+    institute = await _register_institute_admin(superadmin_client, client_factory, "Faculty Logs Role Institute")
+    faculty_id = await _register_faculty(institute, test_db, "Role Check Faculty")
+    await _insert_ai_usage_event(test_db, user_id=faculty_id, feature="qp_generation")
+
+    onlooker_id = await _register_institute_student(institute, test_db, "Faculty Logs Onlooker")
+    onlooker_client = await client_factory()
+    onlooker_user = await test_db["users"].find_one({"_id": ObjectId(onlooker_id)})
+    await login(onlooker_client, onlooker_user["email"], PASSWORD)
+
+    resp = await onlooker_client.get("/faculty/activity-logs")
+    assert resp.status_code == 403
+
+
+async def test_faculty_activity_logs_scoped_to_own_institute_and_hides_cost(
+    superadmin_client, client_factory, test_db,
+):
+    institute_a = await _register_institute_admin(superadmin_client, client_factory, "Faculty Logs Institute A")
+    institute_b = await _register_institute_admin(superadmin_client, client_factory, "Faculty Logs Institute B")
+
+    faculty_a = await _register_faculty(institute_a, test_db, "Faculty A")
+    faculty_b = await _register_faculty(institute_b, test_db, "Faculty B")
+
+    await _insert_ai_usage_event(test_db, user_id=faculty_a, feature="qp_generation", cost_usd=1.23)
+    await _insert_ai_usage_event(test_db, user_id=faculty_b, feature="grading_answer_evaluation", cost_usd=4.56)
+
+    resp = await institute_a.get("/faculty/activity-logs")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["total"] == 1
+    row = body["logs"][0]
+    assert row["faculty_name"] == "Faculty A"
+    assert row["action"] == "Generated question paper"
+    assert "cost_usd" not in row
+    assert "input_tokens" not in row
+    assert "provider" not in row
+
+
+async def test_faculty_activity_logs_all_requires_superadmin(superadmin_client, client_factory):
+    institute = await _register_institute_admin(superadmin_client, client_factory, "Faculty Logs All Institute")
+    resp = await institute.get("/faculty/activity-logs/all")
+    assert resp.status_code == 403
+
+
+async def test_faculty_activity_logs_all_includes_tokens_and_cost(
+    superadmin_client, client_factory, test_db,
+):
+    institute = await _register_institute_admin(superadmin_client, client_factory, "Faculty Logs All Institute 2")
+    faculty_id = await _register_faculty(institute, test_db, "Cost Visible Faculty")
+    await _insert_ai_usage_event(test_db, user_id=faculty_id, feature="grading_answer_ocr", cost_usd=2.5)
+
+    resp = await superadmin_client.get("/faculty/activity-logs/all")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    row = body["logs"][0]
+    assert row["faculty_name"] == "Cost Visible Faculty"
+    assert row["cost_usd"] == 2.5
+    assert row["provider"] == "claude"
+
+    faculty_user = await test_db["users"].find_one({"_id": ObjectId(faculty_id)})
+    filtered = await superadmin_client.get(f"/faculty/activity-logs/all?email={faculty_user['email']}")
+    assert filtered.json()["total"] == 1
+
+
+async def test_faculty_activity_logs_all_institute_filter(
+    superadmin_client, client_factory, test_db,
+):
+    institute_a = await _register_institute_admin(superadmin_client, client_factory, "Faculty Filter Institute A")
+    institute_b = await _register_institute_admin(superadmin_client, client_factory, "Faculty Filter Institute B")
+
+    faculty_a = await _register_faculty(institute_a, test_db, "Filter Faculty A")
+    faculty_b = await _register_faculty(institute_b, test_db, "Filter Faculty B")
+
+    await _insert_ai_usage_event(test_db, user_id=faculty_a, feature="qp_generation", cost_usd=1.0)
+    await _insert_ai_usage_event(test_db, user_id=faculty_b, feature="qp_generation", cost_usd=2.0)
+
+    admin_a_user_id = (await institute_a.get("/profile")).json()["id"]
+
+    resp = await superadmin_client.get(f"/faculty/activity-logs/all?institute_id={admin_a_user_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["logs"][0]["faculty_name"] == "Filter Faculty A"
