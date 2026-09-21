@@ -35,6 +35,9 @@ _PRICES: dict[str, ModelPrice] = {
     "claude-haiku-4-5-20251001": ModelPrice(1.00, 5.00, date(2026, 1, 1)),
     # Gemini
     "gemini-2.5-flash": ModelPrice(0.30, 2.50, date(2026, 1, 1)),
+    # Answer-script OCR. List price for prompts up to 200k tokens ($4 / $18 above that,
+    # never reached by a single answer sheet). Thinking tokens bill as output.
+    "gemini-3.1-pro-preview": ModelPrice(2.00, 12.00, date(2026, 9, 21)),
     # Embeddings — billed on input tokens only; output side is unused (0).
     "gemini-embedding-001": ModelPrice(0.15, 0.0, date(2026, 1, 1)),
 }

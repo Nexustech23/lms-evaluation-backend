@@ -18,7 +18,7 @@ from app.services.claude import generate_text
 from app.services.gemini import generate_content_from_file
 
 CLAUDE_GRADING_MODEL = "claude-sonnet-4-6"
-GEMINI_OCR_MODEL = "gemini-2.5-flash"
+GEMINI_OCR_MODEL = "gemini-3.1-pro-preview"
 
 
 def _empty_claude_tokens(call_name: str) -> Dict[str, Any]:
