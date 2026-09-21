@@ -313,6 +313,9 @@ async def _get_combined_results(
                 composite = 0
 
             student_result[sid][subject_name] = f"{composite} ({grade})"
+            student_result[sid].setdefault("subject_scores", {})[subject_name] = {
+                "marks": composite, "grade": grade,
+            }
             student_result[sid]["overall_total"] = student_result[sid].get("overall_total", 0) + composite
             student_result[sid]["total_credit_points"] = round(
                 student_result[sid].get("total_credit_points", 0) + credits * grade_point, 2
@@ -365,7 +368,28 @@ async def combined_result(
 _RESERVED_COLUMNS = {
     "student_id", "rank", "overall_total", "grade",
     "total_credits", "total_credit_points", "tgpa", "cgpa", "result_source",
+    "subject_scores",
 }
+
+
+def _subject_marks_and_grade(row: Dict[str, Any], subject: str) -> Tuple[Any, Any]:
+    """Marks / grade for one subject cell; (value, None) when no grade is available."""
+    score = (row.get("subject_scores") or {}).get(subject)
+    if score:
+        return score.get("marks"), score.get("grade")
+    value = row.get(subject)
+    match = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*\((.+)\)\s*$", str(value)) if value is not None else None
+    if match:
+        return float(match.group(1)), match.group(2)
+    return value, None
+
+
+def _rows_have_subject_grades(rows: List[Dict[str, Any]], subject_columns: List[str]) -> bool:
+    return any(_subject_marks_and_grade(r, sub)[1] is not None for r in rows for sub in subject_columns)
+
+
+def _fmt_marks(value: Any) -> Any:
+    return f"{value:.2f}" if isinstance(value, (int, float)) and not isinstance(value, bool) else value
 
 
 def _subject_columns_from_rows(rows: List[Dict[str, Any]]) -> List[str]:
@@ -384,7 +408,11 @@ def _build_combined_result_workbook(rows: List[Dict[str, Any]], semester: str) -
 
     subject_columns = _subject_columns_from_rows(rows)
     is_transcript = any(row.get("result_source") == "transcript" for row in rows)
-    headers = ["Rank", "Student ID"] + subject_columns + ["Overall Total"]
+    split_subjects = _rows_have_subject_grades(rows, subject_columns)
+    subject_headers: List[str] = []
+    for subject in subject_columns:
+        subject_headers += [subject, ""] if split_subjects else [subject]
+    headers = ["Rank", "Student ID"] + subject_headers + ["Overall Total"]
     headers += ["TGPA", "CGPA"] if is_transcript else ["Grade"]
 
     wb = Workbook()
@@ -412,9 +440,35 @@ def _build_combined_result_workbook(rows: List[Dict[str, Any]], semester: str) -
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = thin_border
 
-    for row_index, student in enumerate(rows, start=3):
+    data_start_row = 3
+    if split_subjects:
+        # Two header rows: subject name merged over its Marks / Grade pair.
+        ws.insert_rows(3)
+        data_start_row = 4
+        for col_index in range(1, len(headers) + 1):
+            top = ws.cell(row=2, column=col_index)
+            sub = ws.cell(row=3, column=col_index)
+            sub.font = Font(bold=True)
+            sub.fill = header_fill
+            sub.alignment = Alignment(horizontal="center", vertical="center")
+            sub.border = thin_border
+            is_subject_col = 3 <= col_index < 3 + 2 * len(subject_columns)
+            if is_subject_col:
+                sub.value = "Marks" if (col_index - 3) % 2 == 0 else "Grade"
+                if (col_index - 3) % 2 == 0:
+                    ws.merge_cells(start_row=2, start_column=col_index, end_row=2, end_column=col_index + 1)
+            else:
+                ws.merge_cells(start_row=2, start_column=col_index, end_row=3, end_column=col_index)
+            top.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row_index, student in enumerate(rows, start=data_start_row):
         values = [student.get("rank"), student.get("student_id")]
-        values += [student.get(subject, 0) for subject in subject_columns]
+        for subject in subject_columns:
+            if split_subjects:
+                marks, grade = _subject_marks_and_grade(student, subject)
+                values += [round(marks, 2) if isinstance(marks, (int, float)) else marks, grade or ""]
+            else:
+                values.append(student.get(subject, 0))
         values += [student.get("overall_total", 0)]
         values += (
             [student.get("tgpa", 0), student.get("cgpa", 0)] if is_transcript else [student.get("grade", "")]
@@ -425,7 +479,7 @@ def _build_combined_result_workbook(rows: List[Dict[str, Any]], semester: str) -
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = thin_border
 
-    ws.freeze_panes = "A3"
+    ws.freeze_panes = f"A{data_start_row}"
 
     for col_index, header in enumerate(headers, start=1):
         max_length = len(str(header))
@@ -460,16 +514,37 @@ def _build_combined_result_print_html(rows: List[Dict[str, Any]], batch_id: str,
     def _display(value: Any) -> str:
         return html_module.escape(str(value if value is not None else ""))
 
-    header_html = "".join(f"<th>{html_module.escape(str(h))}</th>" for h in headers)
+    split_subjects = _rows_have_subject_grades(rows, subject_columns)
+    esc = lambda h: html_module.escape(str(h))
+    if split_subjects:
+        fixed_head = lambda h: f'<th rowspan="2">{esc(h)}</th>'
+        header_html = (
+            "<tr>" + fixed_head("Rank") + fixed_head("Student ID")
+            + "".join(f'<th colspan="2">{esc(sub)}</th>' for sub in subject_columns)
+            + fixed_head("Overall Total")
+            + ("".join(fixed_head(h) for h in ("TGPA", "CGPA")) if is_transcript else fixed_head("Grade"))
+            + "</tr><tr>" + "<th>Marks</th><th>Grade</th>" * len(subject_columns) + "</tr>"
+        )
+    else:
+        header_html = "<tr>" + "".join(f"<th>{esc(h)}</th>" for h in headers) + "</tr>"
 
     row_html = []
     for student in rows:
         rank = student.get("rank")
         rank_class = {1: "rank-one", 2: "rank-two", 3: "rank-three"}.get(rank, "")
 
-        subject_cells = "".join(
-            f'<td class="numeric">{_display(student.get(subject, 0))}</td>' for subject in subject_columns
-        )
+        if split_subjects:
+            subject_cells = ""
+            for subject in subject_columns:
+                marks, sub_grade = _subject_marks_and_grade(student, subject)
+                subject_cells += (
+                    f'<td class="numeric">{_display(_fmt_marks(marks))}</td>'
+                    f'<td class="numeric">{_display(sub_grade or "")}</td>'
+                )
+        else:
+            subject_cells = "".join(
+                f'<td class="numeric">{_display(student.get(subject, 0))}</td>' for subject in subject_columns
+            )
         grade = student.get("grade", "")
         if is_transcript:
             result_cells = (
@@ -492,7 +567,7 @@ def _build_combined_result_print_html(rows: List[Dict[str, Any]], batch_id: str,
             </tr>""")
 
     table_or_empty = (
-        f'<table><thead><tr>{header_html}</tr></thead><tbody>{"".join(row_html)}</tbody></table>'
+        f'<table><thead>{header_html}</thead><tbody>{"".join(row_html)}</tbody></table>'
         if rows else '<div class="empty-state">No Result Found</div>'
     )
 
