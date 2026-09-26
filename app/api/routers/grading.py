@@ -35,6 +35,7 @@ from app.services.grading import (
     safe_json_parse,
 )
 from app.services.imagekit import upload_file_to_imagekit
+from app.services.mcq_grading import apply_deterministic_mcq_overrides, parse_mcq_answers_from_ocr_text
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
@@ -140,7 +141,21 @@ async def _run_evaluation_job(
 
         # Step 3 — OCR
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 30, "step": "Extracting student answer text"})
-        answer_text, ans_gemini_tokens = await asyncio.to_thread(extract_answer_text_with_gemini, student_pdf_bytes)
+        # Only questions with a *confidently*-resolved answer key are asked for —
+        # see app.services.mcq_grading — so OCR is never told to structure-extract a
+        # question this exam has no reliable key for. Each question's option texts
+        # (saved alongside the answer at key-resolution time) are passed through too,
+        # so OCR can match a student who wrote out the answer's wording instead of
+        # its letter — see extract_answer_text_with_gemini's docstring.
+        mcq_answer_key: dict = exam.get("mcq_answer_key") or {}
+        confident_mcq_questions_with_options = {
+            int(q_no): entry["options"]
+            for q_no, entry in mcq_answer_key.items()
+            if entry.get("confident") and entry.get("options")
+        }
+        answer_text, ans_gemini_tokens = await asyncio.to_thread(
+            extract_answer_text_with_gemini, student_pdf_bytes, confident_mcq_questions_with_options or None
+        )
         gemini_calls = [ans_gemini_tokens]
         if user_id:
             await record_ai_usage(
@@ -179,6 +194,22 @@ async def _run_evaluation_job(
             )
 
         grading_json = safe_json_parse(grading_result_raw)
+
+        # Step 4b — deterministic MCQ override. Claude graded every question above
+        # exactly as before (unchanged, zero risk to that path) — this replaces only
+        # the entries for questions with a confidently-resolved answer key with a
+        # plain letter-match result, so no AI leniency/partial-credit judgment can
+        # reach the final saved marks for multiple-choice questions. See
+        # app.services.mcq_grading module docstring for the full design rationale.
+        student_mcq_answers = parse_mcq_answers_from_ocr_text(answer_text)
+        grading_json["questionwise_marking"], mcq_override_count = apply_deterministic_mcq_overrides(
+            grading_json.get("questionwise_marking", []), mcq_answer_key, student_mcq_answers,
+        )
+        if mcq_override_count:
+            logging.info(
+                "[eval-job %s] %d MCQ question(s) scored deterministically (answer key match)",
+                job_id, mcq_override_count,
+            )
 
         # Step 5 — recompute marks server-side (never trust Claude's self-reported totals)
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 65, "step": "Computing marks"})
