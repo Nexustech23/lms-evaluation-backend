@@ -28,10 +28,26 @@ from app.utils.ai_pricing import estimate_cost_usd
 logger = logging.getLogger("ai_usage")
 
 
+def _gemini_output_tokens(prompt_tokens: int, candidate_tokens: int, total_tokens: int) -> int:
+    """Gemini's candidates_token_count is only the VISIBLE answer — a thinking model
+    (any Gemini call that doesn't explicitly disable thinking_config, which today is
+    every call site except generate_html_from_prompt) also spends thoughts_token_count,
+    which Google bills as output but which candidates_token_count alone excludes.
+    total_token_count is prompt + candidates + thoughts, so whenever it's bigger than
+    prompt+candidates, the gap is thinking tokens — fold it into the output figure used
+    for cost estimation instead of silently dropping it. Falls back to candidate_tokens
+    when total_tokens is 0/missing (matches _parse_token_usage's own zeroed fallback),
+    and never returns less than candidate_tokens even if total looks stale/inconsistent.
+    """
+    if not total_tokens:
+        return candidate_tokens
+    return max(candidate_tokens, total_tokens - prompt_tokens)
+
+
 def _extract_tokens(usage: Any) -> tuple[int, int]:
     """Normalizes the four usage shapes already in use across this codebase:
     - dict from app.services.claude (generate_text/generate_html): input_tokens/output_tokens
-    - dict from app.services.gemini (_parse_token_usage): prompt_tokens/candidate_tokens
+    - dict from app.services.gemini (_parse_token_usage): prompt_tokens/candidate_tokens/total_tokens
     - anthropic SDK Usage object (roadmap_ai.py's generate_claude_json/generate_curriculum/generate_claude_text)
     - google-genai SDK usage_metadata object (roadmap_ai.py's generate_gemini_json)
     """
@@ -41,16 +57,22 @@ def _extract_tokens(usage: Any) -> tuple[int, int]:
     if isinstance(usage, dict):
         if "input_tokens" in usage:
             return int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
-        return int(usage.get("prompt_tokens") or 0), int(usage.get("candidate_tokens") or 0)
+        prompt = int(usage.get("prompt_tokens") or 0)
+        candidate = int(usage.get("candidate_tokens") or 0)
+        total = int(usage.get("total_tokens") or 0)
+        return prompt, _gemini_output_tokens(prompt, candidate, total)
 
     input_tokens = getattr(usage, "input_tokens", None)
     if input_tokens is not None:
         return int(input_tokens or 0), int(getattr(usage, "output_tokens", 0) or 0)
 
-    return (
-        int(getattr(usage, "prompt_token_count", 0) or 0),
-        int(getattr(usage, "candidates_token_count", 0) or 0),
-    )
+    # Raw google-genai SDK usage_metadata object (roadmap_ai.py's generate_gemini_json
+    # passes response.usage_metadata straight through) — same thinking-token gap as
+    # the dict branch above, fixed the same way.
+    prompt = int(getattr(usage, "prompt_token_count", 0) or 0)
+    candidate = int(getattr(usage, "candidates_token_count", 0) or 0)
+    total = int(getattr(usage, "total_token_count", 0) or 0)
+    return prompt, _gemini_output_tokens(prompt, candidate, total)
 
 
 async def record_ai_usage(

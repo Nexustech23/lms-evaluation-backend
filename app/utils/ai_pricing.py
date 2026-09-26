@@ -28,6 +28,11 @@ class ModelPrice:
 # before trusting this for anything beyond an internal cost estimate.
 _PRICES: dict[str, ModelPrice] = {
     # Claude — Sonnet family
+    # Answer-script grading (CLAUDE_GRADING_MODEL in grading.py) — Sonnet 5 is the
+    # current GA default: cheaper than 4.6 ($2/$10 vs $3/$15) and, per Anthropic's own
+    # pre-deployment testing, lower hallucination/sycophancy rates (claude.com/pricing,
+    # anthropic.com/news/claude-sonnet-5, checked 2026-09-26).
+    "claude-sonnet-5": ModelPrice(2.00, 10.00, date(2026, 9, 26)),
     "claude-sonnet-4-6": ModelPrice(3.00, 15.00, date(2026, 1, 1)),
     "claude-sonnet-4-5": ModelPrice(3.00, 15.00, date(2026, 1, 1)),
     "claude-sonnet-4-20250514": ModelPrice(3.00, 15.00, date(2026, 1, 1)),
@@ -35,9 +40,14 @@ _PRICES: dict[str, ModelPrice] = {
     "claude-haiku-4-5-20251001": ModelPrice(1.00, 5.00, date(2026, 1, 1)),
     # Gemini
     "gemini-2.5-flash": ModelPrice(0.30, 2.50, date(2026, 1, 1)),
-    # Answer-script OCR. List price for prompts up to 200k tokens ($4 / $18 above that,
-    # never reached by a single answer sheet). Thinking tokens bill as output.
+    # Kept priced (not answer-script OCR's model any more, see below) in case another
+    # call site or a saved usage row still references it.
     "gemini-3.1-pro-preview": ModelPrice(2.00, 12.00, date(2026, 9, 21)),
+    # Answer-script OCR (GEMINI_OCR_MODEL in grading.py) — deep-research comparison
+    # (2026-09-26) found this GA, cheapest tier tied for best accuracy on a real
+    # handwritten-MCQ exam-grading benchmark (arXiv:2606.11477), beating the pricier
+    # 3.1 Pro Preview and 3.5 Flash. Thinking tokens (if any) bill as output.
+    "gemini-3.1-flash-lite": ModelPrice(0.25, 1.50, date(2026, 9, 26)),
     # Embeddings — billed on input tokens only; output side is unused (0).
     "gemini-embedding-001": ModelPrice(0.15, 0.0, date(2026, 1, 1)),
 }

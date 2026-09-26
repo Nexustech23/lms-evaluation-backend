@@ -1284,12 +1284,44 @@ async def get_ai_usage_summary(
             "distinct_users": len(row["distinct_users"]),
         })
 
+    # Same window/scope, grouped by exact model string — a provider can run more
+    # than one model at once (e.g. Gemini Flash for question-paper extraction vs
+    # Gemini 3.1 Pro Preview for answer-script OCR), and byProvider alone hides
+    # that split.
+    model_pipeline = [
+        {"$match": match_stage},
+        {"$group": {
+            "_id": {"provider": "$provider", "model": "$model"},
+            "input_tokens": {"$sum": "$input_tokens"},
+            "output_tokens": {"$sum": "$output_tokens"},
+            "total_tokens": {"$sum": "$total_tokens"},
+            "cost_usd": {"$sum": "$cost_usd"},
+            "call_count": {"$sum": 1},
+            "distinct_users": {"$addToSet": "$user_id"},
+        }},
+        {"$sort": {"cost_usd": -1}},
+    ]
+
+    by_model = []
+    async for row in db["aiUsageEvents"].aggregate(model_pipeline):
+        by_model.append({
+            "provider": row["_id"]["provider"],
+            "model": row["_id"]["model"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "total_tokens": row["total_tokens"],
+            "cost_usd": round(row["cost_usd"], 4),
+            "call_count": row["call_count"],
+            "distinct_users": len(row["distinct_users"]),
+        })
+
     return {
         "success": True,
         "days": days,
         "scope": scope,
         "byFeature": by_feature,
         "byProvider": by_provider,
+        "byModel": by_model,
         "totals": totals,
     }
 
