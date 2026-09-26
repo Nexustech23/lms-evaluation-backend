@@ -454,6 +454,16 @@ async def extract_and_patch_question_paper_text(
             {"$set": {"question_paper.text": extracted_text, "question_paper.text_at": now, "updated_at": now}},
         )
 
+        # Best-effort, non-fatal — resolves the MCQ answer key once for the whole
+        # exam (not once per student, see mcq_grading.py's module docstring) so
+        # MCQ questions can be graded deterministically instead of by AI judgment.
+        # A no-op if the paper has no MCQ questions.
+        try:
+            from app.services.mcq_grading import determine_and_save_mcq_answer_keys
+            await determine_and_save_mcq_answer_keys(db, folder_id, extracted_text, faculty_id, user_id)
+        except Exception as e:
+            logging.warning("[qp-extract] MCQ answer-key resolution failed (non-fatal): %s", e)
+
         await increment_institute_gemini_tokens(
             db, faculty_id, token_usage["prompt_tokens"], token_usage["candidate_tokens"]
         )

@@ -49,11 +49,61 @@ _OCR_PROMPT = (
     "Return plain text only. Do not use markdown."
 )
 
+# Appended to _OCR_PROMPT only when the exam has questions detected as multiple-choice
+# (see app.utils.mcq_detect) — asks for each one's selection as a separate, clearly
+# tagged line so app.services.mcq_grading.parse_mcq_answers_from_ocr_text can pull it
+# out deterministically, without disturbing the free-text transcription above it.
+#
+# Includes each question's own option texts, not just its number — a student may
+# write the option's LETTER (A/B/C/D) or may write out the answer's WORDING
+# instead. Without the option texts here, Gemini has no way to map written-out
+# wording back to a letter; with them, it can, while still refusing to guess if
+# the wording doesn't clearly match exactly one option (see MCQ_ANSWER_LINE_RE /
+# parse_mcq_answers_from_ocr_text in mcq_grading.py, and needs_review handling —
+# no answer here is ever silently invented if it isn't a clear match).
+_OCR_MCQ_INSTRUCTION_TEMPLATE = (
+    "\n\nThis script also contains multiple-choice questions. For each one listed below, the "
+    "student may have written the OPTION LETTER (e.g. \"B\"), or may have instead written out the "
+    "WORDING of their chosen answer instead of a letter — match either form back to the correct "
+    "letter using the option list given for that question.\n\n"
+    "{questions_with_options}\n"
+    "For EACH question number listed above, in addition to the transcription above, output one "
+    "extra line in EXACTLY this format:\n"
+    "MCQ_ANSWER <question number>: <single option letter, UPPERCASE>\n"
+    "If a letter was crossed out or overwritten and a different letter/wording written instead, "
+    "report only the final, un-crossed-out choice — never both. If you cannot confidently match "
+    "what the student wrote to exactly one of that question's listed options (illegible, multiple "
+    "conflicting selections, wording that doesn't clearly match any single option, or no answer "
+    "given), output:\n"
+    "MCQ_ANSWER <question number>: UNCLEAR\n"
+    "Do not guess — an incorrect match here would mark this question wrong even if the student's "
+    "answer was actually correct. Output exactly one MCQ_ANSWER line per listed question number, "
+    "in any order, after the main transcription."
+)
 
-def extract_answer_text_with_gemini(pdf_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
-    """Blocking — run via asyncio.to_thread()."""
+
+def extract_answer_text_with_gemini(
+    pdf_bytes: bytes, mcq_questions_with_options: Optional[Dict[int, Dict[str, str]]] = None
+) -> Tuple[str, Dict[str, Any]]:
+    """Blocking — run via asyncio.to_thread(). When mcq_questions_with_options is given
+    (the exam has a resolved MCQ answer key — see mcq_grading.py), the prompt additionally
+    asks for each one's selected option as a separate tagged line — the student may have
+    written either the option letter or its wording, both are matched against the given
+    option texts — parsed out by mcq_grading.parse_mcq_answers_from_ocr_text and scored
+    deterministically. This does not add a second Gemini call, just extends the existing one.
+
+    mcq_questions_with_options shape: {question_no: {"A": "option text", "B": "...", ...}}."""
+    prompt = _OCR_PROMPT
+    if mcq_questions_with_options:
+        blocks = []
+        for q_no in sorted(mcq_questions_with_options):
+            blocks.append(f"Question {q_no}:")
+            for letter, text in mcq_questions_with_options[q_no].items():
+                blocks.append(f"  {letter}) {text}")
+        prompt += _OCR_MCQ_INSTRUCTION_TEMPLATE.format(questions_with_options="\n".join(blocks))
+
     try:
-        text, usage = generate_content_from_file(pdf_bytes, "application/pdf", _OCR_PROMPT, model=GEMINI_OCR_MODEL)
+        text, usage = generate_content_from_file(pdf_bytes, "application/pdf", prompt, model=GEMINI_OCR_MODEL)
     except Exception as e:
         raise RuntimeError(f"Answer script OCR failed: {e}") from e
 
