@@ -68,6 +68,10 @@ class Feature:
     # Faculty — exam question-paper text extraction (app/services/gemini.py)
     EXAM_QUESTION_PAPER_EXTRACTION = "exam_question_paper_extraction"
 
+    # Faculty — one-time MCQ answer-key determination (app/services/mcq_grading.py),
+    # runs once per exam at question-paper-upload time, not once per student.
+    GRADING_MCQ_ANSWER_KEY = "grading_mcq_answer_key"
+
 
 # Human-readable label per Feature code, for activity-log dashboards
 # (app/api/routers/profile.py's /institute-students/activity-logs and
@@ -101,6 +105,7 @@ FEATURE_LABELS: Dict[str, str] = {
     Feature.GRADING_ANSWER_EVALUATION: "Graded answer script",
     Feature.GRADING_TRANSCRIPT_GENERATION: "Generated answer transcript",
     Feature.EXAM_QUESTION_PAPER_EXTRACTION: "Extracted question paper text",
+    Feature.GRADING_MCQ_ANSWER_KEY: "Determined MCQ answer key",
 }
 
 
@@ -121,6 +126,7 @@ FACULTY_FEATURES = frozenset({
     Feature.GRADING_ANSWER_EVALUATION,
     Feature.GRADING_TRANSCRIPT_GENERATION,
     Feature.EXAM_QUESTION_PAPER_EXTRACTION,
+    Feature.GRADING_MCQ_ANSWER_KEY,
 })
 
 STUDENT_FEATURES = frozenset(FEATURE_LABELS) - FACULTY_FEATURES
