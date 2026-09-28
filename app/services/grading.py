@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.services.claude import generate_text
 from app.services.gemini import generate_content_from_file
 
-CLAUDE_GRADING_MODEL = "claude-sonnet-5"
+CLAUDE_GRADING_MODEL = "claude-sonnet-4-5"
 GEMINI_OCR_MODEL = "gemini-3.1-flash-lite"
 
 
@@ -236,15 +236,14 @@ def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: Li
     prompt = _GRADING_PROMPT_TEMPLATE.format(question_text=question_text, answer_text=answer_text, rubric=rubric)
 
     try:
-        # Raised from 20000 -> 60000 (2026-09-28): on claude-sonnet-5, adaptive
-        # thinking (on by default at "high" effort on this model, unlike 4.6)
-        # shares this same budget with the visible JSON answer — 20000 wasn't
-        # enough headroom for a long (35-question) paper, so the response got
-        # cut off mid-JSON and safe_json_parse failed with a confusing "No JSON
-        # object found" error. This only reduces the chance of truncation, it
-        # doesn't stop thinking tokens from being spent/billed — see grading.py's
-        # module notes for the fuller fix (explicitly disabling thinking).
-        text, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=60000)
+        # 20000 (back down from a brief 60000, 2026-09-28): the 60000 raise was a
+        # workaround for claude-sonnet-5's adaptive thinking (on by default at
+        # "high" effort) sharing this budget with the visible JSON answer and
+        # truncating long papers mid-JSON. Now that CLAUDE_GRADING_MODEL is back
+        # to claude-sonnet-4-5 — no adaptive thinking by default, same family as
+        # 4.6, which ran fine at 20000 for every prior real evaluation — that
+        # extra headroom is no longer needed.
+        text, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=20000)
         return text, {
             "call": "grade_with_claude", "model": CLAUDE_GRADING_MODEL,
             "input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"],
