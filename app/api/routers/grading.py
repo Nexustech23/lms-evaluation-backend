@@ -35,7 +35,11 @@ from app.services.grading import (
     safe_json_parse,
 )
 from app.services.imagekit import upload_file_to_imagekit
-from app.services.mcq_grading import apply_deterministic_mcq_overrides, parse_mcq_answers_from_ocr_text
+from app.services.mcq_grading import (
+    apply_deterministic_mcq_overrides,
+    ensure_mcq_answer_key,
+    parse_mcq_answers_from_ocr_text,
+)
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
@@ -139,6 +143,14 @@ async def _run_evaluation_job(
         })
         student_pdf_bytes = await asyncio.to_thread(_download_pdf, student_pdf_url)
 
+        # Step 2b — lazily resolve the MCQ answer key if this exam doesn't have one
+        # yet (its question paper predates the deterministic-MCQ feature — a fresh
+        # upload resolves it automatically, but papers are locked from re-upload
+        # once set, so an already-existing exam would otherwise never get one). A
+        # no-op (no AI call, no DB write) once the key is already saved — every
+        # evaluation after the first on a given exam just reads it back instantly.
+        mcq_answer_key: dict = await ensure_mcq_answer_key(db, exam, faculty_id, user_id)
+
         # Step 3 — OCR
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 30, "step": "Extracting student answer text"})
         # Only questions with a *confidently*-resolved answer key are asked for —
@@ -147,7 +159,6 @@ async def _run_evaluation_job(
         # (saved alongside the answer at key-resolution time) are passed through too,
         # so OCR can match a student who wrote out the answer's wording instead of
         # its letter — see extract_answer_text_with_gemini's docstring.
-        mcq_answer_key: dict = exam.get("mcq_answer_key") or {}
         confident_mcq_questions_with_options = {
             int(q_no): entry["options"]
             for q_no, entry in mcq_answer_key.items()

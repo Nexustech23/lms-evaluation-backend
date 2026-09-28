@@ -310,9 +310,13 @@ def apply_deterministic_mcq_overrides(
 
 
 # ============================================================
-# ORCHESTRATION — called once, from gemini.extract_and_patch_question_paper_text,
-# right after the question-paper text itself is saved. Best-effort: any failure
-# here must never affect the (already-successful) text extraction it follows.
+# ORCHESTRATION — called from two places:
+#  1. gemini.extract_and_patch_question_paper_text, right after the question-paper
+#     text itself is saved (a fresh upload).
+#  2. ensure_mcq_answer_key below (lazy path), for an exam whose paper was uploaded
+#     before this feature existed and so never got a key from path 1.
+# Best-effort in both cases: a failure here must never block the caller's own job
+# (text extraction, or grading).
 # ============================================================
 
 async def determine_and_save_mcq_answer_keys(
@@ -321,14 +325,16 @@ async def determine_and_save_mcq_answer_keys(
     paper_text: str,
     faculty_id: str,
     user_id: Optional[str] = None,
-) -> None:
-    """No-op (and no AI call) when the paper has no detectable MCQ questions —
-    a subjective-only exam never touches this pipeline or its cost."""
+) -> Dict[str, Dict[str, Any]]:
+    """Returns the resolved answer_key ({} if none/failed) so a caller on the lazy
+    path (ensure_mcq_answer_key) can use it immediately without a second DB read.
+    No-op (and no AI call) when the paper has no detectable MCQ questions — a
+    subjective-only exam never touches this pipeline or its cost."""
     try:
         mcq_questions = detect_mcq_questions(paper_text)
         if not mcq_questions:
             logger.info("[mcq-key] folder %s: no MCQ questions detected, skipping", folder_id)
-            return
+            return {}
 
         logger.info("[mcq-key] folder %s: resolving answer key for %d MCQ question(s)",
                     folder_id, len(mcq_questions))
@@ -375,9 +381,51 @@ async def determine_and_save_mcq_answer_keys(
                 institute_id=str(institute_id) if institute_id else None,
             )
 
+        return answer_key
+
     except Exception as e:
         # Best-effort — matches every other post-extraction step in this codebase
         # (record_ai_usage, save_grading_tokens_to_institute, etc.). A failure here
-        # must never surface as a question-paper-upload failure; the exam simply
-        # keeps no mcq_answer_key, and every question is graded by Claude as before.
+        # must never surface as a question-paper-upload failure, or as a grading
+        # failure on the lazy path; the exam simply keeps no mcq_answer_key, and
+        # every question is graded by Claude as before.
         logger.warning("[mcq-key] folder %s: failed (non-fatal): %s", folder_id, e)
+        return {}
+
+
+# ============================================================
+# LAZY PATH — call this from the evaluation job instead of reading
+# exam["mcq_answer_key"] directly. An exam whose question paper was uploaded
+# before this feature existed never had determine_and_save_mcq_answer_keys run
+# for it (that only fires on a fresh upload, and papers are locked from
+# re-upload once set — see app.utils.mcq_detect's callers). This makes the
+# fix apply itself automatically, the first time ANYONE evaluates a student on
+# such an exam, with no button to click and no per-exam action ever needed —
+# every evaluation after that first one just reads the now-saved key, same as
+# the fresh-upload path always did.
+#
+# Concurrency note: if many students are evaluated in a near-simultaneous burst
+# (e.g. "Evaluate All") on an exam with no key yet, more than one job can see
+# it missing and resolve it independently — wasteful (a handful of redundant
+# Claude calls instead of one) but not incorrect, since they compute the same
+# deterministic result and the last write wins. Not worth a cross-process lock
+# for a one-time cost that only recurs if an exam is *never* evaluated.
+# ============================================================
+
+async def ensure_mcq_answer_key(
+    db: AsyncIOMotorDatabase,
+    exam: Dict[str, Any],
+    faculty_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    existing = exam.get("mcq_answer_key")
+    if existing:
+        return existing
+
+    paper_text = (exam.get("question_paper") or {}).get("text")
+    if not paper_text:
+        return {}
+
+    logger.info("[mcq-key] folder %s: no answer key yet — resolving lazily at evaluation time",
+                exam["_id"])
+    return await determine_and_save_mcq_answer_keys(db, exam["_id"], paper_text, faculty_id, user_id)
