@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # deliverable mailbox — it's only ever used as the student's login id.
     STUDENT_EMAIL_DOMAIN: str = "students.local"
 
+    # Single source of truth for USD->INR display on the AI-usage/activity-log cost
+    # columns (app.utils.ai_pricing.to_inr) — update this one value to refresh the
+    # rate everywhere it's shown, rather than duplicating it per frontend component.
+    # An internal display estimate, not a live/billing-grade FX rate.
+    USD_TO_INR_RATE: float = 88.0
+
     GEMINI_API_KEY: str = ""
     IMAGEKIT_PUBLIC_KEY: str = ""
     IMAGEKIT_PRIVATE_KEY: str = ""
