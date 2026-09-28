@@ -13,7 +13,16 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.config import settings
+
 logger = logging.getLogger("ai_pricing")
+
+
+def to_inr(usd: float) -> float:
+    """USD -> INR for display only (Activity Logs / AI Usage cost columns), using the
+    single rate in settings.USD_TO_INR_RATE — see that field's comment. Not used for
+    any cost estimation math, only for showing an existing cost_usd figure in rupees."""
+    return (usd or 0) * settings.USD_TO_INR_RATE
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,7 @@ from app.core.redis_client import bust_account_state, revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
 from app.models.ai_usage_event import FACULTY_FEATURES, STUDENT_FEATURES, feature_label
+from app.utils.ai_pricing import to_inr
 from app.models.user import serialize_doc
 from app.schemas.profile import (
     ChangePasswordRequest,
@@ -705,6 +706,7 @@ async def get_all_faculty_activity_logs(
             "output_tokens": doc.get("output_tokens"),
             "total_tokens": doc.get("total_tokens"),
             "cost_usd": round(doc.get("cost_usd") or 0, 4),
+            "cost_inr": round(to_inr(doc.get("cost_usd") or 0), 2),
             "created_at": doc.get("created_at"),
         })
 
@@ -1409,6 +1411,7 @@ async def get_self_learner_activity_logs(
             "output_tokens": doc.get("output_tokens"),
             "total_tokens": doc.get("total_tokens"),
             "cost_usd": round(doc.get("cost_usd") or 0, 4),
+            "cost_inr": round(to_inr(doc.get("cost_usd") or 0), 2),
             "created_at": doc.get("created_at"),
         })
 
