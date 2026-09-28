@@ -236,7 +236,15 @@ def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: Li
     prompt = _GRADING_PROMPT_TEMPLATE.format(question_text=question_text, answer_text=answer_text, rubric=rubric)
 
     try:
-        text, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=20000)
+        # Raised from 20000 -> 60000 (2026-09-28): on claude-sonnet-5, adaptive
+        # thinking (on by default at "high" effort on this model, unlike 4.6)
+        # shares this same budget with the visible JSON answer — 20000 wasn't
+        # enough headroom for a long (35-question) paper, so the response got
+        # cut off mid-JSON and safe_json_parse failed with a confusing "No JSON
+        # object found" error. This only reduces the chance of truncation, it
+        # doesn't stop thinking tokens from being spent/billed — see grading.py's
+        # module notes for the fuller fix (explicitly disabling thinking).
+        text, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=60000)
         return text, {
             "call": "grade_with_claude", "model": CLAUDE_GRADING_MODEL,
             "input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"],
