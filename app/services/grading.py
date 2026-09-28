@@ -184,11 +184,17 @@ SECTION 3 — COURSE OUTCOME (CO) GRADING RULES
 - If a question has no COs defined in the rubric, return an empty "cos": [] for it.
 - Never invent CO codes or marks not present in the rubric.
 
-SECTION 4 — FEEDBACK QUALITY
-- Every question (answered or not) needs detailed "reasoning", "feedback", and "improvement" text — \
-minimum 3-4 sentences each.
-- Each parameter's "remarks" must be descriptive, not a one-word judgement.
-- Explicitly reference how marks were allocated per parameter and against the rubric's criteria.
+SECTION 4 — FEEDBACK LENGTH (scale to the question's marks — this is about word count, \
+never about the awarded marks, which must still be exactly as accurate as full-length feedback would give)
+- 1-2 mark questions (this covers every MCQ question): "reasoning" and "feedback" are ONE short sentence \
+each — for a correct MCQ answer, "reasoning" may be as short as "Correct option selected." \
+"improvement" is "" (empty) when the answer is fully correct, otherwise one short sentence. Each \
+parameter's "remarks" is a short phrase (3-6 words), not a paragraph.
+- 3-5 mark questions: 1-2 sentences each for "reasoning", "feedback", and "improvement".
+- 6+ mark questions: up to 2-3 sentences each, only where genuinely needed to justify the score.
+- Every question still needs all of "reasoning", "feedback", "improvement", and every parameter's \
+"remarks" populated (never omit a field) — these limits are maximums, not a reason to pad short answers \
+out to them.
 
 SECTION 5 — OUTPUT RULES
 - Every rubric question must appear in "questionwise_marking", in order.
