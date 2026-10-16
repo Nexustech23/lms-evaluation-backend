@@ -12,7 +12,8 @@ from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.api.deps import get_current_identity
+from app.api.answer_access import require_answer_access, require_exam_access
 from app.core.queue import enqueue
 from app.db.mongodb import get_database
 from app.models.answer import validate_questionwise
@@ -39,20 +40,9 @@ async def upload_answer_script(
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    user, faculty_id, error = await get_current_user_and_faculty_details(identity, db)
-    if error:
-        message, code = error
-        raise HTTPException(status_code=code, detail=message)
-
-    if not ObjectId.is_valid(faculty_id):
-        raise HTTPException(status_code=400, detail="Invalid faculty_id")
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
-
-    folder_object_id = ObjectId(folder_id)
-    folder = await db["newsavedDocs"].find_one({"_id": folder_object_id})
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
+    folder = await require_exam_access(identity, db, folder_id)
+    folder_object_id = folder["_id"]
+    faculty_id = ObjectId(str(folder["faculty_id"]))
 
     answer_script_url = payload.answer_script_url
     file_id = payload.fileId
@@ -84,15 +74,19 @@ async def upload_answer_script(
 # =====================================================
 
 @router.put("/rename-file")
-async def rename_file(payload: RenameFileRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def rename_file(
+    payload: RenameFileRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     answer_id = payload.answer_id
     new_filename = payload.newFilename
 
-    if not answer_id or not ObjectId.is_valid(answer_id):
-        raise HTTPException(status_code=400, detail="Invalid answer_id")
+    answer = await require_answer_access(identity, db, answer_id)
 
     result = await db["answerDetails"].update_one(
-        {"_id": ObjectId(answer_id)}, {"$set": {"filename": new_filename, "updated_at": datetime.now(timezone.utc)}}
+        {"_id": answer["_id"], "exam_id": answer["exam_id"]},
+        {"$set": {"filename": new_filename, "updated_at": datetime.now(timezone.utc)}}
     )
     if result.modified_count == 1:
         return {"success": True, "message": "Filename updated"}
@@ -101,15 +95,14 @@ async def rename_file(payload: RenameFileRequest, db: AsyncIOMotorDatabase = Dep
 
 
 @router.delete("/delete-file")
-async def delete_file(payload: DeleteFileRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
+async def delete_file(
+    payload: DeleteFileRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
     answer_id = payload.answer_id
-    if not answer_id or not ObjectId.is_valid(answer_id):
-        raise HTTPException(status_code=400, detail="Invalid answer_id")
-
-    answer_object_id = ObjectId(answer_id)
-    answer_doc = await db["answerDetails"].find_one({"_id": answer_object_id})
-    if not answer_doc:
-        raise HTTPException(status_code=404, detail="Answer script not found")
+    answer_doc = await require_answer_access(identity, db, answer_id)
+    answer_object_id = answer_doc["_id"]
 
     deleted_files: List[str] = []
     errors: List[str] = []
@@ -128,7 +121,7 @@ async def delete_file(payload: DeleteFileRequest, db: AsyncIOMotorDatabase = Dep
         except Exception as e:
             errors.append(str(e))
 
-    await db["answerDetails"].delete_one({"_id": answer_object_id})
+    await db["answerDetails"].delete_one({"_id": answer_object_id, "exam_id": answer_doc["exam_id"]})
 
     return {"success": True, "deleted_from_imagekit": deleted_files, "errors": errors}
 
@@ -138,11 +131,13 @@ async def delete_file(payload: DeleteFileRequest, db: AsyncIOMotorDatabase = Dep
 # =====================================================
 
 @router.get("/get-answer-scripts/{folder_id}")
-async def get_answer_scripts(folder_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid exam_id")
-
-    exam_object_id = ObjectId(folder_id)
+async def get_answer_scripts(
+    folder_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    exam = await require_exam_access(identity, db, folder_id, allow_institute_read=True)
+    exam_object_id = exam["_id"]
     answer_scripts = [a async for a in db["answerDetails"].find({"exam_id": exam_object_id})]
 
     for script in answer_scripts:
@@ -175,22 +170,20 @@ async def imagekit_auth():
 async def save_self_evaluation(
     background_tasks: BackgroundTasks,
     payload: SelfEvaluationRequest,
+    identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     answer_id = payload.answer_id
     questionwise_marking = payload.questionwise_marking
 
-    if not answer_id or not ObjectId.is_valid(answer_id):
-        raise HTTPException(status_code=400, detail="Invalid answer_id")
+    answer = await require_answer_access(identity, db, answer_id)
 
     total_final_marks = sum(
         (q.get("ai_awarded_marks", 0) + q.get("grace_marks", 0)) for q in questionwise_marking
     )
 
-    answer = await db["answerDetails"].find_one({"_id": ObjectId(answer_id)}, {"exam_id": 1})
-
     result = await db["answerDetails"].update_one(
-        {"_id": ObjectId(answer_id)},
+        {"_id": answer["_id"], "exam_id": answer["exam_id"]},
         {"$set": {
             "questionwise_marking": questionwise_marking,
             "total_final_marks": total_final_marks,
@@ -232,20 +225,8 @@ async def manual_marks_entry(
     as before. Either way, writes to answerDetails with a synthetic
     "MANUAL-<student_id>" filename.
     """
-    user, faculty_id, error = await get_current_user_and_faculty_details(identity, db)
-    if error:
-        message, code = error
-        raise HTTPException(status_code=code, detail=message)
-
-    if not ObjectId.is_valid(exam_id):
-        raise HTTPException(status_code=400, detail="Invalid exam_id")
-
-    exam = await db["newsavedDocs"].find_one({"_id": ObjectId(exam_id)})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    if exam.get("faculty_id") != ObjectId(faculty_id):
-        raise HTTPException(status_code=403, detail="You are not assigned to this exam's subject")
+    exam = await require_exam_access(identity, db, exam_id)
+    faculty_id = ObjectId(str(exam["faculty_id"]))
 
     evaluation = await db["evaluationDetails"].find_one({"exam_id": ObjectId(exam_id)})
     rubric_questions = evaluation.get("questionEvaluationDetails") if evaluation else None

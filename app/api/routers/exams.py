@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import zipfile
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -20,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.api.answer_access import require_exam_access
 from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
@@ -145,10 +147,12 @@ async def upload_question_paper(
     budget = await check_institute_token_budget(db, str(faculty_id), ["gemini"])
 
     now = datetime.now(timezone.utc)
+    paper_version = str(uuid.uuid4())
     await db["newsavedDocs"].update_one(
         {"_id": folder_object_id},
         {"$set": {
             "question_paper": {
+                "version": paper_version,
                 "url": questionpaper_url,
                 "fileId": file_id,
                 "filename": filename,
@@ -158,13 +162,16 @@ async def upload_question_paper(
                 "text_error": None if budget["allowed"] else budget["message"],
             },
             "updated_at": now,
+        }, "$unset": {
+            "mcq_answer_key": "", "mcq_answer_key_version": "",
+            "mcq_answer_key_at": "", "mcq_answer_key_needs_review_count": "",
         }},
     )
 
     if budget["allowed"]:
         await enqueue(
             "run_extract_question_paper_text",
-            str(folder_object_id), questionpaper_url, str(faculty_id), filename, str(user["_id"]),
+            str(folder_object_id), questionpaper_url, str(faculty_id), filename, str(user["_id"]), paper_version,
             background_tasks=background_tasks,
         )
 
@@ -450,16 +457,9 @@ async def update_exam(
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
+    folder = await require_exam_access(identity, db, folder_id)
+    folder_object_id = folder["_id"]
     data = dict(await request.form())
-    user, faculty_id = await _require_faculty(identity, db)
-
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
-
-    folder_object_id = ObjectId(folder_id)
-    folder = await db["newsavedDocs"].find_one({"_id": folder_object_id})
-    if not folder:
-        raise HTTPException(status_code=404, detail="Exam not found")
 
     if folder.get("question_paper", {}).get("url"):
         raise HTTPException(status_code=400, detail="Cannot edit examination details after question paper upload")
@@ -496,7 +496,15 @@ async def update_exam(
     if len(update_data) == 1:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    result = await db["newsavedDocs"].update_one({"_id": folder_object_id}, {"$set": update_data})
+    result = await db["newsavedDocs"].update_one(
+        {"_id": folder_object_id, "faculty_id": folder["faculty_id"]},
+        {"$set": update_data},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Exam changed or was deleted. Refresh and try again.",
+        )
     if result.modified_count == 0:
         return {"message": "No changes made"}
 
@@ -508,37 +516,44 @@ async def update_exam(
 # =====================================================
 
 @router.put("/rename-folder")
-async def rename_folder(payload: RenameFolderRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
-    exam_id = payload.id
+async def rename_folder(
+    payload: RenameFolderRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    exam = await require_exam_access(identity, db, payload.id)
     new_foldername = payload.newFoldername
 
-    if not ObjectId.is_valid(exam_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
-
     result = await db["newsavedDocs"].update_one(
-        {"_id": ObjectId(exam_id)}, {"$set": {"folder_name": new_foldername}}
+        {"_id": exam["_id"], "faculty_id": exam["faculty_id"]},
+        {"$set": {"folder_name": new_foldername}},
     )
-    if result.modified_count == 1:
-        return {"success": True, "message": "Folder renamed successfully!"}
-
-    raise HTTPException(status_code=500, detail="Folder rename failed.")
+    if result.matched_count == 0:
+        raise HTTPException(status_code=409, detail="Exam changed or was deleted. Refresh and try again.")
+    return {"success": True, "message": "Folder renamed successfully!"}
 
 
 @router.delete("/delete-folder")
-async def delete_folder(payload: DeleteFolderRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
-    exam_id = payload.id
-    if not ObjectId.is_valid(exam_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
+async def delete_folder(
+    payload: DeleteFolderRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    exam = await require_exam_access(identity, db, payload.id)
+    exam_object_id = exam["_id"]
+    delete_result = await db["newsavedDocs"].delete_one(
+        {"_id": exam_object_id, "faculty_id": exam["faculty_id"]}
+    )
+    # Do not remove children if the exam was deleted or reassigned since authorization.
+    if delete_result.deleted_count != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Exam changed or was already deleted. Refresh and try again.",
+        )
 
-    exam_object_id = ObjectId(exam_id)
-    delete_result = await db["newsavedDocs"].delete_one({"_id": exam_object_id})
     await db["answerDetails"].delete_many({"exam_id": exam_object_id})
     await db["evaluationDetails"].delete_many({"exam_id": exam_object_id})
-
-    if delete_result.deleted_count == 1:
-        return {"success": True, "message": "Folder deleted successfully!"}
-
-    raise HTTPException(status_code=500, detail="Folder deletion failed.")
+    return {"success": True, "message": "Folder deleted successfully!"}
 
 
 # =====================================================
@@ -608,14 +623,13 @@ async def download_folder(folder_id: str, db: AsyncIOMotorDatabase = Depends(get
 # =====================================================
 
 @router.get("/folder-details/{folder_id}")
-async def get_folder_details(folder_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
-
-    folder_object_id = ObjectId(folder_id)
-    folder = await db["newsavedDocs"].find_one({"_id": folder_object_id})
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
+async def get_folder_details(
+    folder_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    folder = await require_exam_access(identity, db, folder_id, allow_institute_read=True)
+    folder_object_id = folder["_id"]
 
     answers = [a async for a in db["answerDetails"].find({"exam_id": folder_object_id})]
 
@@ -676,19 +690,22 @@ async def get_folder_details(folder_id: str, db: AsyncIOMotorDatabase = Depends(
 
 @router.post("/set-archive-status/{folder_id}")
 async def set_archive_status(
-    folder_id: str, payload: SetArchiveStatusRequest, db: AsyncIOMotorDatabase = Depends(get_database)
+    folder_id: str,
+    payload: SetArchiveStatusRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
+    exam = await require_exam_access(identity, db, folder_id)
     is_archived = payload.is_archived
-
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
 
     now = datetime.now(timezone.utc)
     update_data = {"is_archived": is_archived, "updated_at": now}
     update_data["archived_at" if is_archived else "restored_at"] = now
 
-    result = await db["newsavedDocs"].update_one({"_id": ObjectId(folder_id)}, {"$set": update_data})
+    result = await db["newsavedDocs"].update_one(
+        {"_id": exam["_id"], "faculty_id": exam["faculty_id"]}, {"$set": update_data}
+    )
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Folder not found or unauthorized")
+        raise HTTPException(status_code=409, detail="Exam changed or was deleted. Refresh and try again.")
 
     return {"success": True, "message": f"Folder {'archived' if is_archived else 'restored'} successfully"}

@@ -25,3 +25,12 @@ async def update_job(prefix: str, job_id: str, patch: Dict[str, Any]) -> None:
 async def get_job(prefix: str, job_id: str) -> Optional[Dict[str, Any]]:
     data = await get_redis().get(f"{prefix}{job_id}")
     return json.loads(data) if data else None
+
+
+async def get_owned_job(prefix: str, job_id: str, identity: dict) -> Optional[Dict[str, Any]]:
+    """Fail closed for foreign jobs and legacy jobs without an authenticated owner."""
+    job = await get_job(prefix, job_id)
+    user_id = identity.get("user_id")
+    if not job or not user_id or job.get("owner_user_id") != str(user_id):
+        return None
+    return job

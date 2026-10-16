@@ -32,8 +32,7 @@ async def test_get_evaluation_details_requires_auth(client):
 async def test_get_evaluation_details_not_found(superadmin_client, client_factory):
     fc = await _faculty_client(superadmin_client, client_factory)
     resp = await fc.get(f"/evaluation-details/{ObjectId()}")
-    assert resp.status_code == 200
-    assert resp.json()["evaluation"] is None
+    assert resp.status_code == 404
 
 
 async def test_save_evaluation_details_rejects_empty_questions(superadmin_client, client_factory):
@@ -52,18 +51,22 @@ async def test_save_evaluation_details_rejects_zero_total_marks(superadmin_clien
     assert resp.status_code == 422
 
 
-async def test_save_evaluation_details_rejects_min_greater_than_max(superadmin_client, client_factory):
+async def test_save_evaluation_details_rejects_min_greater_than_max(superadmin_client, client_factory, test_db):
     fc = await _faculty_client(superadmin_client, client_factory)
+    faculty = await test_db["facultyDetails"].find_one({})
+    exam = await test_db["newsavedDocs"].insert_one({"faculty_id": faculty["_id"], "covered_cos": ["CO1"]})
     bad_question = {**VALID_QUESTION, "minMarks": 20}
-    resp = await fc.post(f"/evaluation-details/{ObjectId()}", json={
+    resp = await fc.post(f"/evaluation-details/{exam.inserted_id}", json={
         "questionEvaluationDetails": [bad_question], "totalMarks": 10,
     })
     assert resp.status_code == 400
 
 
-async def test_save_and_get_evaluation_details_roundtrip(superadmin_client, client_factory):
+async def test_save_and_get_evaluation_details_roundtrip(superadmin_client, client_factory, test_db):
     fc = await _faculty_client(superadmin_client, client_factory)
-    folder_id = str(ObjectId())
+    faculty = await test_db["facultyDetails"].find_one({})
+    exam = await test_db["newsavedDocs"].insert_one({"faculty_id": faculty["_id"], "covered_cos": ["CO1"]})
+    folder_id = str(exam.inserted_id)
 
     saved = await fc.post(f"/evaluation-details/{folder_id}", json={
         "questionEvaluationDetails": [VALID_QUESTION], "totalMarks": 10,

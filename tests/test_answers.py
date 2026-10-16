@@ -45,8 +45,9 @@ async def test_upload_answer_script_success(superadmin_client, client_factory, t
     assert resp.json()["filename"] == "a.pdf"
 
 
-async def test_rename_file_rejects_invalid_id(superadmin_client):
-    resp = await superadmin_client.put("/rename-file", json={"answer_id": "not-valid", "newFilename": "x.pdf"})
+async def test_rename_file_rejects_invalid_id(superadmin_client, client_factory, test_db):
+    faculty_client, _, _ = await _faculty_with_folder(superadmin_client, client_factory, test_db)
+    resp = await faculty_client.put("/rename-file", json={"answer_id": "not-valid", "newFilename": "x.pdf"})
     assert resp.status_code == 400
 
 
@@ -55,9 +56,10 @@ async def test_rename_file_requires_new_filename(superadmin_client):
     assert resp.status_code == 422
 
 
-async def test_rename_file_success(superadmin_client, test_db):
-    answer = await test_db["answerDetails"].insert_one({"filename": "old.pdf"})
-    resp = await superadmin_client.put("/rename-file", json={
+async def test_rename_file_success(superadmin_client, client_factory, test_db):
+    faculty_client, folder_id, _ = await _faculty_with_folder(superadmin_client, client_factory, test_db)
+    answer = await test_db["answerDetails"].insert_one({"filename": "old.pdf", "exam_id": ObjectId(folder_id)})
+    resp = await faculty_client.put("/rename-file", json={
         "answer_id": str(answer.inserted_id), "newFilename": "new.pdf",
     })
     assert resp.status_code == 200
@@ -65,14 +67,16 @@ async def test_rename_file_success(superadmin_client, test_db):
     assert updated["filename"] == "new.pdf"
 
 
-async def test_delete_file_not_found(superadmin_client):
-    resp = await superadmin_client.request("DELETE", "/delete-file", json={"answer_id": str(ObjectId())})
+async def test_delete_file_not_found(superadmin_client, client_factory, test_db):
+    faculty_client, _, _ = await _faculty_with_folder(superadmin_client, client_factory, test_db)
+    resp = await faculty_client.request("DELETE", "/delete-file", json={"answer_id": str(ObjectId())})
     assert resp.status_code == 404
 
 
-async def test_delete_file_success(superadmin_client, test_db):
-    answer = await test_db["answerDetails"].insert_one({"filename": "x.pdf"})
-    resp = await superadmin_client.request("DELETE", "/delete-file", json={"answer_id": str(answer.inserted_id)})
+async def test_delete_file_success(superadmin_client, client_factory, test_db):
+    faculty_client, folder_id, _ = await _faculty_with_folder(superadmin_client, client_factory, test_db)
+    answer = await test_db["answerDetails"].insert_one({"filename": "x.pdf", "exam_id": ObjectId(folder_id)})
+    resp = await faculty_client.request("DELETE", "/delete-file", json={"answer_id": str(answer.inserted_id)})
     assert resp.status_code == 200
     remaining = await test_db["answerDetails"].find_one({"_id": answer.inserted_id})
     assert remaining is None
@@ -88,9 +92,10 @@ async def test_get_answer_scripts(superadmin_client, client_factory, test_db):
     assert resp.json()["count"] == 1
 
 
-async def test_save_self_evaluation(superadmin_client, test_db):
-    answer = await test_db["answerDetails"].insert_one({"filename": "x.pdf"})
-    resp = await superadmin_client.post("/save-self-evaluation", json={
+async def test_save_self_evaluation(superadmin_client, client_factory, test_db):
+    faculty_client, folder_id, _ = await _faculty_with_folder(superadmin_client, client_factory, test_db)
+    answer = await test_db["answerDetails"].insert_one({"filename": "x.pdf", "exam_id": ObjectId(folder_id)})
+    resp = await faculty_client.post("/save-self-evaluation", json={
         "answer_id": str(answer.inserted_id),
         "questionwise_marking": [{"ai_awarded_marks": 5, "grace_marks": 1}, {"ai_awarded_marks": 3, "grace_marks": 0}],
     })

@@ -48,7 +48,7 @@ from app.services.docx_from_html import generate_docx_from_html, process_and_upl
 from app.services.docx_from_text import build_docx
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.imagekit import delete_imagekit_file, upload_file_to_imagekit
-from app.services.job_store import get_job, set_job, update_job
+from app.services.job_store import get_owned_job, set_job, update_job
 from app.models.ai_usage_event import Feature, Provider
 from app.services.ai_usage import record_ai_usage
 from app.utils.token_usage import (
@@ -430,7 +430,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             f"/question_papers/{faculty_id}", ["question_paper", params["subject_name"]],
         )
 
-        await set_job(QP_JOB_PREFIX, job_id, {
+        await update_job(QP_JOB_PREFIX, job_id, {
             "status": "completed",
             "step": "done",
             "paperText": paper_text,
@@ -453,7 +453,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
     except Exception as e:
         logging.error("[qp:%s] Job failed: %s", job_id, e, exc_info=True)
-        await set_job(QP_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
+        await update_job(QP_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
 
 
 # ============================================================
@@ -541,6 +541,7 @@ async def generate_question_paper_ai(
         job_id = str(uuid.uuid4())
         await set_job(QP_JOB_PREFIX, job_id, {
             "status": "queued", "step": "starting", "job_id": job_id, "faculty_id": str(faculty_id),
+            "owner_user_id": str(identity["user_id"]),
         })
 
         params = {
@@ -581,8 +582,10 @@ async def generate_question_paper_ai(
 
 
 @router.get("/question-paper/generate-ai/status/{job_id}")
-async def generate_question_paper_status(job_id: str):
-    job = await get_job(QP_JOB_PREFIX, job_id)
+async def generate_question_paper_status(
+    job_id: str, identity: dict = Depends(get_current_identity),
+):
+    job = await get_owned_job(QP_JOB_PREFIX, job_id, identity)
     if job is None:
         return JSONResponse(status_code=404, content={"error": "Job not found or expired."})
 
