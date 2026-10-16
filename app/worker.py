@@ -56,12 +56,12 @@ async def run_ingest_job(ctx, job_id, file_bytes, filename, course_title, course
     await _run_ingest_job(job_id, file_bytes, filename, course_title, course_code, user_id, job_prefix)
 
 
-async def run_extract_question_paper_text(ctx, folder_id, question_paper_url, faculty_id, filename, user_id=None):
+async def run_extract_question_paper_text(ctx, folder_id, question_paper_url, faculty_id, filename, user_id=None, paper_version=None):
     from app.db.mongodb import get_database
     from app.services.gemini import extract_and_patch_question_paper_text
 
     await extract_and_patch_question_paper_text(
-        get_database(), ObjectId(folder_id), question_paper_url, faculty_id, filename, user_id
+        get_database(), ObjectId(folder_id), question_paper_url, faculty_id, filename, user_id, paper_version
     )
 
 

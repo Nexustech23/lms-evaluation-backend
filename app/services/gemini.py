@@ -435,7 +435,13 @@ async def extract_and_patch_question_paper_text(
     faculty_id: str,
     filename: str = "file.pdf",
     user_id: Optional[str] = None,
+    paper_version: Optional[str] = None,
 ) -> None:
+    # Old queued jobs can update only an unversioned paper with the same URL.
+    paper_filter = {"_id": folder_id, "question_paper.version": paper_version,
+                    "question_paper.url": question_paper_url}
+    if not await db["newsavedDocs"].find_one(paper_filter):
+        return
     try:
         logging.info("[qp-extract] Downloading file for folder %s", folder_id)
 
@@ -449,9 +455,10 @@ async def extract_and_patch_question_paper_text(
         )
 
         now = datetime.now(timezone.utc)
-        await db["newsavedDocs"].update_one(
-            {"_id": folder_id},
-            {"$set": {"question_paper.text": extracted_text, "question_paper.text_at": now, "updated_at": now}},
+        result = await db["newsavedDocs"].update_one(
+            paper_filter,
+            {"$set": {"question_paper.text": extracted_text, "question_paper.text_at": now,
+                      "question_paper.text_error": None, "updated_at": now}},
         )
 
         # Best-effort, non-fatal — resolves the MCQ answer key once for the whole
@@ -460,7 +467,11 @@ async def extract_and_patch_question_paper_text(
         # A no-op if the paper has no MCQ questions.
         try:
             from app.services.mcq_grading import determine_and_save_mcq_answer_keys
-            await determine_and_save_mcq_answer_keys(db, folder_id, extracted_text, faculty_id, user_id)
+            if result.matched_count:
+                await determine_and_save_mcq_answer_keys(
+                    db, folder_id, extracted_text, faculty_id, user_id,
+                    paper_version=paper_version, paper_url=question_paper_url,
+                )
         except Exception as e:
             logging.warning("[qp-extract] MCQ answer-key resolution failed (non-fatal): %s", e)
 
@@ -480,13 +491,13 @@ async def extract_and_patch_question_paper_text(
     except requests.RequestException as e:
         logging.error("[qp-extract] File download failed: %s", e)
         await db["newsavedDocs"].update_one(
-            {"_id": folder_id},
+            paper_filter,
             {"$set": {"question_paper.text_error": str(e), "updated_at": datetime.now(timezone.utc)}},
         )
 
     except Exception as e:
         logging.error("[qp-extract] Extraction failed: %s", e)
         await db["newsavedDocs"].update_one(
-            {"_id": folder_id},
+            paper_filter,
             {"$set": {"question_paper.text_error": str(e), "updated_at": datetime.now(timezone.utc)}},
         )

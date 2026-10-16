@@ -10,7 +10,8 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.api.deps import get_current_identity
+from app.api.answer_access import require_exam_access
 from app.db.mongodb import get_database
 from app.models.evaluation import validate_evaluation_details
 from app.schemas.evaluation import SaveEvaluationDetailsRequest
@@ -19,11 +20,13 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["evaluati
 
 
 @router.get("/evaluation-details/{folder_id}")
-async def get_evaluation_details(folder_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid exam_id")
-
-    evaluation = await db["evaluationDetails"].find_one({"exam_id": ObjectId(folder_id)})
+async def get_evaluation_details(
+    folder_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    exam = await require_exam_access(identity, db, folder_id, allow_institute_read=True)
+    evaluation = await db["evaluationDetails"].find_one({"exam_id": exam["_id"]})
     if not evaluation:
         return {"success": True, "message": "No evaluation details found", "evaluation": None}
 
@@ -41,30 +44,15 @@ async def save_evaluation_details(
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    user, faculty_id, error = await get_current_user_and_faculty_details(identity, db)
-    if error:
-        message, code = error
-        raise HTTPException(status_code=code, detail=message)
-
-    if not ObjectId.is_valid(faculty_id):
-        raise HTTPException(status_code=400, detail="Invalid faculty_id")
-
-    faculty_object_id = ObjectId(faculty_id)
-
-    if not folder_id or not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Valid exam_id is required")
-
-    exam_object_id = ObjectId(folder_id)
+    exam = await require_exam_access(identity, db, folder_id)
+    faculty_object_id = ObjectId(str(exam["faculty_id"]))
+    exam_object_id = exam["_id"]
     total_marks = payload.totalMarks
 
     try:
         validated_details = validate_evaluation_details(payload.questionEvaluationDetails)
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e) or "questionEvaluationDetails is invalid")
-
-    exam = await db["newsavedDocs"].find_one({"_id": exam_object_id}, {"covered_cos": 1})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
 
     covered_cos = set(exam.get("covered_cos") or [])
     used_cos = {co["co_code"] for q in validated_details for co in q["cos"]}

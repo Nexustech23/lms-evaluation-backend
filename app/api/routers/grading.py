@@ -40,7 +40,8 @@ from app.services.mcq_grading import (
     ensure_mcq_answer_key,
     parse_mcq_answers_from_ocr_text,
 )
-from app.services.job_store import get_job, set_job, update_job
+from app.services.job_store import get_owned_job, set_job, update_job
+from app.services.paper_version import paper_snapshot_filter
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
 from app.services.ai_usage import record_ai_usage
@@ -73,7 +74,7 @@ async def _resolve_institute_id(db: AsyncIOMotorDatabase, exam: dict) -> ObjectI
 
 
 async def _fail(job_id: str, message: str) -> None:
-    await set_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": message})
+    await update_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": message})
 
 
 # ============================================================
@@ -94,7 +95,7 @@ async def _run_evaluation_job(
         exam_object_id = ObjectId(exam_id)
         answer_object_id = ObjectId(answer_id)
 
-        await set_job(EVAL_JOB_PREFIX, job_id, {"status": "processing", "progress": 5, "step": "Fetching exam data"})
+        await update_job(EVAL_JOB_PREFIX, job_id, {"status": "processing", "progress": 5, "step": "Fetching exam data"})
 
         exam = await db["newsavedDocs"].find_one({"_id": exam_object_id})
         if not exam:
@@ -138,7 +139,7 @@ async def _run_evaluation_job(
         institute_id_str = str(institute_id) if institute_id else None
 
         # Step 2 — download
-        await set_job(EVAL_JOB_PREFIX, job_id, {
+        await update_job(EVAL_JOB_PREFIX, job_id, {
             "status": "processing", "progress": 15, "step": "Downloading student answer PDF",
         })
         student_pdf_bytes = await asyncio.to_thread(_download_pdf, student_pdf_url)
@@ -150,6 +151,9 @@ async def _run_evaluation_job(
         # no-op (no AI call, no DB write) once the key is already saved — every
         # evaluation after the first on a given exam just reads it back instantly.
         mcq_answer_key: dict = await ensure_mcq_answer_key(db, exam, faculty_id, user_id)
+        paper_guard = paper_snapshot_filter(exam_object_id, exam.get("question_paper") or {})
+        if not await db["newsavedDocs"].find_one(paper_guard):
+            raise RuntimeError("Question paper changed. Start evaluation again for the current paper.")
 
         # Step 3 — OCR
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 30, "step": "Extracting student answer text"})
@@ -294,6 +298,8 @@ async def _run_evaluation_job(
         token_usage = aggregate_grading_tokens(gemini_calls, claude_calls)
 
         # Step 11 — persist to answerDetails
+        if not await db["newsavedDocs"].find_one(paper_guard):
+            raise RuntimeError("Question paper changed. Start evaluation again for the current paper.")
         now = datetime.now(timezone.utc)
         await db["answerDetails"].update_one(
             {"_id": answer_object_id},
@@ -323,7 +329,7 @@ async def _run_evaluation_job(
         await save_grading_tokens_to_institute(db, institute_id, token_usage)
 
         # Step 13 — final job payload
-        await set_job(EVAL_JOB_PREFIX, job_id, {
+        await update_job(EVAL_JOB_PREFIX, job_id, {
             "status": "done",
             "progress": 100,
             "step": "Completed",
@@ -354,11 +360,11 @@ async def _run_evaluation_job(
 
     except RuntimeError as e:
         logging.error("[%s] Job stopped (runtime): %s", job_id, e)
-        await set_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": str(e), "user_message": str(e)})
+        await update_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": str(e), "user_message": str(e)})
 
     except Exception as e:
         logging.error("[%s] Job failed: %s", job_id, e, exc_info=True)
-        await set_job(EVAL_JOB_PREFIX, job_id, {
+        await update_job(EVAL_JOB_PREFIX, job_id, {
             "status": "error",
             "message": str(e),
             "user_message": "Something went wrong during evaluation. Please try again later.",
@@ -397,7 +403,10 @@ async def evaluate_answer_script(
         return JSONResponse(status_code=402, content={"error": budget["message"]})
 
     job_id = str(uuid.uuid4())
-    await set_job(EVAL_JOB_PREFIX, job_id, {"status": "processing", "progress": 0, "step": "Starting evaluation"})
+    await set_job(EVAL_JOB_PREFIX, job_id, {
+        "status": "processing", "progress": 0, "step": "Starting evaluation",
+        "owner_user_id": str(identity["user_id"]),
+    })
 
     await enqueue(
         "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
@@ -415,8 +424,10 @@ async def evaluate_answer_script(
 
 
 @router.get("/evaluate-answer-script/status/{job_id}")
-async def get_evaluation_status(job_id: str):
-    job = await get_job(EVAL_JOB_PREFIX, job_id)
+async def get_evaluation_status(
+    job_id: str, identity: dict = Depends(get_current_identity),
+):
+    job = await get_owned_job(EVAL_JOB_PREFIX, job_id, identity)
     if job is None:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
     return job

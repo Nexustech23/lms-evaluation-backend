@@ -325,12 +325,22 @@ async def determine_and_save_mcq_answer_keys(
     paper_text: str,
     faculty_id: str,
     user_id: Optional[str] = None,
+    *, paper_version: Optional[str] = None, paper_url: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Returns the resolved answer_key ({} if none/failed) so a caller on the lazy
     path (ensure_mcq_answer_key) can use it immediately without a second DB read.
     No-op (and no AI call) when the paper has no detectable MCQ questions — a
     subjective-only exam never touches this pipeline or its cost."""
     try:
+        from app.services.paper_version import paper_key_version, paper_snapshot_filter
+        exam = await db["newsavedDocs"].find_one({"_id": folder_id})
+        paper = (exam or {}).get("question_paper") or {}
+        if (not exam or paper.get("text") != paper_text
+                or paper.get("version") != paper_version
+                or (paper_url is not None and paper.get("url") != paper_url)):
+            return {}
+        snapshot_filter = paper_snapshot_filter(folder_id, paper)
+        key_version = paper_key_version(paper)
         mcq_questions = detect_mcq_questions(paper_text)
         if not mcq_questions:
             logger.info("[mcq-key] folder %s: no MCQ questions detected, skipping", folder_id)
@@ -357,10 +367,11 @@ async def determine_and_save_mcq_answer_keys(
         )
 
         now = datetime.now(timezone.utc)
-        await db["newsavedDocs"].update_one(
-            {"_id": folder_id},
+        result = await db["newsavedDocs"].update_one(
+            snapshot_filter,
             {"$set": {
                 "mcq_answer_key": answer_key,
+                "mcq_answer_key_version": key_version,
                 "mcq_answer_key_at": now,
                 "mcq_answer_key_needs_review_count": needs_review_count,
                 "updated_at": now,
@@ -381,7 +392,7 @@ async def determine_and_save_mcq_answer_keys(
                 institute_id=str(institute_id) if institute_id else None,
             )
 
-        return answer_key
+        return answer_key if result.matched_count else {}
 
     except Exception as e:
         # Best-effort — matches every other post-extraction step in this codebase
@@ -418,14 +429,20 @@ async def ensure_mcq_answer_key(
     faculty_id: str,
     user_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    existing = exam.get("mcq_answer_key")
-    if existing:
-        return existing
-
-    paper_text = (exam.get("question_paper") or {}).get("text")
+    from app.services.paper_version import paper_key_version, paper_snapshot_filter
+    paper = exam.get("question_paper") or {}
+    paper_text = paper.get("text")
     if not paper_text:
         return {}
+    if not await db["newsavedDocs"].find_one(paper_snapshot_filter(exam["_id"], paper)):
+        return {}
+    existing = exam.get("mcq_answer_key")
+    if existing and exam.get("mcq_answer_key_version") == paper_key_version(paper):
+        return existing
 
     logger.info("[mcq-key] folder %s: no answer key yet — resolving lazily at evaluation time",
                 exam["_id"])
-    return await determine_and_save_mcq_answer_keys(db, exam["_id"], paper_text, faculty_id, user_id)
+    return await determine_and_save_mcq_answer_keys(
+        db, exam["_id"], paper_text, faculty_id, user_id,
+        paper_version=paper.get("version"), paper_url=paper.get("url"),
+    )

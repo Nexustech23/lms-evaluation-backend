@@ -75,9 +75,10 @@ async def test_rename_folder_requires_id_alias(superadmin_client):
     assert resp.status_code == 422
 
 
-async def test_rename_folder_success(superadmin_client, test_db):
-    folder = await test_db["newsavedDocs"].insert_one({"folder_name": "Old Name"})
-    resp = await superadmin_client.put("/rename-folder", json={
+async def test_rename_folder_success(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    folder = await test_db["newsavedDocs"].insert_one({"folder_name": "Old Name", "faculty_id": faculty_id})
+    resp = await fc.put("/rename-folder", json={
         "_id": str(folder.inserted_id), "newFoldername": "New Name",
     })
     assert resp.status_code == 200
@@ -85,9 +86,10 @@ async def test_rename_folder_success(superadmin_client, test_db):
     assert updated["folder_name"] == "New Name"
 
 
-async def test_delete_folder_success(superadmin_client, test_db):
-    folder = await test_db["newsavedDocs"].insert_one({"folder_name": "To Delete"})
-    resp = await superadmin_client.request("DELETE", "/delete-folder", json={"_id": str(folder.inserted_id)})
+async def test_delete_folder_success(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    folder = await test_db["newsavedDocs"].insert_one({"folder_name": "To Delete", "faculty_id": faculty_id})
+    resp = await fc.request("DELETE", "/delete-folder", json={"_id": str(folder.inserted_id)})
     assert resp.status_code == 200
     remaining = await test_db["newsavedDocs"].find_one({"_id": folder.inserted_id})
     assert remaining is None
@@ -101,9 +103,10 @@ async def test_set_archive_status_rejects_non_bool(superadmin_client, test_db):
     assert resp.status_code == 422
 
 
-async def test_set_archive_status_success(superadmin_client, test_db):
-    folder = await test_db["newsavedDocs"].insert_one({"folder_name": "F1"})
-    resp = await superadmin_client.post(f"/set-archive-status/{folder.inserted_id}", json={"is_archived": True})
+async def test_set_archive_status_success(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    folder = await test_db["newsavedDocs"].insert_one({"folder_name": "F1", "faculty_id": faculty_id})
+    resp = await fc.post(f"/set-archive-status/{folder.inserted_id}", json={"is_archived": True})
     assert resp.status_code == 200
     updated = await test_db["newsavedDocs"].find_one({"_id": folder.inserted_id})
     assert updated["is_archived"] is True
