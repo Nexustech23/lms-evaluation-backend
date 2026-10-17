@@ -1,6 +1,10 @@
 from datetime import datetime, timezone
 from typing import Any, Dict
 from bson import ObjectId
+from app.models.exam_validation import (
+    boolean_value, covered_co_list, exam_datetime, nonblank_text,
+    semester_number, weightage_number,
+)
 
 
 def validate_exam_data(data: Dict[str, Any]) -> bool:
@@ -10,21 +14,17 @@ def validate_exam_data(data: Dict[str, Any]) -> bool:
         if not data.get(field) or not ObjectId.is_valid(str(data[field])):
             raise ValueError(f"Invalid or missing {field}")
 
-    if not data.get("folder_name"):
-        raise ValueError("folder_name is required")
-    if not data.get("exam_type"):
-        raise ValueError("exam_type is required")
-    if not data.get("semester"):
-        raise ValueError("semester is required")
-
-    if "covered_cos" in data and not isinstance(data["covered_cos"], list):
-        raise ValueError("covered_cos must be a list")
-
-    if "weightage" in data:
-        try:
-            int(data["weightage"])
-        except (TypeError, ValueError):
-            raise ValueError("weightage must be a number")
+    nonblank_text(data.get("folder_name"), "folder_name")
+    nonblank_text(data.get("exam_type"), "exam_type")
+    if data.get("exam_title") is not None:
+        nonblank_text(data["exam_title"], "exam_title")
+    semester_number(data.get("semester"))
+    covered_co_list(data.get("covered_cos"))
+    weightage_number(data.get("weightage"))
+    exam_datetime(data.get("exam_date"))
+    for field in ("department_id", "batch_id"):
+        if data.get(field) not in (None, "", "null") and not ObjectId.is_valid(str(data[field])):
+            raise ValueError(f"Invalid {field}")
 
     return True
 
@@ -52,14 +52,14 @@ def create_exam_document(data: Dict[str, Any], created_by: ObjectId) -> Dict[str
         ),
         "subject_id": ObjectId(data["subject_id"]),
 
-        "semester": int(data["semester"]),
+        "semester": semester_number(data["semester"]),
 
-        "covered_cos": data.get("covered_cos", []),
-        "is_course_exit_summary": bool(data.get("is_course_exit_summary", False)),
-        "weightage": int(data.get("weightage", 0)),
-        "exam_title": data.get("exam_title"),
-        "exam_type": data.get("exam_type"),
-        "exam_date": datetime.fromisoformat(data["exam_date"]) if data.get("exam_date") else None,
+        "covered_cos": covered_co_list(data.get("covered_cos")),
+        "is_course_exit_summary": boolean_value(data.get("is_course_exit_summary", False), "is_course_exit_summary"),
+        "weightage": weightage_number(data.get("weightage")),
+        "exam_title": nonblank_text(data["exam_title"], "exam_title") if data.get("exam_title") is not None else None,
+        "exam_type": nonblank_text(data["exam_type"], "exam_type"),
+        "exam_date": exam_datetime(data.get("exam_date")),
 
         "question_paper": {
             "url": None,
@@ -80,24 +80,31 @@ def update_exam_document(data: Dict[str, Any]) -> Dict[str, Any]:
 
     object_fields = ["school_id", "programme_id", "department_id", "batch_id", "subject_id"]
     for field in object_fields:
-        if field in data and data[field] and ObjectId.is_valid(str(data[field])):
-            update_fields[field] = ObjectId(data[field])
+        if field in data:
+            if field in ("department_id", "batch_id") and data[field] in (None, "", "null"):
+                update_fields[field] = None
+            elif ObjectId.is_valid(str(data[field])):
+                update_fields[field] = ObjectId(str(data[field]))
+            else:
+                raise ValueError(f"Invalid {field}")
 
-    simple_fields = ["folder_name", "exam_title", "exam_type", "semester", "is_archived"]
+    simple_fields = ["folder_name", "exam_title", "exam_type"]
     for field in simple_fields:
         if field in data:
-            update_fields[field] = data[field]
+            update_fields[field] = nonblank_text(data[field], field)
 
-    if "exam_date" in data and data["exam_date"]:
-        update_fields["exam_date"] = datetime.fromisoformat(data["exam_date"])
+    if "semester" in data:
+        update_fields["semester"] = semester_number(data["semester"])
+    if "exam_date" in data:
+        if data["exam_date"] is None:
+            raise ValueError("exam_date is required")
+        update_fields["exam_date"] = exam_datetime(data["exam_date"])
 
     if "covered_cos" in data:
-        if not isinstance(data["covered_cos"], list):
-            raise ValueError("covered_cos must be a list")
-        update_fields["covered_cos"] = data["covered_cos"]
+        update_fields["covered_cos"] = covered_co_list(data["covered_cos"])
 
     if "weightage" in data:
-        update_fields["weightage"] = int(data["weightage"])
+        update_fields["weightage"] = weightage_number(data["weightage"])
         if "question_paper" in data:
             qp = data["question_paper"]
             update_fields["question_paper"] = {
@@ -109,7 +116,7 @@ def update_exam_document(data: Dict[str, Any]) -> Dict[str, Any]:
             }
 
     if "is_course_exit_summary" in data:
-        update_fields["is_course_exit_summary"] = data["is_course_exit_summary"] in [True, "true", "True", 1, "1"]
+        update_fields["is_course_exit_summary"] = boolean_value(data["is_course_exit_summary"], "is_course_exit_summary")
 
     return {"$set": update_fields}
 

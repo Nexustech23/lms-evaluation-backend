@@ -22,10 +22,12 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
 from app.api.answer_access import require_exam_access
+from app.api.subject_access import require_subject_report_access
 from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
-from app.models.exam import create_exam_document
+from app.models.exam import create_exam_document, update_exam_document
+from app.models.evaluation import validate_evaluation_details
 from app.schemas.exams import (
     DeleteFolderRequest,
     RenameFolderRequest,
@@ -60,13 +62,6 @@ async def create_folder(
     data = dict(await request.form())
     user, faculty_id = await _require_faculty(identity, db)
 
-    covered_cos = data.get("covered_cos")
-    if isinstance(covered_cos, str):
-        try:
-            covered_cos = json.loads(covered_cos)
-        except Exception:
-            covered_cos = covered_cos.split(",")
-
     exam_payload = {
         "folder_name": data.get("folderName"),
         "school_id": data.get("school"),
@@ -79,13 +74,16 @@ async def create_folder(
         "exam_type": data.get("examtype"),
         "exam_date": data.get("examdate"),
         "weightage": data.get("weightage"),
-        "covered_cos": covered_cos,
+        "covered_cos": data.get("covered_cos"),
         "faculty_id": faculty_id,
-        "is_course_exit_summary": data.get("is_course_exit_summary") in [True, "true", "True", 1, "1"],
+        "is_course_exit_summary": data.get("is_course_exit_summary", False),
     }
 
     try:
         exam_doc = create_exam_document(exam_payload, created_by=ObjectId(faculty_id))
+        eval_data = None
+        if data.get("questionEvaluationDetails"):
+            eval_data = validate_evaluation_details(json.loads(data["questionEvaluationDetails"]))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -97,13 +95,7 @@ async def create_folder(
     # exam_id/faculty_id/totalMarks/questionEvaluationDetails shape the dedicated
     # evaluation endpoints (app/api/routers/evaluation.py) read and write. Kept as-is
     # for behavioral parity; it's effectively dead data unless something else reads it.
-    question_evaluation_details = data.get("questionEvaluationDetails")
-    if question_evaluation_details:
-        eval_data = (
-            json.loads(question_evaluation_details)
-            if isinstance(question_evaluation_details, str)
-            else question_evaluation_details
-        )
+    if eval_data is not None:
         await db["evaluationDetails"].insert_one({
             "folder_id": folder_id,
             "created_by": ObjectId(faculty_id),
@@ -309,11 +301,13 @@ async def get_all_folders(
 # =====================================================
 
 @router.get("/combinedCO/{subject_id}")
-async def get_combinedco_using_subjectid(subject_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(subject_id):
-        raise HTTPException(status_code=400, detail="Invalid subject_id")
-
-    exams = [e async for e in db["newsavedDocs"].find({"subject_id": ObjectId(subject_id)})]
+async def get_combinedco_using_subjectid(
+    subject_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    subject = await require_subject_report_access(identity, db, subject_id)
+    exams = [e async for e in db["newsavedDocs"].find({"subject_id": subject["_id"]})]
     if not exams:
         raise HTTPException(status_code=404, detail="No exams found for this subject")
 
@@ -416,13 +410,12 @@ async def get_exams_using_subjectid(subject_id: str, db: AsyncIOMotorDatabase = 
 # =====================================================
 
 @router.get("/newsaved-documents/{folder_id}")
-async def get_exam_using_examid(folder_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid exam ID")
-
-    folder = await db["newsavedDocs"].find_one({"_id": ObjectId(folder_id)})
-    if not folder:
-        raise HTTPException(status_code=404, detail="Exam not found")
+async def get_exam_using_examid(
+    folder_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    folder = await require_exam_access(identity, db, folder_id, allow_institute_read=True)
 
     return {
         "id": str(folder["_id"]),
@@ -461,37 +454,24 @@ async def update_exam(
     folder_object_id = folder["_id"]
     data = dict(await request.form())
 
-    if folder.get("question_paper", {}).get("url"):
+    if (folder.get("question_paper") or {}).get("url"):
         raise HTTPException(status_code=400, detail="Cannot edit examination details after question paper upload")
 
-    update_data: Dict[str, Any] = {}
-
-    object_id_fields = {
+    field_names = {
         "school_id": "school", "programme_id": "programme", "department_id": "department",
         "batch_id": "batch", "subject_id": "subject_id",
     }
-    for db_field, frontend_field in object_id_fields.items():
-        if frontend_field in data and ObjectId.is_valid(data[frontend_field]):
-            update_data[db_field] = ObjectId(data[frontend_field])
-
-    if "folderName" in data:
-        update_data["folder_name"] = data["folderName"]
-    if "semester" in data:
-        update_data["semester"] = int(data["semester"])
-    if "examdetails" in data:
-        update_data["exam_title"] = data["examdetails"]
-    if "weightage" in data:
-        update_data["weightage"] = data["weightage"]
-    if "covered_cos" in data:
-        update_data["covered_cos"] = data["covered_cos"]
-    if "is_course_exit_summary" in data:
-        update_data["is_course_exit_summary"] = data["is_course_exit_summary"] in [True, "true", "True", 1, "1"]
-    if "examtype" in data:
-        update_data["exam_type"] = data["examtype"]
-    if data.get("examdate"):
-        update_data["exam_date"] = datetime.fromisoformat(data["examdate"])
-
-    update_data["updated_at"] = datetime.now(timezone.utc)
+    field_names.update({
+        "folder_name": "folderName", "semester": "semester", "exam_title": "examdetails",
+        "weightage": "weightage", "covered_cos": "covered_cos",
+        "is_course_exit_summary": "is_course_exit_summary", "exam_type": "examtype", "exam_date": "examdate",
+    })
+    try:
+        update_data = update_exam_document({
+            field: data[source] for field, source in field_names.items() if source in data
+        })["$set"]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if len(update_data) == 1:
         raise HTTPException(status_code=400, detail="No valid fields to update")
@@ -561,14 +541,13 @@ async def delete_folder(
 # =====================================================
 
 @router.get("/download-folder/{folder_id}")
-async def download_folder(folder_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(folder_id):
-        raise HTTPException(status_code=400, detail="Invalid folder ID")
-
-    exam_object_id = ObjectId(folder_id)
-    folder = await db["newsavedDocs"].find_one({"_id": exam_object_id})
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
+async def download_folder(
+    folder_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    folder = await require_exam_access(identity, db, folder_id, allow_institute_read=True)
+    exam_object_id = folder["_id"]
 
     answers = [a async for a in db["answerDetails"].find({"exam_id": exam_object_id})]
     if not answers:

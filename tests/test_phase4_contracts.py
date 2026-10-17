@@ -62,6 +62,7 @@ async def test_job_store_redis_commands_preserve_owner_and_expiry(fake_redis_ser
     identity = {'user_id': str(ObjectId())}
     await job_store.set_job(prefix, 'redis-contract', {'owner_user_id': identity['user_id'], 'status': 'queued'})
     for state in ('processing', 'done', 'error'):
+        await job_store.set_job(prefix, 'redis-contract', {'owner_user_id': identity['user_id'], 'status': 'queued'})
         await job_store.update_job(prefix, 'redis-contract', {'status': state})
         job = await job_store.get_owned_job(prefix, 'redis-contract', identity)
         assert job['owner_user_id'] == identity['user_id'] and job['status'] == state

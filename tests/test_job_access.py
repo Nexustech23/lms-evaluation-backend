@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
+from fakeredis.aioredis import FakeRedis
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
@@ -13,6 +14,7 @@ from app.api.routers import grading, question_paper as qp
 from app.db.mongodb import get_database
 from app.models.user import FACULTY, INSTITUTE, INSTITUTE_STUDENT, SUPERADMIN
 from app.services import job_store
+from tests.test_failed_ai_cost import Collection as AccountingCollection
 
 
 class MemoryRedis:
@@ -28,7 +30,7 @@ class MemoryRedis:
 
 @pytest_asyncio.fixture
 async def jobs(monkeypatch):
-    redis = MemoryRedis()
+    redis = FakeRedis(decode_responses=True)
     monkeypatch.setattr(job_store, "get_redis", lambda: redis)
     owner = str(ObjectId())
     identities = {
@@ -49,10 +51,18 @@ async def jobs(monkeypatch):
         return identities[name]
 
     app.dependency_overrides[get_current_identity] = identity
-    app.dependency_overrides[get_database] = lambda: {}
     app.dependency_overrides[grading.bulk_grading_rate_limit] = lambda: None
     app.dependency_overrides[qp.ai_rate_limit] = lambda: None
     faculty_id = ObjectId()
+    exam_id, answer_id = ObjectId(), ObjectId()
+    db = {'users': AccountingCollection([{'_id': ObjectId(owner)}]),
+          'facultyDetails': AccountingCollection([{'_id': faculty_id, 'user_id': ObjectId(owner)}]),
+          'newsavedDocs': AccountingCollection([{'_id': exam_id, 'faculty_id': faculty_id}]),
+          'answerDetails': AccountingCollection([{'_id': answer_id, 'exam_id': exam_id}])}
+    other_user = ObjectId(identities['faculty']['user_id'])
+    db['users'].docs.append({'_id': other_user})
+    db['facultyDetails'].docs.append({'_id': ObjectId(), 'user_id': other_user})
+    app.dependency_overrides[get_database] = lambda: db
     monkeypatch.setattr(grading, "get_current_user_and_faculty_details",
                         AsyncMock(return_value=({"_id": ObjectId(owner)}, faculty_id, None)))
     monkeypatch.setattr(qp, "_require_faculty",
@@ -63,7 +73,9 @@ async def jobs(monkeypatch):
         monkeypatch.setattr(module, "check_institute_token_budget", AsyncMock(return_value=budget))
         monkeypatch.setattr(module, "enqueue", AsyncMock())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://isolated") as client:
-        yield SimpleNamespace(client=client, owner=owner, redis=redis, faculty=faculty_id)
+        yield SimpleNamespace(client=client, owner=owner, redis=redis, faculty=faculty_id,
+                              db=db, exam=str(exam_id), answer=str(answer_id))
+    await redis.aclose()
 
 
 ENDPOINTS = [(grading.EVAL_JOB_PREFIX, "/evaluate-answer-script/status/"),
@@ -104,7 +116,7 @@ async def test_missing_jobs_return_404(jobs, prefix, url):
 @pytest.mark.parametrize("prefix,url", ENDPOINTS)
 async def test_late_update_after_expiration_does_not_expose_ownerless_result(jobs, prefix, url):
     await job_store.set_job(prefix, "expired", {"owner_user_id": jobs.owner})
-    jobs.redis.values.clear()
+    await jobs.redis.flushall()
     await job_store.update_job(prefix, "expired", {"status": "completed", "paperText": "SECRET"})
     response = await jobs.client.get(url + "expired", headers={"x-test-user": "owner"})
     assert response.status_code == 404
@@ -117,6 +129,7 @@ async def test_owner_readable_after_progress_success_and_error_updates(jobs, pre
     for state, expected in [("processing", 202 if prefix == qp.QP_JOB_PREFIX else 200),
                             ("completed" if prefix == qp.QP_JOB_PREFIX else "done", 200),
                             ("failed" if prefix == qp.QP_JOB_PREFIX else "error", 500 if prefix == qp.QP_JOB_PREFIX else 200)]:
+        await job_store.set_job(prefix, "mine", {"owner_user_id": jobs.owner, "status": "queued"})
         await job_store.update_job(prefix, "mine", {"status": state, "paperText": "My paper", "result": {"score": 8}})
         assert (await job_store.get_job(prefix, "mine"))["owner_user_id"] == jobs.owner
         response = await jobs.client.get(url + "mine", headers={"x-test-user": "owner"})
@@ -129,7 +142,7 @@ async def test_creation_uses_authenticated_owner_not_client_input(jobs, kind):
     headers = {"x-test-user": "owner"}
     if kind == "evaluation":
         response = await jobs.client.post("/evaluate-answer-script", headers=headers, json={
-            "folderId": str(ObjectId()), "answerId": str(ObjectId()), "owner_user_id": "forged",
+            "folderId": jobs.exam, "answerId": jobs.answer, "owner_user_id": "forged",
         })
         job_id = response.json()["job_id"]
         prefix = grading.EVAL_JOB_PREFIX
@@ -157,14 +170,15 @@ async def test_evaluation_worker_failure_preserves_owner(jobs, monkeypatch, fail
 
 @pytest.mark.parametrize("fail", [False, True])
 async def test_generation_worker_completion_and_failure_preserve_owner(jobs, monkeypatch, fail):
-    monkeypatch.setattr(qp, "get_database", lambda: {})
-    monkeypatch.setattr(qp, "resolve_institute_id_for_faculty", AsyncMock(return_value=None))
+    db = {'facultyDetails': AccountingCollection([{'_id': jobs.faculty, 'user_id': ObjectId(jobs.owner)}]),
+          'users': AccountingCollection([{'_id': ObjectId(jobs.owner)}]),
+          'aiUsageEvents': AccountingCollection()}
+    monkeypatch.setattr(qp, "get_database", lambda: db)
     monkeypatch.setattr(qp, "_build_claude_prompt", Mock(return_value="prompt"))
     generate = Mock(return_value=("My exam", {"input_tokens": 1, "output_tokens": 1}))
     if fail:
         generate.side_effect = RuntimeError("generation failed")
     monkeypatch.setattr(qp, "generate_text", generate)
-    monkeypatch.setattr(qp, "increment_institute_claude_tokens", AsyncMock())
     monkeypatch.setattr(qp, "build_docx", Mock(return_value=b"docx"))
     monkeypatch.setattr(qp, "upload_file_to_imagekit", Mock(return_value={"url": "https://cdn.test/doc", "file_id": "file"}))
     await job_store.set_job(qp.QP_JOB_PREFIX, "worker", {"owner_user_id": jobs.owner})

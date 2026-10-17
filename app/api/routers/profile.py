@@ -705,8 +705,12 @@ async def get_all_faculty_activity_logs(
             "input_tokens": doc.get("input_tokens"),
             "output_tokens": doc.get("output_tokens"),
             "total_tokens": doc.get("total_tokens"),
-            "cost_usd": round(doc.get("cost_usd") or 0, 4),
-            "cost_inr": round(to_inr(doc.get("cost_usd") or 0), 2),
+            "cost_usd": None if doc.get("usage_status") == "unknown" or doc.get("cost_status") == "unknown" else round(doc.get("cost_usd") or 0, 4),
+            "cost_inr": None if doc.get("usage_status") == "unknown" or doc.get("cost_status") == "unknown" else round(to_inr(doc.get("cost_usd") or 0), 2),
+            "cost_status": doc.get("cost_status", "known"),
+            "usage_status": doc.get("usage_status", "known"),
+            "call_status": doc.get("call_status", "completed"),
+            "job_id": doc.get("job_id"),
             "created_at": doc.get("created_at"),
         })
 
@@ -1232,6 +1236,7 @@ async def get_ai_usage_summary(
             "total_tokens": {"$sum": "$total_tokens"},
             "cost_usd": {"$sum": "$cost_usd"},
             "call_count": {"$sum": 1},
+            "unknown_cost_calls": {"$sum": {"$cond": [{"$or": [{"$eq": ["$usage_status", "unknown"]}, {"$eq": ["$cost_status", "unknown"]}]}, 1, 0]}},
             "distinct_users": {"$addToSet": "$user_id"},
         }},
         {"$sort": {"cost_usd": -1}},
@@ -1246,6 +1251,7 @@ async def get_ai_usage_summary(
             "total_tokens": row["total_tokens"],
             "cost_usd": round(row["cost_usd"], 4),
             "call_count": row["call_count"],
+            "unknown_cost_calls": row.get("unknown_cost_calls", 0),
             "distinct_users": len(row["distinct_users"]),
         })
 
@@ -1255,6 +1261,7 @@ async def get_ai_usage_summary(
         "total_tokens": sum(r["total_tokens"] for r in by_feature),
         "cost_usd": round(sum(r["cost_usd"] for r in by_feature), 4),
         "call_count": sum(r["call_count"] for r in by_feature),
+        "unknown_cost_calls": sum(r["unknown_cost_calls"] for r in by_feature),
     }
 
     # Same window (and scope filter), grouped by provider instead of
@@ -1269,6 +1276,7 @@ async def get_ai_usage_summary(
             "total_tokens": {"$sum": "$total_tokens"},
             "cost_usd": {"$sum": "$cost_usd"},
             "call_count": {"$sum": 1},
+            "unknown_cost_calls": {"$sum": {"$cond": [{"$or": [{"$eq": ["$usage_status", "unknown"]}, {"$eq": ["$cost_status", "unknown"]}]}, 1, 0]}},
             "distinct_users": {"$addToSet": "$user_id"},
         }},
         {"$sort": {"cost_usd": -1}},
@@ -1283,6 +1291,7 @@ async def get_ai_usage_summary(
             "total_tokens": row["total_tokens"],
             "cost_usd": round(row["cost_usd"], 4),
             "call_count": row["call_count"],
+            "unknown_cost_calls": row.get("unknown_cost_calls", 0),
             "distinct_users": len(row["distinct_users"]),
         })
 
@@ -1299,6 +1308,7 @@ async def get_ai_usage_summary(
             "total_tokens": {"$sum": "$total_tokens"},
             "cost_usd": {"$sum": "$cost_usd"},
             "call_count": {"$sum": 1},
+            "unknown_cost_calls": {"$sum": {"$cond": [{"$or": [{"$eq": ["$usage_status", "unknown"]}, {"$eq": ["$cost_status", "unknown"]}]}, 1, 0]}},
             "distinct_users": {"$addToSet": "$user_id"},
         }},
         {"$sort": {"cost_usd": -1}},
@@ -1314,6 +1324,7 @@ async def get_ai_usage_summary(
             "total_tokens": row["total_tokens"],
             "cost_usd": round(row["cost_usd"], 4),
             "call_count": row["call_count"],
+            "unknown_cost_calls": row.get("unknown_cost_calls", 0),
             "distinct_users": len(row["distinct_users"]),
         })
 
@@ -1410,8 +1421,12 @@ async def get_self_learner_activity_logs(
             "input_tokens": doc.get("input_tokens"),
             "output_tokens": doc.get("output_tokens"),
             "total_tokens": doc.get("total_tokens"),
-            "cost_usd": round(doc.get("cost_usd") or 0, 4),
-            "cost_inr": round(to_inr(doc.get("cost_usd") or 0), 2),
+            "cost_usd": None if doc.get("usage_status") == "unknown" or doc.get("cost_status") == "unknown" else round(doc.get("cost_usd") or 0, 4),
+            "cost_inr": None if doc.get("usage_status") == "unknown" or doc.get("cost_status") == "unknown" else round(to_inr(doc.get("cost_usd") or 0), 2),
+            "cost_status": doc.get("cost_status", "known"),
+            "usage_status": doc.get("usage_status", "known"),
+            "call_status": doc.get("call_status", "completed"),
+            "job_id": doc.get("job_id"),
             "created_at": doc.get("created_at"),
         })
 

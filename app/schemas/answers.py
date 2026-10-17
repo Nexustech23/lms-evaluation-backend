@@ -27,9 +27,8 @@ class DeleteFileRequest(BaseModel):
 
 class SelfEvaluationRequest(BaseModel):
     answer_id: str
-    # Individual question-marking dicts stay loose — this mirrors the AI
-    # evaluation pipeline's own free-form questionwise_marking shape, which
-    # is read defensively (.get(...)) both here and in subject_results.py.
+    # Review validation runs after ownership checks, against saved question
+    # limits. Keep the flexible AI evaluation shape at the transport boundary.
     questionwise_marking: List[Dict[str, Any]] = []
 
 
