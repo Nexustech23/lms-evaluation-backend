@@ -140,7 +140,7 @@ def create_ai_usage_event_document(
     feature: str,
     input_tokens: int,
     output_tokens: int,
-    cost_usd: float,
+    cost_usd: Optional[float],
     grounded: Optional[bool] = None,
     context_id: Optional[str] = None,
     job_id: Optional[str] = None,

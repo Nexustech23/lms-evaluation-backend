@@ -1,4 +1,5 @@
 from pydantic import model_validator
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Secrets that must never sign real tokens. The default value below is
@@ -146,7 +147,7 @@ class Settings(BaseSettings):
     #              the job off the request path. Set QUEUE_MODE=redis in .env
     #              and `docker compose --profile queue up -d` when you want
     #              jobs off the web tier / horizontally scalable.
-    QUEUE_MODE: str = "inline"
+    QUEUE_MODE: Literal["inline", "inline_sync", "redis"] = "inline"
     ARQ_MAX_JOBS: int = 12               # concurrent jobs per worker process
     ARQ_JOB_TIMEOUT_SECONDS: int = 1800   # hard cap per job (grading + transcript can be slow)
 

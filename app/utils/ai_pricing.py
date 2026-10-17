@@ -5,7 +5,7 @@
 # periodically and this table updated; effective_date records when each
 # entry was last verified so a stale row is easy to spot.
 #
-# Unknown models fall back to cost_usd=0.0 (token counts still get recorded)
+# Unknown models have cost_usd=None (token counts still get recorded)
 # rather than raising — a new model showing up in a call site must never
 # break the generation call it's costing.
 # ============================================================
@@ -62,14 +62,14 @@ _PRICES: dict[str, ModelPrice] = {
 }
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Best-effort cost estimate for one call. Returns 0.0 for an unrecognized
+def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Best-effort cost estimate for one call. Returns None for an unrecognized
     model rather than raising — token counts are still worth recording even
     when a $ estimate isn't available yet for a brand-new model string."""
     price = _PRICES.get(model)
     if price is None:
-        logger.warning("ai_pricing: no price entry for model=%r — recording cost_usd=0.0", model)
-        return 0.0
+        logger.warning("ai_pricing: no price entry for model=%r — cost unavailable", model)
+        return None
 
     cost = (input_tokens / 1_000_000) * price.input_per_million + (output_tokens / 1_000_000) * price.output_per_million
-    return round(cost, 6)
+    return cost  # Round only for display; tiny real calls must not become free.

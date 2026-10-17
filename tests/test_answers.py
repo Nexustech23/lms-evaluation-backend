@@ -94,10 +94,18 @@ async def test_get_answer_scripts(superadmin_client, client_factory, test_db):
 
 async def test_save_self_evaluation(superadmin_client, client_factory, test_db):
     faculty_client, folder_id, _ = await _faculty_with_folder(superadmin_client, client_factory, test_db)
-    answer = await test_db["answerDetails"].insert_one({"filename": "x.pdf", "exam_id": ObjectId(folder_id)})
+    questions = [
+        {"question_no": 1, "max_marks": 6, "ai_awarded_marks": 5, "grace_marks": 0},
+        {"question_no": 2, "max_marks": 4, "ai_awarded_marks": 3, "grace_marks": 0},
+    ]
+    answer = await test_db["answerDetails"].insert_one({
+        "filename": "x.pdf", "exam_id": ObjectId(folder_id),
+        "total_max_marks": 10, "questionwise_marking": questions,
+    })
+    questions[0]["grace_marks"] = 1
     resp = await faculty_client.post("/save-self-evaluation", json={
         "answer_id": str(answer.inserted_id),
-        "questionwise_marking": [{"ai_awarded_marks": 5, "grace_marks": 1}, {"ai_awarded_marks": 3, "grace_marks": 0}],
+        "questionwise_marking": questions,
     })
     assert resp.status_code == 200
     assert resp.json()["total_final_marks"] == 9

@@ -1,36 +1,43 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from bson import ObjectId
+import math
+from app.models.exam_validation import finite_number, nonblank_text
 
 
 def _validate_parameter(p: Dict[str, Any]) -> Dict[str, Any]:
-    if "name" not in p or not p["name"]:
-        raise ValueError("Parameter name is required")
+    if not isinstance(p, dict):
+        raise ValueError("Each parameter must be an object")
+    name = nonblank_text(p.get("name"), "Parameter name")
 
-    percentage = float(p.get("percentage", 0))
+    percentage = finite_number(p.get("percentage", 0), "Parameter percentage")
     if percentage < 0 or percentage > 100:
         raise ValueError("Parameter percentage must be between 0 and 100")
 
-    return {"name": p["name"].strip(), "percentage": percentage, "isCustom": bool(p.get("isCustom", False))}
+    return {"name": name, "percentage": percentage, "isCustom": bool(p.get("isCustom", False))}
 
 
 def _validate_co(co: Dict[str, Any]) -> Dict[str, Any]:
-    if "co_code" not in co or not co["co_code"]:
-        raise ValueError("co_code is required in cos")
+    if not isinstance(co, dict):
+        raise ValueError("Each CO must be an object")
+    code = nonblank_text(co.get("co_code"), "co_code")
 
-    marks = float(co.get("marks", 0))
+    marks = finite_number(co.get("marks", 0), "CO marks")
     if marks < 0:
         raise ValueError("CO marks cannot be negative")
 
-    return {"co_code": co["co_code"].strip(), "description": co.get("description", "").strip(), "marks": marks}
+    description = co.get("description", "")
+    if not isinstance(description, str):
+        raise ValueError("CO description must be text")
+    return {"co_code": code, "description": description.strip(), "marks": marks}
 
 
 def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
-    if "maxMarks" not in q:
+    if not isinstance(q, dict) or "maxMarks" not in q:
         raise ValueError("maxMarks is required")
 
-    max_marks = float(q["maxMarks"])
-    min_marks = float(q.get("minMarks", 0))
+    max_marks = finite_number(q["maxMarks"], "maxMarks")
+    min_marks = finite_number(q.get("minMarks", 0), "minMarks")
 
     if max_marks <= 0:
         raise ValueError("maxMarks must be greater than 0")
@@ -40,19 +47,37 @@ def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("minMarks cannot be greater than maxMarks")
 
     parameters = q.get("parameters", [])
+    if not isinstance(parameters, list):
+        raise ValueError("parameters must be a list")
     validated_params = [_validate_parameter(p) for p in parameters]
+    names = [p["name"].casefold() for p in validated_params]
+    if len(names) != len(set(names)):
+        raise ValueError("Parameter names must be unique within a question")
+    if validated_params and not math.isclose(sum(p["percentage"] for p in validated_params), 100, rel_tol=0, abs_tol=1e-7):
+        raise ValueError("Parameter percentages must total 100 for each question")
 
     cos = q.get("cos", [])
+    if not isinstance(cos, list):
+        raise ValueError("cos must be a list")
     validated_cos = []
     if cos:
         if not isinstance(cos, list):
             raise ValueError("cos must be a list")
         validated_cos = [_validate_co(co) for co in cos]
+        codes = [co["co_code"] for co in validated_cos]
+        if len(codes) != len(set(codes)):
+            raise ValueError("CO codes must be unique within a question")
+        if not math.isclose(sum(co["marks"] for co in validated_cos), max_marks, rel_tol=0, abs_tol=1e-7):
+            raise ValueError("CO marks must total the question maxMarks")
+
+    guidelines = q.get("guidelines", "")
+    if not isinstance(guidelines, str):
+        raise ValueError("guidelines must be text")
 
     return {
         "minMarks": min_marks,
         "maxMarks": max_marks,
-        "guidelines": q.get("guidelines", "").strip(),
+        "guidelines": guidelines.strip(),
         "parameters": validated_params,
         "cos": validated_cos,
     }
@@ -69,13 +94,13 @@ def _validate_total_marks(total_marks: Any, questions: List[Dict[str, Any]]) -> 
     if total_marks is None:
         raise ValueError("totalMarks is required")
 
-    total_marks = float(total_marks)
+    total_marks = finite_number(total_marks, "totalMarks")
     if total_marks <= 0:
         raise ValueError("totalMarks must be greater than 0")
 
     sum_of_questions = sum(q["maxMarks"] for q in questions)
-    if sum_of_questions > total_marks:
-        raise ValueError("Sum of question maxMarks cannot exceed totalMarks")
+    if not math.isclose(sum_of_questions, total_marks, rel_tol=0, abs_tol=1e-7):
+        raise ValueError("Sum of question maxMarks must equal totalMarks")
 
     return total_marks
 

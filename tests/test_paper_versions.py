@@ -11,6 +11,7 @@ from app.api.routers import exams, grading
 from app.schemas.exams import UploadQuestionPaperRequest
 from app.services import gemini, mcq_grading as mcq
 from app.services.paper_version import paper_key_version
+from tests.test_failed_ai_cost import Collection as AccountingCollection
 
 
 def value(doc, dotted):
@@ -51,13 +52,15 @@ def paper(monkeypatch):
     collection = Papers({'_id': exam_id, 'faculty_id': faculty, 'question_paper': {
         'version': 'A', 'url': 'https://cdn.test/A.pdf', 'fileId': 'A', 'text': 'Paper A'},
         'mcq_answer_key': {'1': {'answer': 'A', 'confident': True}}, 'mcq_answer_key_version': 'A'})
-    db = {'newsavedDocs': collection}
+    db = {'newsavedDocs': collection,
+          'facultyDetails': AccountingCollection([{'_id': faculty, 'user_id': user}]),
+          'users': AccountingCollection([{'_id': user}]),
+          'aiUsageEvents': AccountingCollection()}
     monkeypatch.setattr(exams, '_require_faculty', AsyncMock(return_value=({'_id': user}, faculty)))
     monkeypatch.setattr(exams, 'enqueue', AsyncMock())
     monkeypatch.setattr(gemini, 'safe_get', Mock(return_value=b'paper'))
     monkeypatch.setattr(gemini, 'extract_question_paper_text_with_gemini', Mock(return_value=(
         'Extracted A', {'prompt_tokens': 1, 'candidate_tokens': 1})))
-    monkeypatch.setattr(gemini, 'increment_institute_gemini_tokens', AsyncMock())
     monkeypatch.setattr(mcq, 'detect_mcq_questions', Mock(return_value={1: ['a', 'b', 'c', 'd']}))
     monkeypatch.setattr(mcq, 'determine_mcq_answer_keys', Mock(return_value=(
         {'1': {'answer': 'B', 'confident': True}}, {})))
@@ -215,9 +218,10 @@ async def test_deleted_exam_does_not_receive_late_text_or_key(paper, monkeypatch
 
 
 async def test_grading_stops_if_paper_changes_before_ocr(paper, monkeypatch):
+    monkeypatch.setattr(grading, 'claim_job_execution', AsyncMock(return_value=True))
     answer_id = ObjectId()
     db = {**paper.db,
-          'answerDetails': SimpleNamespace(find_one=AsyncMock(return_value={
+          'answerDetails': SimpleNamespace(update_one=AsyncMock(), find_one=AsyncMock(return_value={
               '_id': answer_id, 'exam_id': paper.exam, 'answer_script_url': 'https://cdn.test/student.pdf'})),
           'evaluationDetails': SimpleNamespace(find_one=AsyncMock(return_value={
               'questionEvaluationDetails': [{'maxMarks': 10}]}))}

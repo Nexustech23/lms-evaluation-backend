@@ -17,11 +17,12 @@ import uuid
 from datetime import datetime, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
+from app.api.answer_access import require_answer_access
 from app.core.queue import enqueue
 from app.core.rate_limit import bulk_grading_rate_limit
 from app.db.mongodb import get_database
@@ -34,17 +35,19 @@ from app.services.grading import (
     grade_with_claude,
     safe_json_parse,
 )
-from app.services.imagekit import upload_file_to_imagekit
+from app.services.imagekit import upload_file_to_imagekit, delete_imagekit_file
 from app.services.mcq_grading import (
     apply_deterministic_mcq_overrides,
     ensure_mcq_answer_key,
     parse_mcq_answers_from_ocr_text,
 )
-from app.services.job_store import get_owned_job, set_job, update_job
+from app.services.job_store import get_owned_job, set_job, update_job, claim_job_execution
+from app.services.job_submission import claim_submission, release_submission
 from app.services.paper_version import paper_snapshot_filter
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
-from app.services.ai_usage import record_ai_usage
+from app.services.faculty_ai_usage import tracked_faculty_call
+from app.services.grading import CLAUDE_GRADING_MODEL, GEMINI_OCR_MODEL
 from app.utils.token_usage import aggregate_grading_tokens, check_institute_token_budget, save_grading_tokens_to_institute
 from app.utils.transcript_generation_helper import refresh_transcript_for_exam
 
@@ -86,6 +89,11 @@ async def _run_evaluation_job(
     user_id: str = None,
 ) -> None:
     db = get_database()
+    if not await claim_job_execution(EVAL_JOB_PREFIX, job_id):
+        return
+    evaluation_upload = transcript_upload = None
+    saved = False
+    interrupted = False
 
     try:
         if not ObjectId.is_valid(exam_id) or not ObjectId.is_valid(answer_id):
@@ -114,6 +122,9 @@ async def _run_evaluation_job(
         if answer.get("exam_id") != exam_object_id:
             await _fail(job_id, "Answer script does not belong to this folder")
             return
+        if answer.get("reviewed_by_professor"):
+            await _fail(job_id, "Reviewed marks are protected; evaluation was not started.")
+            return
 
         student_pdf_url = answer.get("answer_script_url")
         if not student_pdf_url:
@@ -136,7 +147,6 @@ async def _run_evaluation_job(
             return
 
         institute_id = await _resolve_institute_id(db, exam)
-        institute_id_str = str(institute_id) if institute_id else None
 
         # Step 2 — download
         await update_job(EVAL_JOB_PREFIX, job_id, {
@@ -168,15 +178,18 @@ async def _run_evaluation_job(
             for q_no, entry in mcq_answer_key.items()
             if entry.get("confident") and entry.get("options")
         }
-        answer_text, ans_gemini_tokens = await asyncio.to_thread(
-            extract_answer_text_with_gemini, student_pdf_bytes, confident_mcq_questions_with_options or None
+        answer_text, ans_gemini_tokens = await tracked_faculty_call(
+            db, extract_answer_text_with_gemini, student_pdf_bytes, confident_mcq_questions_with_options or None,
+            faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI,
+            model=GEMINI_OCR_MODEL, feature=Feature.GRADING_ANSWER_OCR, job_id=job_id,
         )
         gemini_calls = [ans_gemini_tokens]
-        if user_id:
-            await record_ai_usage(
-                db, user_id=user_id, provider=Provider.GEMINI, model=ans_gemini_tokens["model"],
-                feature=Feature.GRADING_ANSWER_OCR, usage=ans_gemini_tokens,
-                job_id=job_id, institute_id=institute_id_str,
+
+        async def claude_step(function, *args, feature):
+            return await tracked_faculty_call(
+                db, function, *args, faculty_id=faculty_id, user_id=user_id,
+                provider=Provider.CLAUDE, model=CLAUDE_GRADING_MODEL,
+                feature=feature, job_id=job_id,
             )
 
         # Step 4 — grading (+ transcript, in parallel when requested)
@@ -185,28 +198,19 @@ async def _run_evaluation_job(
 
         if generate_transcript_pdf:
             (grading_result_raw, grade_claude_tokens), (transcript_html, transcript_claude_tokens) = await asyncio.gather(
-                asyncio.to_thread(grade_with_claude, question_text, answer_text, evaluation_rules),
-                asyncio.to_thread(generate_transcript_html_with_claude, answer_text, student_name),
+                claude_step(grade_with_claude, question_text, answer_text, evaluation_rules,
+                            feature=Feature.GRADING_ANSWER_EVALUATION),
+                claude_step(generate_transcript_html_with_claude, answer_text, student_name,
+                            feature=Feature.GRADING_TRANSCRIPT_GENERATION),
             )
             claude_calls = [grade_claude_tokens, transcript_claude_tokens]
-            if user_id:
-                await record_ai_usage(
-                    db, user_id=user_id, provider=Provider.CLAUDE, model=transcript_claude_tokens["model"],
-                    feature=Feature.GRADING_TRANSCRIPT_GENERATION, usage=transcript_claude_tokens,
-                    job_id=job_id, institute_id=institute_id_str,
-                )
         else:
-            grading_result_raw, grade_claude_tokens = await asyncio.to_thread(
-                grade_with_claude, question_text, answer_text, evaluation_rules
+            grading_result_raw, grade_claude_tokens = await claude_step(
+                grade_with_claude, question_text, answer_text, evaluation_rules,
+                feature=Feature.GRADING_ANSWER_EVALUATION,
             )
             transcript_html = None
             claude_calls = [grade_claude_tokens]
-        if user_id:
-            await record_ai_usage(
-                db, user_id=user_id, provider=Provider.CLAUDE, model=grade_claude_tokens["model"],
-                feature=Feature.GRADING_ANSWER_EVALUATION, usage=grade_claude_tokens,
-                job_id=job_id, institute_id=institute_id_str,
-            )
 
         grading_json = safe_json_parse(grading_result_raw)
 
@@ -301,8 +305,9 @@ async def _run_evaluation_job(
         if not await db["newsavedDocs"].find_one(paper_guard):
             raise RuntimeError("Question paper changed. Start evaluation again for the current paper.")
         now = datetime.now(timezone.utc)
-        await db["answerDetails"].update_one(
-            {"_id": answer_object_id},
+        save_result = await db["answerDetails"].update_one(
+            {"_id": answer_object_id, "exam_id": exam_object_id,
+             "reviewed_by_professor": {"$ne": True}},
             {"$set": {
                 "evaluated_report_url": evaluation_upload["url"],
                 "evaluated_report_fileId": evaluation_upload["file_id"],
@@ -319,6 +324,9 @@ async def _run_evaluation_job(
                 "token_usage": {**token_usage, "transcript_generated": generate_transcript_pdf},
             }},
         )
+        if save_result.matched_count != 1:
+            raise RuntimeError("Answer was deleted or reviewed while AI ran. Existing marks were preserved.")
+        saved = True
 
         # Already running as a background job, so just await this directly —
         # if this subject's batch/semester already has a generated academic
@@ -326,7 +334,7 @@ async def _run_evaluation_job(
         await refresh_transcript_for_exam(db, exam_object_id)
 
         # Step 12 — institute token counters (best-effort)
-        await save_grading_tokens_to_institute(db, institute_id, token_usage)
+        await save_grading_tokens_to_institute(db, institute_id, token_usage, tokens_already_recorded=True)
 
         # Step 13 — final job payload
         await update_job(EVAL_JOB_PREFIX, job_id, {
@@ -358,6 +366,11 @@ async def _run_evaluation_job(
         })
         logging.info("[%s] Evaluation job completed.", job_id)
 
+    except asyncio.CancelledError:
+        interrupted = True
+        await update_job(EVAL_JOB_PREFIX, job_id, {"status": "interrupted",
+            "message": "Evaluation was interrupted. Verify this job before starting another paid evaluation."})
+        raise
     except RuntimeError as e:
         logging.error("[%s] Job stopped (runtime): %s", job_id, e)
         await update_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": str(e), "user_message": str(e)})
@@ -369,6 +382,19 @@ async def _run_evaluation_job(
             "message": str(e),
             "user_message": "Something went wrong during evaluation. Please try again later.",
         })
+    finally:
+        if not saved:
+            for uploaded in (evaluation_upload, transcript_upload):
+                if uploaded and uploaded.get("file_id"):
+                    try:
+                        await asyncio.to_thread(delete_imagekit_file, uploaded["file_id"])
+                    except Exception:
+                        logging.exception("Could not remove unused evaluation artifact")
+        if not interrupted and ObjectId.is_valid(answer_id):
+            try:
+                await release_submission(db, "answerDetails", {"_id": ObjectId(answer_id)}, "active_evaluation", job_id)
+            except Exception:
+                logging.exception("Could not release evaluation submission %s", job_id)
 
 
 # ============================================================
@@ -390,6 +416,19 @@ async def evaluate_answer_script(
     exam_id = payload.folderId
     answer_id = payload.answerId
     generate_transcript_pdf = payload.generateTranscriptPdf
+    answer = await require_answer_access(identity, db, answer_id)
+    if str(answer.get("exam_id")) != exam_id:
+        raise HTTPException(400, "Answer script does not belong to this folder")
+    if answer.get("reviewed_by_professor"):
+        raise HTTPException(409, "Reviewed marks are protected; evaluation was not started.")
+    job_id, is_new, options = await claim_submission(
+        db, "answerDetails", {"_id": answer["_id"], "exam_id": answer["exam_id"]},
+        "active_evaluation", EVAL_JOB_PREFIX, str(uuid.uuid4()), identity,
+        {"generate_transcript_pdf": generate_transcript_pdf},
+    )
+    if not is_new:
+        return JSONResponse(status_code=202, content={"job_id": job_id, "status": "processing",
+            "reused": True, **options, "message": "Reconnected to the existing evaluation."})
 
     # Grading uses both Gemini (OCR) and Claude (grading + optional
     # transcript) calls inside the background job — cost is only known once
@@ -400,19 +439,20 @@ async def evaluate_answer_script(
     # answer sheet.
     budget = await check_institute_token_budget(db, str(faculty_id), ["gemini", "claude"])
     if not budget["allowed"]:
+        await update_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": budget["message"]})
+        await release_submission(db, "answerDetails", {"_id": answer["_id"]}, "active_evaluation", job_id)
         return JSONResponse(status_code=402, content={"error": budget["message"]})
 
-    job_id = str(uuid.uuid4())
-    await set_job(EVAL_JOB_PREFIX, job_id, {
-        "status": "processing", "progress": 0, "step": "Starting evaluation",
-        "owner_user_id": str(identity["user_id"]),
-    })
-
-    await enqueue(
-        "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
-        str(user["_id"]),
-        background_tasks=background_tasks,
-    )
+    try:
+        await enqueue(
+            "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
+            str(user["_id"]), background_tasks=background_tasks,
+        )
+    except Exception:
+        # Dispatch may have reached the queue. Retain the guard: retrying POST
+        # must reconnect rather than bill a second job after an ambiguous write.
+        await update_job(EVAL_JOB_PREFIX, job_id, {"dispatch_uncertain": True})
+        return JSONResponse(status_code=503, content={"error": "Queue dispatch could not be confirmed. Retry to reconnect.", "job_id": job_id})
 
     return JSONResponse(status_code=202, content={
         "job_id": job_id,

@@ -13,7 +13,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import get_current_identity
 from app.api.answer_access import require_exam_access
 from app.db.mongodb import get_database
-from app.models.evaluation import validate_evaluation_details
+from app.models.evaluation import validate_evaluation_details, _validate_total_marks
+from app.models.exam_validation import covered_co_list
 from app.schemas.evaluation import SaveEvaluationDetailsRequest
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["evaluation"])
@@ -51,10 +52,11 @@ async def save_evaluation_details(
 
     try:
         validated_details = validate_evaluation_details(payload.questionEvaluationDetails)
+        total_marks = _validate_total_marks(total_marks, validated_details)
+        covered_cos = set(covered_co_list(exam.get("covered_cos")))
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e) or "questionEvaluationDetails is invalid")
 
-    covered_cos = set(exam.get("covered_cos") or [])
     used_cos = {co["co_code"] for q in validated_details for co in q["cos"]}
     unknown_cos = sorted(used_cos - covered_cos)
     if unknown_cos:

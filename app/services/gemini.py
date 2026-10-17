@@ -19,9 +19,9 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
 from app.models.ai_usage_event import Feature, Provider
-from app.services.ai_usage import record_ai_usage
+from app.services.faculty_ai_usage import tracked_faculty_call
+from app.services.ai_attempt_context import record_provider_retry
 from app.utils.net import safe_get
-from app.utils.token_usage import increment_institute_gemini_tokens, resolve_institute_id_for_faculty
 
 _client: genai.Client | None = None
 
@@ -205,6 +205,11 @@ _GEMINI_TEXT_PROMPT = (
 
 
 def _parse_token_usage(usage_metadata) -> dict:
+    unknown = {"prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0, "usage_status": "unknown"}
+    if (usage_metadata is None or getattr(usage_metadata, "prompt_token_count", None) is None
+            or (getattr(usage_metadata, "candidates_token_count", None) is None
+                and getattr(usage_metadata, "total_token_count", None) is None)):
+        return unknown
     try:
         return {
             "prompt_tokens": getattr(usage_metadata, "prompt_token_count", 0) or 0,
@@ -212,7 +217,7 @@ def _parse_token_usage(usage_metadata) -> dict:
             "total_tokens": getattr(usage_metadata, "total_token_count", 0) or 0,
         }
     except Exception:
-        return {"prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0}
+        return unknown
 
 
 def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "file.pdf") -> Tuple[str, dict]:
@@ -237,7 +242,7 @@ def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "
     raw_text = extract_text_from_file(file_bytes, filename)
     if not raw_text.strip():
         logging.warning("[qp-extract] No text extracted locally from '%s'", filename)
-        return "", {"prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0}
+        return "", {"prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0, "call_status": "skipped"}
 
     user_content = f"{_GEMINI_TEXT_PROMPT}\n\n---\n\n{raw_text}"
     response = client.models.generate_content(model="gemini-2.5-flash", contents=[user_content])
@@ -275,8 +280,11 @@ def _call_generate_content_with_retry(client: genai.Client, model: str, contents
                 or "RESOURCE_EXHAUSTED" in error_text
                 or "quota" in error_text.lower()
             )
-            if not is_retryable:
-                raise RuntimeError(f"File extraction failed: {e}") from e
+            if not is_retryable or attempt == 4:
+                error = RuntimeError(f"File extraction failed: {e}")
+                error.usage = getattr(e, "usage", None)
+                raise error from e
+            record_provider_retry(e, "gemini", model)
 
             match = re.search(r"Please retry in ([\d\.]+)s", error_text)
             if match:
@@ -450,8 +458,10 @@ async def extract_and_patch_question_paper_text(
 
         logging.info("[qp-extract] Extracting text for folder %s (type=%s)", folder_id, _file_ext(filename))
 
-        extracted_text, token_usage = await asyncio.to_thread(
-            extract_question_paper_text_with_gemini, file_bytes, filename
+        extracted_text, token_usage = await tracked_faculty_call(
+            db, extract_question_paper_text_with_gemini, file_bytes, filename,
+            faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+            feature=Feature.EXAM_QUESTION_PAPER_EXTRACTION,
         )
 
         now = datetime.now(timezone.utc)
@@ -475,16 +485,6 @@ async def extract_and_patch_question_paper_text(
         except Exception as e:
             logging.warning("[qp-extract] MCQ answer-key resolution failed (non-fatal): %s", e)
 
-        await increment_institute_gemini_tokens(
-            db, faculty_id, token_usage["prompt_tokens"], token_usage["candidate_tokens"]
-        )
-        if user_id:
-            institute_id = await resolve_institute_id_for_faculty(db, faculty_id)
-            await record_ai_usage(
-                db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
-                feature=Feature.EXAM_QUESTION_PAPER_EXTRACTION, usage=token_usage,
-                institute_id=str(institute_id) if institute_id else None,
-            )
 
         logging.info("[qp-extract] Done for folder %s", folder_id)
 

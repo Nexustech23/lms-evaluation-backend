@@ -48,14 +48,12 @@ from app.services.docx_from_html import generate_docx_from_html, process_and_upl
 from app.services.docx_from_text import build_docx
 from app.services.gemini import extract_text_from_file, generate_content_from_file
 from app.services.imagekit import delete_imagekit_file, upload_file_to_imagekit
-from app.services.job_store import get_owned_job, set_job, update_job
+from app.services.job_store import get_owned_job, set_job, update_job, claim_job_execution
+from app.services.job_submission import claim_submission, release_submission, generation_field
 from app.models.ai_usage_event import Feature, Provider
-from app.services.ai_usage import record_ai_usage
+from app.services.faculty_ai_usage import tracked_faculty_call
 from app.utils.token_usage import (
     check_institute_token_budget,
-    increment_institute_claude_tokens,
-    increment_institute_gemini_tokens,
-    resolve_institute_id_for_faculty,
 )
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["question-paper"])
@@ -359,10 +357,11 @@ Instructions must be written as plain numbered lines only — no bullet points o
 
 async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> None:
     db = get_database()
+    if not await claim_job_execution(QP_JOB_PREFIX, job_id):
+        return
     faculty_id = params["faculty_id"]
     user_id = params.get("user_id")
-    institute_id = await resolve_institute_id_for_faculty(db, faculty_id)
-    institute_id_str = str(institute_id) if institute_id else None
+    interrupted = False
 
     try:
         extracted_text = ""
@@ -370,33 +369,19 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
         if file_bytes.get("questionBank"):
             await update_job(QP_JOB_PREFIX, job_id, {"status": "processing", "step": "extracting_question_bank"})
-            extracted_text, g_usage = await asyncio.to_thread(
-                _extract_file_text, file_bytes["questionBank"], file_bytes["questionBankFilename"], "question bank"
+            extracted_text, g_usage = await tracked_faculty_call(
+                db, _extract_file_text, file_bytes["questionBank"], file_bytes["questionBankFilename"], "question bank",
+                faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                feature=Feature.QP_QUESTION_BANK_EXTRACTION, job_id=job_id,
             )
-            await increment_institute_gemini_tokens(
-                db, faculty_id, g_usage["prompt_tokens"], g_usage["candidate_tokens"]
-            )
-            if user_id:
-                await record_ai_usage(
-                    db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
-                    feature=Feature.QP_QUESTION_BANK_EXTRACTION, usage=g_usage,
-                    job_id=job_id, institute_id=institute_id_str,
-                )
 
         if file_bytes.get("coursePlanner"):
             await update_job(QP_JOB_PREFIX, job_id, {"step": "extracting_course_planner"})
-            course_planner_text, g_usage2 = await asyncio.to_thread(
-                _extract_file_text, file_bytes["coursePlanner"], file_bytes["coursePlannerFilename"], "course planner"
+            course_planner_text, g_usage2 = await tracked_faculty_call(
+                db, _extract_file_text, file_bytes["coursePlanner"], file_bytes["coursePlannerFilename"], "course planner",
+                faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                feature=Feature.QP_COURSE_PLANNER_EXTRACTION, job_id=job_id,
             )
-            await increment_institute_gemini_tokens(
-                db, faculty_id, g_usage2["prompt_tokens"], g_usage2["candidate_tokens"]
-            )
-            if user_id:
-                await record_ai_usage(
-                    db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
-                    feature=Feature.QP_COURSE_PLANNER_EXTRACTION, usage=g_usage2,
-                    job_id=job_id, institute_id=institute_id_str,
-                )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "generating_paper"})
         full_prompt = _build_claude_prompt(
@@ -404,16 +389,13 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             params["subject_name"], params["exam_type"], params["semester"], params["academic_year"],
             params["total_marks"], params["duration"], params["sections"], params.get("co_list") or [],
         )
-        paper_text_raw, c_usage = await asyncio.to_thread(generate_text, full_prompt, "claude-sonnet-4-6", 8000)
+        paper_text_raw, c_usage = await tracked_faculty_call(
+            db, generate_text, full_prompt, "claude-sonnet-4-6", 8000,
+            faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
+            feature=Feature.QP_GENERATION, job_id=job_id,
+        )
         paper_text = re.sub(r"^-{3}BEGIN PAPER-{3}\s*", "", paper_text_raw)
         paper_text = re.sub(r"\s*-{3}END PAPER-{3}$", "", paper_text).strip()
-        await increment_institute_claude_tokens(db, faculty_id, c_usage["input_tokens"], c_usage["output_tokens"])
-        if user_id:
-            await record_ai_usage(
-                db, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
-                feature=Feature.QP_GENERATION, usage=c_usage,
-                job_id=job_id, institute_id=institute_id_str,
-            )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "building_docx"})
         docx_bytes = await asyncio.to_thread(
@@ -451,9 +433,21 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
         })
         logging.info("[qp:%s] Job completed.", job_id)
 
+    except asyncio.CancelledError:
+        interrupted = True
+        await update_job(QP_JOB_PREFIX, job_id, {"status": "interrupted",
+            "step": "Generation interrupted. Verify this job before starting another paid generation."})
+        raise
     except Exception as e:
         logging.error("[qp:%s] Job failed: %s", job_id, e, exc_info=True)
         await update_job(QP_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
+    finally:
+        if not interrupted and params.get("_submission_field") and params.get("user_id"):
+            try:
+                await release_submission(db, "users", {"_id": ObjectId(params["user_id"])},
+                                         params["_submission_field"], job_id)
+            except Exception:
+                logging.exception("Could not release generation submission %s", job_id)
 
 
 # ============================================================
@@ -519,10 +513,6 @@ async def generate_question_paper_ai(
         # paper itself), so if either pool is exhausted the whole job is
         # blocked upfront rather than burning the other provider's tokens
         # on a run that can't finish.
-        budget = await check_institute_token_budget(db, str(faculty_id), ["gemini", "claude"])
-        if not budget["allowed"]:
-            return JSONResponse(status_code=402, content={"error": budget["message"]})
-
         cp_bytes = None
         cp_filename = ""
         if coursePlanner:
@@ -537,12 +527,6 @@ async def generate_question_paper_ai(
 
         sections_list = _parse_sections(sections)
         institute_name = await _get_institute_name(db, faculty_id) or ""
-
-        job_id = str(uuid.uuid4())
-        await set_job(QP_JOB_PREFIX, job_id, {
-            "status": "queued", "step": "starting", "job_id": job_id, "faculty_id": str(faculty_id),
-            "owner_user_id": str(identity["user_id"]),
-        })
 
         params = {
             "institute_name": institute_name,
@@ -564,12 +548,29 @@ async def generate_question_paper_ai(
             "coursePlanner": cp_bytes, "coursePlannerFilename": cp_filename,
         }
 
-        await enqueue("run_question_paper_generation", job_id, params, job_file_bytes,
-                      background_tasks=background_tasks)
+        field = generation_field(params, job_file_bytes)
+        job_id, is_new, _ = await claim_submission(
+            db, "users", {"_id": user["_id"]}, field, QP_JOB_PREFIX, str(uuid.uuid4()), identity,
+        )
+        params["_submission_field"] = field
+        budget = {"warnings": []}
+        if is_new:
+            budget = await check_institute_token_budget(db, str(faculty_id), ["gemini", "claude"])
+            if not budget["allowed"]:
+                await update_job(QP_JOB_PREFIX, job_id, {"status": "failed", "error": budget["message"]})
+                await release_submission(db, "users", {"_id": user["_id"]}, field, job_id)
+                return JSONResponse(status_code=402, content={"error": budget["message"]})
+            try:
+                await enqueue("run_question_paper_generation", job_id, params, job_file_bytes,
+                              background_tasks=background_tasks)
+            except Exception:
+                await update_job(QP_JOB_PREFIX, job_id, {"dispatch_uncertain": True})
+                return JSONResponse(status_code=503, content={"error": "Queue dispatch could not be confirmed. Retry to reconnect.", "jobId": job_id})
 
         return JSONResponse(status_code=202, content={
             "success": True,
             "jobId": job_id,
+            "reused": not is_new,
             "message": "Generation started. Poll /question-paper/generate-ai/status/<jobId>.",
             "token_warnings": budget["warnings"],
         })
@@ -613,9 +614,9 @@ async def generate_question_paper_status(
             "tokenUsage": job.get("tokenUsage"),
         }
 
-    if status == "failed":
-        return JSONResponse(status_code=500, content={
-            "success": False, "status": "failed", "error": job.get("error", "Unknown error."),
+    if status in {"failed", "interrupted"}:
+        return JSONResponse(status_code=500 if status == "failed" else 409, content={
+            "success": False, "status": status, "error": job.get("error") or job.get("step", "Unknown error."),
         })
 
     return JSONResponse(status_code=202, content={

@@ -25,6 +25,7 @@ from app.schemas.answers import (
     UploadAnswerScriptRequest,
 )
 from app.services.imagekit import delete_imagekit_file, get_imagekit_auth_params
+from app.services.review_marks import validate_review_marks
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["answers"])
 
@@ -174,13 +175,12 @@ async def save_self_evaluation(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     answer_id = payload.answer_id
-    questionwise_marking = payload.questionwise_marking
-
     answer = await require_answer_access(identity, db, answer_id)
-
-    total_final_marks = sum(
-        (q.get("ai_awarded_marks", 0) + q.get("grace_marks", 0)) for q in questionwise_marking
-    )
+    try:
+        questionwise_marking = validate_review_marks(payload.questionwise_marking, answer)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    total_final_marks = sum(q["final_marks"] for q in questionwise_marking)
 
     result = await db["answerDetails"].update_one(
         {"_id": answer["_id"], "exam_id": answer["exam_id"]},
@@ -293,6 +293,7 @@ async def manual_marks_entry(
                     "$set": {
                         "faculty_id": ObjectId(faculty_id),
                         "student_name": student_id,
+                        "student_id": student_id,
                         "total_final_marks": total_final_marks,
                         "total_ai_marks": total_final_marks,
                         "total_max_marks": total_max,
@@ -327,6 +328,7 @@ async def manual_marks_entry(
                     "$set": {
                         "faculty_id": ObjectId(faculty_id),
                         "student_name": student_id,
+                        "student_id": student_id,
                         "total_final_marks": marks,
                         "total_ai_marks": marks,
                         "total_max_marks": max_marks,

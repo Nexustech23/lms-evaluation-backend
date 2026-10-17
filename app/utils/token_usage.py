@@ -116,7 +116,8 @@ def aggregate_grading_tokens(
 
 
 async def save_grading_tokens_to_institute(
-    db: AsyncIOMotorDatabase, institute_id: Optional[Any], token_usage: Dict[str, Any]
+    db: AsyncIOMotorDatabase, institute_id: Optional[Any], token_usage: Dict[str, Any],
+    *, tokens_already_recorded: bool = False,
 ) -> None:
     """
     Best-effort — a failure here must never fail the grading job itself.
@@ -128,6 +129,12 @@ async def save_grading_tokens_to_institute(
     try:
         if isinstance(institute_id, str) and ObjectId.is_valid(institute_id):
             institute_id = ObjectId(institute_id)
+
+        if tokens_already_recorded:
+            await db["instituteDetails"].update_one(
+                {"_id": institute_id}, {"$inc": {"token_usage.evaluation_count": 1}},
+            )
+            return
 
         gemini = token_usage.get("gemini", {})
         claude = token_usage.get("claude", {})
