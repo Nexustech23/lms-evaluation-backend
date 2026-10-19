@@ -83,10 +83,11 @@ async def generate_transcript_for_semester(
             if result:
                 student = next((s for s in result["students"] if s["student_id"] == student_id), None)
 
-            # A student with no answer sheet at all for this subject is
-            # treated the same as one with no course_grade: synthetic
-            # 0 marks / U grade, so total_credits stays comparable across
-            # every student in the roster.
+            if student is None or student.get("is_partial") or student.get("composite_percentage") is None:
+                raise HTTPException(409, "Evaluation is pending or results are incomplete. Complete grading before generating the academic transcript.")
+
+            # Only complete subject composites reach official transcripts.
+            # A genuine evaluated zero remains zero; pending is never a grade.
             marks = (student or {}).get("composite_percentage")
             grade = (student or {}).get("course_grade") or "U"
             if marks is None:
@@ -197,20 +198,14 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
         for document in documents:
             document["import_id"] = generation_id
 
-        await db["academic_transcripts"].insert_many(documents, ordered=True)
-        await db["transcriptImports"].insert_one({
+        from app.services.transcript_commit import commit_transcript_set
+        await commit_transcript_set(db, institute_id, batch_id, documents, {
             "import_id": generation_id,
             "institute_id": institute_id,
             "batch_id": batch_id,
             "source": "auto-refresh",
             "record_count": len(documents),
             "imported_at": datetime.now(timezone.utc),
-        })
-        # Scoped to this semester only, same as the manual generate/confirm
-        # flow — replaces only the prior generation of the SAME semester.
-        await db["academic_transcripts"].delete_many({
-            "institute_id": institute_id, "batch_id": batch_id,
-            "semester_no": int(semester), "import_id": {"$ne": generation_id},
-        })
+        }, semester=semester)
     except Exception:
         logger.exception("Automatic transcript refresh failed for exam_id=%s", exam_id)

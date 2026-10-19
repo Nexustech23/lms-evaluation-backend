@@ -28,6 +28,7 @@ from app.models.relative_grading import build_grading_config
 from app.services.co_excel import CoReportError, _normalise_answer, build_co_report_workbook, fetch_co_report_data
 from app.utils.composite_helper import compute_weighted_composite
 from app.utils.grade_points import get_grade_point
+from app.models.exam_validation import finite_number
 from app.utils.grading_helper import assign_relative_grades
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["subject-results"])
@@ -121,21 +122,29 @@ async def _get_subject_results(
         final_marks = ans.get("total_final_marks")
         if final_marks is None:
             final_marks = ans.get("total_ai_marks")
-        if final_marks is None:
-            final_marks = 0
-        max_marks = ans.get("total_max_marks") or 0
-        percentage = round(final_marks / max_marks * 100, 2) if max_marks else 0.0
+        try:
+            max_marks = finite_number(ans.get("total_max_marks") or 0, "Saved max marks")
+            final_marks = finite_number(final_marks, "Saved final marks") if final_marks is not None else None
+        except ValueError:
+            return {"error": "Saved marks are invalid; correct the answer before reporting"}, 409
+        evaluated = final_marks is not None and max_marks > 0
+        if evaluated and not 0 <= final_marks <= max_marks:
+            return {"error": "Saved marks are outside the allowed range"}, 409
+        percentage = round(final_marks / max_marks * 100, 2) if evaluated else None
 
         student_map[sid][eid] = {
             "answer_id": str(ans["_id"]),
-            "final_marks": final_marks,
+            "final_marks": final_marks if evaluated else None,
             "max_marks": max_marks,
             "percentage": percentage,
+            "status": "evaluated" if evaluated else "pending",
             "filename": filename,
             "evaluated_report_url": ans.get("evaluated_report_url"),
             "reviewed_by_professor": ans.get("reviewed_by_professor", False),
         }
 
+        if not evaluated:
+            continue
         co_totals = student_co_totals.setdefault(sid, {})
         for q in _normalise_answer(ans)["questions"]:
             for co in q["cos"]:
@@ -171,7 +180,7 @@ async def _get_subject_results(
     grading = await db["relativeGradings"].find_one({"university_id": institute_id})
     if grading:
         grading_config = build_grading_config(grading)
-        gradable_students = [s for s in students_list if s.get("composite_percentage") is not None]
+        gradable_students = [s for s in students_list if s.get("composite_percentage") is not None and not s.get("is_partial")]
         gradable_students.sort(key=lambda s: s["composite_percentage"], reverse=True)
         if gradable_students:
             graded = [{**s, "overall_total": s["composite_percentage"]} for s in gradable_students]
@@ -299,6 +308,9 @@ async def _get_combined_results(
         if code == 200:
             subject_results[subject_id] = result
 
+    if any(s.get("is_partial") for result in subject_results.values() for s in result["students"]):
+        return {"error": "Evaluation is pending. Complete all weighted exam results before publishing combined results"}, 409
+
     roster = set()
     for result in subject_results.values():
         roster.update(s["student_id"] for s in result["students"])
@@ -318,6 +330,8 @@ async def _get_combined_results(
         for sid in roster:
             student = by_student.get(sid)
             composite = (student or {}).get("composite_percentage")
+            if student is None or composite is None or student.get("is_partial"):
+                return {"error": "Evaluation is pending or a subject result is missing; combined results cannot be finalized"}, 409
             grade = (student or {}).get("course_grade") or "U"
             grade_point = (student or {}).get("grade_point") or 0
             if composite is None:
@@ -866,6 +880,13 @@ def _build_detailed_excel_workbook(folder: Dict[str, Any], eval_details: List[Di
         total_ai = answer.get("total_ai_marks", 0) or 0
         total_final = answer.get("total_final_marks", total_ai) or 0
         max_marks = answer.get("total_max_marks", 0) or 0
+
+        if max_marks <= 0:
+            for offset in range(4):
+                worksheet.write(row, summary_start_col + offset, "Pending evaluation", cell_center_format)
+            worksheet.write(row, summary_start_col + 4, "-", cell_center_format)
+            row += 1
+            continue
 
         worksheet.write(row, summary_start_col, total_ai, cell_center_format)
         worksheet.write(row, summary_start_col + 1, total_final, cell_center_format)

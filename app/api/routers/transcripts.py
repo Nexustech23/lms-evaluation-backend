@@ -46,6 +46,7 @@ from app.schemas.transcripts import TranscriptGenerateRequest
 from app.utils.transcript_excel_helper import build_transcript_documents, parse_transcript_workbook
 from app.utils.uploads import read_upload_capped
 from app.utils.transcript_generation_helper import generate_transcript_for_semester
+from app.services.transcript_commit import commit_transcript_set
 
 router = APIRouter(prefix="/transcript", dependencies=[Depends(get_current_identity)], tags=["transcripts"])
 
@@ -218,8 +219,7 @@ async def confirm_transcript_import(
         if not documents:
             raise HTTPException(status_code=400, detail="No transcript records were generated")
 
-        await db["academic_transcripts"].insert_many(documents, ordered=True)
-        await db["transcriptImports"].insert_one({
+        await commit_transcript_set(db, institute_id, batch["_id"], documents, {
             "import_id": import_id,
             "institute_id": institute_id,
             "batch_id": batch["_id"],
@@ -228,9 +228,6 @@ async def confirm_transcript_import(
             "record_count": len(documents),
             "imported_by": ObjectId(identity["user_id"]),
             "imported_at": datetime.now(timezone.utc),
-        })
-        await db["academic_transcripts"].delete_many({
-            "institute_id": institute_id, "batch_id": batch["_id"], "import_id": {"$ne": import_id},
         })
 
         return JSONResponse(status_code=201, content={
@@ -241,16 +238,10 @@ async def confirm_transcript_import(
             "summary": parsed["summary"],
         })
     except HTTPException:
-        await db["academic_transcripts"].delete_many({"import_id": import_id})
-        await db["transcriptImports"].delete_many({"import_id": import_id})
         raise
     except ValueError as error:
-        await db["academic_transcripts"].delete_many({"import_id": import_id})
-        await db["transcriptImports"].delete_many({"import_id": import_id})
         return JSONResponse(status_code=400, content={"error": str(error)})
     except Exception:
-        await db["academic_transcripts"].delete_many({"import_id": import_id})
-        await db["transcriptImports"].delete_many({"import_id": import_id})
         logger.exception("Transcript workbook import failed")
         return JSONResponse(status_code=500, content={"error": "Unable to import and calculate transcript workbook"})
 
@@ -341,8 +332,7 @@ async def confirm_transcript_generation(
         for document in documents:
             document["import_id"] = generation_id
 
-        await db["academic_transcripts"].insert_many(documents, ordered=True)
-        await db["transcriptImports"].insert_one({
+        await commit_transcript_set(db, institute_id, batch["_id"], documents, {
             "import_id": generation_id,
             "institute_id": institute_id,
             "batch_id": batch["_id"],
@@ -351,14 +341,7 @@ async def confirm_transcript_generation(
             "record_count": len(documents),
             "imported_by": ObjectId(identity["user_id"]),
             "imported_at": datetime.now(timezone.utc),
-        })
-        # Scoped to this semester only — unlike the Excel-import path's
-        # delete_many (which deletes every semester for the batch), this
-        # path only replaces a prior generation of the SAME semester.
-        await db["academic_transcripts"].delete_many({
-            "institute_id": institute_id, "batch_id": batch["_id"],
-            "semester_no": int(semester), "import_id": {"$ne": generation_id},
-        })
+        }, semester=semester)
 
         return JSONResponse(status_code=201, content={
             "success": True,
@@ -368,12 +351,8 @@ async def confirm_transcript_generation(
             "summary": summary,
         })
     except HTTPException:
-        await db["academic_transcripts"].delete_many({"import_id": generation_id})
-        await db["transcriptImports"].delete_many({"import_id": generation_id})
         raise
     except Exception:
-        await db["academic_transcripts"].delete_many({"import_id": generation_id})
-        await db["transcriptImports"].delete_many({"import_id": generation_id})
         logger.exception("Transcript generation failed")
         return JSONResponse(status_code=500, content={"error": "Unable to generate and calculate transcript"})
 

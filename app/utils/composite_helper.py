@@ -38,5 +38,7 @@ def compute_weighted_composite(exam_results: List[Dict[str, Any]]) -> Dict[str, 
         "weight_used": weight_used,
         "weight_expected": weight_expected,
         "coverage_ratio": coverage_ratio,
-        "is_partial": coverage_ratio < 1.0,
+        # Rounding coverage for display must not hide a small pending weight.
+        "is_partial": any(e.get("percentage") is None and float(e.get("weightage", 0) or 0) > 0
+                          for e in exam_results),
     }
