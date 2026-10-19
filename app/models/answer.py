@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from bson import ObjectId
+import math
 
 
 def _validate_cos(cos_list: List[Dict[str, Any]], question_max_marks: float):
@@ -42,7 +43,9 @@ def _validate_cos(cos_list: List[Dict[str, Any]], question_max_marks: float):
             "remarks": co.get("remarks"),
         })
 
-    if total_co_final > question_max_marks:
+    if total_co_final > question_max_marks and not math.isclose(
+        total_co_final, question_max_marks, rel_tol=0, abs_tol=1e-7
+    ):
         raise ValueError("Total CO final marks cannot exceed question max_marks")
 
     return validated

@@ -822,17 +822,37 @@ async def update_question_paper(
             "/question-papers", ["question-paper", str(faculty_id)],
         )
 
-        old_file_id = existing.get("question_paper_file_id")
-        if old_file_id:
-            await asyncio.to_thread(delete_imagekit_file, old_file_id)
-
         update_fields["question_paper_url"] = upload["url"]
         update_fields["question_paper_file_id"] = upload["file_id"]
 
-    await db["questionPaperDetails"].update_one(
-        {"_id": ObjectId(question_paper_id), "faculty_id": faculty_object_id, "is_deleted": False},
-        {"$set": update_fields},
-    )
+    update_fields["document_revision"] = str(uuid.uuid4())
+    try:
+        result = await db["questionPaperDetails"].update_one(
+            {"_id": ObjectId(question_paper_id), "faculty_id": faculty_object_id, "is_deleted": False,
+             "document_revision": existing.get("document_revision")},
+            {"$set": update_fields},
+        )
+        if result.matched_count != 1:
+            raise HTTPException(409, "Question paper changed while saving. Refresh before editing again.")
+    except Exception:
+        new_file_id = update_fields.get("question_paper_file_id")
+        if new_file_id:
+            # A DB timeout may occur AFTER commit. Never remove a file unless
+            # a read confirms it is not the currently referenced document.
+            try:
+                referenced = await db["questionPaperDetails"].find_one({
+                    "_id": ObjectId(question_paper_id), "question_paper_file_id": new_file_id})
+                if not referenced:
+                    await asyncio.to_thread(delete_imagekit_file, new_file_id)
+            except Exception:
+                logging.exception("Could not reconcile unused question-paper upload")
+        raise
+    old_file_id = existing.get("question_paper_file_id")
+    if update_fields.get("question_paper_file_id") and old_file_id:
+        try:
+            await asyncio.to_thread(delete_imagekit_file, old_file_id)
+        except Exception:
+            logging.exception("New paper saved; old question-paper file cleanup failed")
     updated = await db["questionPaperDetails"].find_one({"_id": ObjectId(question_paper_id)})
 
     return {"success": True, "questionPaper": serialize_question_paper(updated)}

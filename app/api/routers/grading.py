@@ -44,6 +44,7 @@ from app.services.mcq_grading import (
 from app.services.job_store import get_owned_job, set_job, update_job, claim_job_execution
 from app.services.job_submission import claim_submission, release_submission
 from app.services.paper_version import paper_snapshot_filter
+from app.services.exam_paper_lock import lock_exam_for_marks
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
 from app.services.faculty_ai_usage import tracked_faculty_call
@@ -112,6 +113,14 @@ async def _run_evaluation_job(
 
         if exam.get("faculty_id") != ObjectId(faculty_id):
             await _fail(job_id, "You are not authorized to evaluate this exam")
+            return
+
+        await lock_exam_for_marks(db, exam_object_id)
+        # Upload could have won just before the permanent barrier was set.
+        # Grade only the snapshot read AFTER acquiring that barrier.
+        exam = await db["newsavedDocs"].find_one({"_id": exam_object_id, "faculty_id": ObjectId(faculty_id)})
+        if not exam:
+            await _fail(job_id, "Exam changed or was deleted")
             return
 
         answer = await db["answerDetails"].find_one({"_id": answer_object_id})
@@ -444,6 +453,7 @@ async def evaluate_answer_script(
         return JSONResponse(status_code=402, content={"error": budget["message"]})
 
     try:
+        await lock_exam_for_marks(db, answer["exam_id"])
         await enqueue(
             "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
             str(user["_id"]), background_tasks=background_tasks,
