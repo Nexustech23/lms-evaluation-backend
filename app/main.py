@@ -42,6 +42,7 @@ from app.core.redis_client import close_redis_connection, connect_to_redis
 from app.db.indexes import ensure_indexes
 from app.db.mongodb import close_mongo_connection, connect_to_mongo, get_database, ping_mongo
 from app.services.ai_usage import ensure_ai_usage_indexes
+from app.services.ai_usage_rollups import usage_reconciliation_loop
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("pymongo").setLevel(logging.WARNING)
@@ -78,7 +79,15 @@ async def lifespan(app: FastAPI):
     await ensure_indexes(get_database())
     connect_to_redis()
     await connect_to_queue()
-    yield
+    usage_reconciler = asyncio.create_task(usage_reconciliation_loop(get_database()))
+    try:
+        yield
+    finally:
+        usage_reconciler.cancel()
+        try:
+            await usage_reconciler
+        except asyncio.CancelledError:
+            pass
     await close_queue()
     await close_redis_connection()
     close_mongo_connection()

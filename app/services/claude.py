@@ -9,11 +9,21 @@ from app.core.config import settings
 _client: anthropic.Anthropic | None = None
 
 
+def _message_usage(message):
+    usage = {"input_tokens": message.usage.input_tokens,
+            "output_tokens": message.usage.output_tokens,
+            "cache_creation_input_tokens": getattr(message.usage, "cache_creation_input_tokens", 0) or 0,
+            "cache_read_input_tokens": getattr(message.usage, "cache_read_input_tokens", 0) or 0,
+            "total_tokens": message.usage.input_tokens + message.usage.output_tokens}
+    usage["total_tokens"] += usage["cache_creation_input_tokens"] + usage["cache_read_input_tokens"]
+    return usage
+
+
 def _get_client() -> anthropic.Anthropic:
     """Lazy singleton — avoids failing app startup when ANTHROPIC_API_KEY isn't set yet."""
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, max_retries=0)
     return _client
 
 
@@ -28,6 +38,7 @@ def generate_html(
     fences stripped. If the model hit the token cap, a visible truncation
     banner is appended and a warning is logged.
     """
+    token_usage = None
     try:
         with _get_client().messages.stream(
             model=model,
@@ -35,6 +46,8 @@ def generate_html(
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             message = stream.get_final_message()
+
+        token_usage = _message_usage(message)
 
         html_content = message.content[0].text
         html_content = re.sub(r"^```html\s*", "", html_content, flags=re.IGNORECASE)
@@ -54,16 +67,12 @@ def generate_html(
                 'Try a shorter length, or regenerate.</div>'
             )
 
-        token_usage = {
-            "input_tokens": message.usage.input_tokens,
-            "output_tokens": message.usage.output_tokens,
-            "total_tokens": message.usage.input_tokens + message.usage.output_tokens,
-        }
-
         return html_content, token_usage
 
     except Exception as e:
-        raise RuntimeError(f"Content generation failed: {e}") from e
+        error = RuntimeError(f"Content generation failed: {e}")
+        error.usage = token_usage
+        raise error from e
 
 
 def generate_text(
@@ -74,6 +83,7 @@ def generate_text(
     Like generate_html() but returns the raw response text unmodified (no markdown-fence
     stripping) — used where the output is plain text, not an HTML document.
     """
+    token_usage = None
     try:
         message = _get_client().messages.create(
             model=model,
@@ -81,15 +91,12 @@ def generate_text(
             messages=[{"role": "user", "content": prompt}],
         )
 
+        token_usage = _message_usage(message)
         text = message.content[0].text.strip()
-
-        token_usage = {
-            "input_tokens": message.usage.input_tokens,
-            "output_tokens": message.usage.output_tokens,
-            "total_tokens": message.usage.input_tokens + message.usage.output_tokens,
-        }
 
         return text, token_usage
 
     except Exception as e:
-        raise RuntimeError(f"Content generation failed: {e}") from e
+        error = RuntimeError(f"Content generation failed: {e}")
+        error.usage = token_usage
+        raise error from e

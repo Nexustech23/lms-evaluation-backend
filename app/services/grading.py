@@ -22,11 +22,12 @@ GEMINI_OCR_MODEL = "gemini-3.1-flash-lite"
 
 
 def _empty_claude_tokens(call_name: str) -> Dict[str, Any]:
-    return {"call": call_name, "model": CLAUDE_GRADING_MODEL, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    return {"call": call_name, "model": CLAUDE_GRADING_MODEL, "input_tokens": 0,
+            "output_tokens": 0, "total_tokens": 0, "usage_status": "unknown", "call_status": "failed"}
 
 
 def _empty_gemini_tokens(call_name: str) -> Dict[str, Any]:
-    return {"call": call_name, "model": GEMINI_OCR_MODEL, "prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0}
+    return {"call": call_name, "model": GEMINI_OCR_MODEL, "prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0, "usage_status": "unknown"}
 
 
 def _strip_fences(text: str) -> str:
@@ -105,9 +106,12 @@ def extract_answer_text_with_gemini(
     try:
         text, usage = generate_content_from_file(pdf_bytes, "application/pdf", prompt, model=GEMINI_OCR_MODEL)
     except Exception as e:
-        raise RuntimeError(f"Answer script OCR failed: {e}") from e
+        error = RuntimeError(f"Answer script OCR failed: {e}")
+        error.usage = getattr(e, "usage", None)
+        raise error from e
 
     return text, {
+        **usage,
         "call": "extract_text_with_gemini",
         "model": GEMINI_OCR_MODEL,
         "prompt_tokens": usage["prompt_tokens"],
@@ -251,12 +255,17 @@ def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: Li
         # extra headroom is no longer needed.
         text, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=20000)
         return text, {
+            **usage,
             "call": "grade_with_claude", "model": CLAUDE_GRADING_MODEL,
             "input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"],
             "total_tokens": usage["total_tokens"],
         }
     except Exception as e:
-        return f"Claude evaluation error: {e}", _empty_claude_tokens("grade_with_claude")
+        usage = getattr(e, "usage", None)
+        return f"Claude evaluation error: {e}", (
+            {**usage, "model": CLAUDE_GRADING_MODEL, "call_status": "failed"}
+            if usage else _empty_claude_tokens("grade_with_claude")
+        )
 
 
 # ============================================================
@@ -287,14 +296,17 @@ def generate_transcript_html_with_claude(answer_text: str, student_name: str = "
         html, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=18000)
         html = _strip_fences(html)
         return html, {
+            **usage,
             "call": "generate_transcript_html_with_claude", "model": CLAUDE_GRADING_MODEL,
             "input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"],
             "total_tokens": usage["total_tokens"],
         }
     except Exception as e:
         logging.warning("Transcript generation via Claude failed, using basic fallback: %s", e)
-        return generate_basic_transcript_html(answer_text, student_name), _empty_claude_tokens(
-            "generate_transcript_html_with_claude"
+        usage = getattr(e, "usage", None)
+        return generate_basic_transcript_html(answer_text, student_name), (
+            {**usage, "model": CLAUDE_GRADING_MODEL, "call_status": "failed"}
+            if usage else _empty_claude_tokens("generate_transcript_html_with_claude")
         )
 
 

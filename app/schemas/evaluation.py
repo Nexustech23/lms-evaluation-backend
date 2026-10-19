@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SaveEvaluationDetailsRequest(BaseModel):
@@ -10,4 +10,11 @@ class SaveEvaluationDetailsRequest(BaseModel):
     # the router calls it unchanged; this schema only guarantees the outer
     # shape (a non-empty list + a numeric totalMarks) before that runs.
     questionEvaluationDetails: List[Dict[str, Any]] = Field(min_length=1)
-    totalMarks: float = Field(gt=0)
+    totalMarks: float = Field(gt=0, allow_inf_nan=False)
+
+    @field_validator("totalMarks", mode="before")
+    @classmethod
+    def reject_boolean_marks(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("totalMarks must be a number")
+        return value

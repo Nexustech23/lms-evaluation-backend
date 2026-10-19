@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 from bson import ObjectId
+from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.transcript import get_semesters
@@ -58,6 +59,8 @@ async def generate_transcript_for_semester(
     subject_results: Dict[str, Any] = {}
     for subject in subjects:
         result, code = await _get_subject_results(db, str(subject["_id"]), institute_id)
+        if code == 409:
+            raise HTTPException(status_code=409, detail=result["error"])
         if code == 200:
             subject_results[str(subject["_id"])] = result
 

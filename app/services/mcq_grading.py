@@ -118,7 +118,9 @@ def determine_mcq_answer_keys(
         text, usage = generate_text(prompt, model=MCQ_ANSWER_KEY_MODEL, max_tokens=4000)
     except Exception as e:
         logger.warning("determine_mcq_answer_keys: Claude call failed: %s", e)
-        return {}, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        if getattr(e, "usage", None):
+            return {}, {**e.usage, "call_status": "failed"}
+        return {}, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "usage_status": "unknown"}
 
     try:
         cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
@@ -348,7 +350,12 @@ async def determine_and_save_mcq_answer_keys(
 
         logger.info("[mcq-key] folder %s: resolving answer key for %d MCQ question(s)",
                     folder_id, len(mcq_questions))
-        answer_key, usage = await asyncio.to_thread(determine_mcq_answer_keys, mcq_questions)
+        from app.services.faculty_ai_usage import tracked_faculty_call
+        from app.models.ai_usage_event import Feature, Provider
+        answer_key, usage = await tracked_faculty_call(
+            db, determine_mcq_answer_keys, mcq_questions, faculty_id=faculty_id, user_id=user_id,
+            provider=Provider.CLAUDE, model=MCQ_ANSWER_KEY_MODEL, feature=Feature.GRADING_MCQ_ANSWER_KEY,
+        )
 
         # Embed each question's option texts (letter -> text) into its saved key
         # entry — the OCR step needs these to recognize a student who wrote out
@@ -380,17 +387,6 @@ async def determine_and_save_mcq_answer_keys(
         logger.info("[mcq-key] folder %s: saved %d answer(s), %d need review",
                     folder_id, len(answer_key), needs_review_count)
 
-        if user_id and (usage.get("input_tokens") or usage.get("output_tokens")):
-            from app.models.ai_usage_event import Feature, Provider
-            from app.services.ai_usage import record_ai_usage
-            from app.utils.token_usage import resolve_institute_id_for_faculty
-
-            institute_id = await resolve_institute_id_for_faculty(db, faculty_id)
-            await record_ai_usage(
-                db, user_id=user_id, provider=Provider.CLAUDE, model=MCQ_ANSWER_KEY_MODEL,
-                feature=Feature.GRADING_MCQ_ANSWER_KEY, usage=usage,
-                institute_id=str(institute_id) if institute_id else None,
-            )
 
         return answer_key if result.matched_count else {}
 

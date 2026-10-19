@@ -38,14 +38,13 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["subject-
 # ============================================================
 
 def _extract_student_id(filename: str) -> str:
-    """
-    Extract student roll number from filename.
-    e.g. "ME-304-021.pdf" -> "021", "CS101-A42.pdf" -> "A42"
-    Falls back to the full stem when no hyphen is present.
-    """
-    stem = filename.rsplit(".", 1)[0]
-    parts = stem.rsplit("-", 1)
-    return parts[-1].strip() if parts else stem.strip()
+    """Preserve the complete ID; only manual-entry prefixes are synthetic."""
+    if not isinstance(filename, str):
+        return ""
+    filename = filename.strip()
+    if filename.startswith("MANUAL-"):
+        return filename[len("MANUAL-"):].strip()
+    return filename.rsplit(".", 1)[0].strip() if "." in filename else filename
 
 
 def _natural_key(value: Any):
@@ -110,10 +109,20 @@ async def _get_subject_results(
     for ans in answers:
         eid = str(ans.get("exam_id", ""))
         filename = ans.get("filename", "")
-        sid = _extract_student_id(filename)
+        explicit_id = ans.get("student_id")
+        sid = str(explicit_id).strip() if explicit_id is not None else ""
+        sid = sid or _extract_student_id(filename)
+        if not sid:
+            return {"error": "An answer has no student ID or filename; correct its identity before reporting"}, 409
         student_map.setdefault(sid, {})
+        if eid in student_map[sid]:
+            return {"error": f"Multiple answers for student {sid} in one exam; resolve the duplicate before reporting"}, 409
 
-        final_marks = ans.get("total_final_marks") or ans.get("total_ai_marks") or 0
+        final_marks = ans.get("total_final_marks")
+        if final_marks is None:
+            final_marks = ans.get("total_ai_marks")
+        if final_marks is None:
+            final_marks = 0
         max_marks = ans.get("total_max_marks") or 0
         percentage = round(final_marks / max_marks * 100, 2) if max_marks else 0.0
 
@@ -285,6 +294,8 @@ async def _get_combined_results(
     for subject in subjects:
         subject_id = str(subject["_id"])
         result, code = await _get_subject_results(db, subject_id, institute_id)
+        if code == 409:
+            return result, code
         if code == 200:
             subject_results[subject_id] = result
 
