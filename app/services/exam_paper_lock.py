@@ -3,8 +3,13 @@ from fastapi import HTTPException
 from app.services.paper_version import paper_snapshot_filter
 
 
-async def lock_exam_for_marks(db, exam_id, paper=None):
+_UNSET = object()
+
+
+async def lock_exam_for_marks(db, exam_id, paper=None, rubric_revision=_UNSET):
     query = paper_snapshot_filter(exam_id, paper) if paper is not None else {"_id": exam_id}
+    if rubric_revision is not _UNSET:
+        query["rubric_revision"] = rubric_revision
     result = await db["newsavedDocs"].update_one(
         query, {"$set": {"paper_locked": True}},
     )

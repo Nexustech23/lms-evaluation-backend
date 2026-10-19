@@ -331,7 +331,9 @@ async def _run_evaluation_job(
                 "evaluated_at": now,
                 "updated_at": now,
                 "token_usage": {**token_usage, "transcript_generated": generate_transcript_pdf},
-            }},
+            }, "$addToSet": {"verified_storage_ids": {"$each": [
+                upload["file_id"] for upload in (evaluation_upload, transcript_upload) if upload.get("file_id")
+            ]}}},
         )
         if save_result.matched_count != 1:
             raise RuntimeError("Answer was deleted or reviewed while AI ran. Existing marks were preserved.")

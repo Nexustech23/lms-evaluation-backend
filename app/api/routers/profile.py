@@ -43,6 +43,7 @@ from app.schemas.profile import (
 )
 from app.utils.batch import load_by_ids
 from app.utils.cascade import cascade_institute_access, cascade_institute_status, cascade_tutor_status
+from app.services.student_deletion import delete_scoped_student
 
 router = APIRouter(tags=["profile"])
 
@@ -870,19 +871,9 @@ async def get_all_institute_students(
 
 
 @router.delete("/institute-students/{student_id}", dependencies=[Depends(require_role(SUPERADMIN, INSTITUTE))])
-async def delete_institute_student(student_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(student_id):
-        raise HTTPException(status_code=400, detail="Invalid student ID")
-
-    doc = await db["studentDetails"].find_one({"_id": ObjectId(student_id), "role": 4})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Institute student not found")
-
-    uid = doc["user_id"]
-    await db["studentDetails"].delete_one({"_id": ObjectId(student_id)})
-    await db["users"].delete_one({"_id": uid})
-
-    return {"success": True, "message": f"Institute student deleted (student_id: {student_id}, user_id: {uid})"}
+async def delete_institute_student(student_id: str, identity: dict = Depends(get_current_identity),
+                                   db: AsyncIOMotorDatabase = Depends(get_database)):
+    return await delete_scoped_student(db, identity, student_id, 4)
 
 
 @router.get(
@@ -1105,19 +1096,9 @@ async def get_all_tutor_students(
 
 
 @router.delete("/tutor-students/{student_id}", dependencies=[Depends(require_role(SUPERADMIN, TUTOR))])
-async def delete_tutor_student(student_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(student_id):
-        raise HTTPException(status_code=400, detail="Invalid student ID")
-
-    doc = await db["studentDetails"].find_one({"_id": ObjectId(student_id), "role": 6})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Tutor student not found")
-
-    uid = doc["user_id"]
-    await db["studentDetails"].delete_one({"_id": ObjectId(student_id)})
-    await db["users"].delete_one({"_id": uid})
-
-    return {"success": True, "message": f"Tutor student deleted (student_id: {student_id}, user_id: {uid})"}
+async def delete_tutor_student(student_id: str, identity: dict = Depends(get_current_identity),
+                               db: AsyncIOMotorDatabase = Depends(get_database)):
+    return await delete_scoped_student(db, identity, student_id, 6)
 
 
 # ============================================================

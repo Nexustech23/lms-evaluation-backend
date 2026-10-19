@@ -4,9 +4,6 @@
 # controllers/institute/evaluation_controller.py
 # ============================================================
 
-from datetime import datetime, timezone
-
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -15,6 +12,7 @@ from app.api.answer_access import require_exam_access
 from app.db.mongodb import get_database
 from app.models.evaluation import validate_evaluation_details, _validate_total_marks
 from app.models.exam_validation import covered_co_list
+from app.services.rubric_commit import commit_rubric
 from app.schemas.evaluation import SaveEvaluationDetailsRequest
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["evaluation"])
@@ -46,8 +44,6 @@ async def save_evaluation_details(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     exam = await require_exam_access(identity, db, folder_id)
-    faculty_object_id = ObjectId(str(exam["faculty_id"]))
-    exam_object_id = exam["_id"]
     total_marks = payload.totalMarks
 
     try:
@@ -68,25 +64,7 @@ async def save_evaluation_details(
             ),
         )
 
-    now = datetime.now(timezone.utc)
-    existing_eval = await db["evaluationDetails"].find_one(
-        {"exam_id": exam_object_id, "faculty_id": faculty_object_id}
-    )
-
-    if existing_eval:
-        await db["evaluationDetails"].update_one(
-            {"exam_id": exam_object_id, "faculty_id": faculty_object_id},
-            {"$set": {"questionEvaluationDetails": validated_details, "totalMarks": total_marks, "updated_at": now}},
-        )
-    else:
-        await db["evaluationDetails"].insert_one({
-            "faculty_id": faculty_object_id,
-            "exam_id": exam_object_id,
-            "totalMarks": total_marks,
-            "questionEvaluationDetails": validated_details,
-            "created_at": now,
-            "updated_at": now,
-        })
+    await commit_rubric(db, exam, validated_details, total_marks)
 
     return {
         "success": True,
