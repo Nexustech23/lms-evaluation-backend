@@ -6,7 +6,6 @@
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, List
 
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -16,7 +15,6 @@ from app.api.deps import get_current_identity
 from app.api.answer_access import require_answer_access, require_exam_access
 from app.core.queue import enqueue
 from app.db.mongodb import get_database
-from app.models.answer import validate_questionwise
 from app.schemas.answers import (
     DeleteFileRequest,
     ManualMarksEntryRequest,
@@ -25,6 +23,8 @@ from app.schemas.answers import (
     UploadAnswerScriptRequest,
 )
 from app.services.imagekit import delete_imagekit_file, get_imagekit_auth_params
+from app.services.exam_paper_lock import lock_exam_for_marks
+from app.services.manual_marks import prepare_manual_marks
 from app.services.review_marks import validate_review_marks
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["answers"])
@@ -182,6 +182,8 @@ async def save_self_evaluation(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     total_final_marks = sum(q["final_marks"] for q in questionwise_marking)
 
+    await lock_exam_for_marks(db, answer["exam_id"])
+
     result = await db["answerDetails"].update_one(
         {"_id": answer["_id"], "exam_id": answer["exam_id"]},
         {"$set": {
@@ -229,119 +231,27 @@ async def manual_marks_entry(
     faculty_id = ObjectId(str(exam["faculty_id"]))
 
     evaluation = await db["evaluationDetails"].find_one({"exam_id": ObjectId(exam_id)})
-    rubric_questions = evaluation.get("questionEvaluationDetails") if evaluation else None
+    try:
+        entries = prepare_manual_marks(payload, evaluation)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-    saved = 0
+    await lock_exam_for_marks(db, ObjectId(exam_id), exam.get("question_paper") or {})
     now = datetime.now(timezone.utc)
-
-    if rubric_questions:
-        total_max = float(evaluation.get("totalMarks") or sum(q["maxMarks"] for q in rubric_questions))
-
-        for entry in payload.entries:
-            student_id = str(entry.get("student_id", "")).strip()
-            question_marks = entry.get("question_marks")
-            if not student_id or not isinstance(question_marks, list):
-                continue
-
-            marks_by_q: Dict[int, float] = {}
-            for qm in question_marks:
-                try:
-                    marks_by_q[int(qm.get("question_no"))] = float(qm.get("marks"))
-                except (TypeError, ValueError):
-                    continue
-
-            raw_questionwise = []
-            for idx, rq in enumerate(rubric_questions, start=1):
-                q_max = float(rq["maxMarks"])
-                q_awarded = marks_by_q.get(idx)
-                if q_awarded is None or not (0 <= q_awarded <= q_max):
-                    raw_questionwise = None
-                    break
-
-                cos_raw = [
-                    {
-                        "co_code": co["co_code"],
-                        "ai_marks": round((q_awarded / q_max) * float(co.get("marks", 0)), 2) if q_max > 0 else 0,
-                        "grace_marks": 0,
-                        "max_marks": co.get("marks", 0),
-                        "remarks": "Manually entered",
-                    }
-                    for co in rq.get("cos", [])
-                ]
-                raw_questionwise.append({
-                    "question_no": idx,
-                    "max_marks": q_max,
-                    "ai_awarded_marks": q_awarded,
-                    "grace_marks": 0,
-                    "cos": cos_raw,
-                })
-
-            if raw_questionwise is None:
-                continue
-
-            try:
-                validated_questionwise = validate_questionwise(raw_questionwise)
-            except ValueError:
-                continue
-
-            total_final_marks = sum(q["final_marks"] for q in validated_questionwise)
-
-            filename = f"MANUAL-{student_id}"
-            await db["answerDetails"].update_one(
-                {"exam_id": ObjectId(exam_id), "filename": filename},
-                {
-                    "$set": {
-                        "faculty_id": ObjectId(faculty_id),
-                        "student_name": student_id,
-                        "student_id": student_id,
-                        "total_final_marks": total_final_marks,
-                        "total_ai_marks": total_final_marks,
-                        "total_max_marks": total_max,
-                        "questionwise_marking": validated_questionwise,
-                        "reviewed_by_professor": True,
-                        "evaluated_at": now,
-                        "updated_at": now,
-                    },
-                    "$setOnInsert": {"exam_id": ObjectId(exam_id), "filename": filename, "created_at": now},
-                },
-                upsert=True,
-            )
-            saved += 1
-    else:
-        if not payload.max_marks:
-            raise HTTPException(status_code=400, detail="max_marks is required when the exam has no rubric")
-        max_marks = payload.max_marks
-
-        for entry in payload.entries:
-            student_id = str(entry.get("student_id", "")).strip()
-            try:
-                marks = float(entry.get("marks"))
-            except (TypeError, ValueError):
-                continue
-            if not student_id or not (0 <= marks <= max_marks):
-                continue
-
-            filename = f"MANUAL-{student_id}"
-            await db["answerDetails"].update_one(
-                {"exam_id": ObjectId(exam_id), "filename": filename},
-                {
-                    "$set": {
-                        "faculty_id": ObjectId(faculty_id),
-                        "student_name": student_id,
-                        "student_id": student_id,
-                        "total_final_marks": marks,
-                        "total_ai_marks": marks,
-                        "total_max_marks": max_marks,
-                        "questionwise_marking": [],
-                        "reviewed_by_professor": True,
-                        "evaluated_at": now,
-                        "updated_at": now,
-                    },
-                    "$setOnInsert": {"exam_id": ObjectId(exam_id), "filename": filename, "created_at": now},
-                },
-                upsert=True,
-            )
-            saved += 1
+    saved = 0
+    for entry in entries:
+        filename = f"MANUAL-{entry['student_id']}"
+        await db["answerDetails"].update_one(
+            {"exam_id": ObjectId(exam_id), "filename": filename},
+            {"$set": {
+                **entry, "faculty_id": faculty_id, "student_name": entry["student_id"],
+                "reviewed_by_professor": True, "evaluated_at": now, "updated_at": now,
+            }, "$setOnInsert": {
+                "exam_id": ObjectId(exam_id), "filename": filename, "created_at": now,
+            }},
+            upsert=True,
+        )
+        saved += 1
 
     if saved:
         await enqueue("run_refresh_transcript", str(exam_id),

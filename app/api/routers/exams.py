@@ -23,6 +23,9 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
 from app.api.answer_access import require_exam_access
 from app.api.subject_access import require_subject_report_access
+from app.api.exam_hierarchy import require_exam_hierarchy
+from app.services.exam_paper_lock import require_replaceable_paper
+from app.services.paper_version import paper_snapshot_filter
 from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
@@ -39,6 +42,17 @@ from app.utils.query import search_regex
 from app.utils.token_usage import check_institute_token_budget
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["exams"])
+
+def _semester_filter(semester: str | None = Query(None)) -> int | None:
+    if semester in (None, "", "undefined"):
+        return None
+    try:
+        number = int(semester)
+        if number > 0:
+            return number
+    except ValueError:
+        pass
+    raise HTTPException(422, "semester must be a positive integer")
 
 
 async def _require_faculty(identity: dict, db: AsyncIOMotorDatabase):
@@ -87,6 +101,7 @@ async def create_folder(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    await require_exam_hierarchy(identity, db, exam_doc)
     result = await db["newsavedDocs"].insert_one(exam_doc)
     folder_id = result.inserted_id
 
@@ -128,6 +143,8 @@ async def upload_question_paper(
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found or unauthorized")
 
+    await require_replaceable_paper(db, folder)
+
     questionpaper_url = payload.questionpaper_url
     file_id = payload.fileId
     filename = payload.filename
@@ -140,8 +157,9 @@ async def upload_question_paper(
 
     now = datetime.now(timezone.utc)
     paper_version = str(uuid.uuid4())
-    await db["newsavedDocs"].update_one(
-        {"_id": folder_object_id},
+    paper_update = await db["newsavedDocs"].update_one(
+        {**paper_snapshot_filter(folder_object_id, folder.get("question_paper") or {}),
+         "faculty_id": folder["faculty_id"], "paper_locked": {"$ne": True}},
         {"$set": {
             "question_paper": {
                 "version": paper_version,
@@ -159,6 +177,9 @@ async def upload_question_paper(
             "mcq_answer_key_at": "", "mcq_answer_key_needs_review_count": "",
         }},
     )
+
+    if paper_update.matched_count != 1:
+        raise HTTPException(409, "Paper changed or evaluation started. Refresh before uploading again.")
 
     if budget["allowed"]:
         await enqueue(
@@ -192,13 +213,13 @@ async def upload_question_paper(
 
 @router.get("/newsaved-documents")
 async def get_all_folders(
-    page: int = Query(1),
-    limit: int = Query(10),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
     school: str | None = Query(None),
     programme: str | None = Query(None),
     department: str | None = Query(None),
     batch: str | None = Query(None),
-    semester: str | None = Query(None),
+    semester: int | None = Depends(_semester_filter),
     subject: str | None = Query(None),
     is_archived: str | None = Query(None),
     search: str | None = Query(None),
@@ -215,8 +236,8 @@ async def get_all_folders(
 
     if is_archived not in [None, "", "undefined"]:
         match_stage["is_archived"] = str(is_archived).lower() == "true"
-    if semester not in [None, "", "undefined"]:
-        match_stage["semester"] = int(semester)
+    if semester is not None:
+        match_stage["semester"] = semester
     if school not in [None, "", "undefined"] and ObjectId.is_valid(school):
         match_stage["school_id"] = ObjectId(school)
     if programme not in [None, "", "undefined"] and ObjectId.is_valid(programme):
@@ -358,9 +379,11 @@ async def get_combinedco_using_subjectid(
 # =====================================================
 
 @router.get("/newsaved-documents-subject/{subject_id}")
-async def get_exams_using_subjectid(subject_id: str, db: AsyncIOMotorDatabase = Depends(get_database)):
-    if not ObjectId.is_valid(subject_id):
-        raise HTTPException(status_code=400, detail="Invalid subject ID")
+async def get_exams_using_subjectid(
+    subject_id: str, identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    await require_subject_report_access(identity, db, subject_id)
 
     exams = [e async for e in db["newsavedDocs"].find({"subject_id": ObjectId(subject_id)})]
     if not exams:
@@ -475,6 +498,8 @@ async def update_exam(
 
     if len(update_data) == 1:
         raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    await require_exam_hierarchy(identity, db, {**folder, **update_data})
 
     result = await db["newsavedDocs"].update_one(
         {"_id": folder_object_id, "faculty_id": folder["faculty_id"]},
