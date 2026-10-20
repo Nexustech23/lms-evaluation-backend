@@ -66,3 +66,41 @@ def detect_mcq_questions(paper_text: str) -> Dict[int, List[str]]:
 
     _flush()
     return mcq
+
+
+def mcq_contexts(paper_text: str) -> dict:
+    """Keep stems, original labels and whole-paper reference context for keys.
+
+    Duplicate question numbers are ambiguous and are never auto-resolved.
+    Visuals that were not faithfully extracted must be reviewed by the examiner.
+    """
+    blocks = {}
+    current = None
+    for line in (paper_text or "").splitlines():
+        match = _QUESTION_START_RE.match(line.strip())
+        if match:
+            current = int(match.group(1))
+            blocks.setdefault(current, []).append([match.group(2)])
+        elif current is not None:
+            blocks[current][-1].append(line)
+    result = {}
+    for number, occurrences in blocks.items():
+        lines = occurrences[0]
+        options, stem, label, duplicate = {}, [], None, False
+        for line in lines:
+            match = re.match(r"^\s*\(?([A-Ha-h])[.)]\s+(.+)", line)
+            if match:
+                label = match.group(1).upper()
+                duplicate |= label in options
+                options[label] = match.group(2).strip()
+            elif label:
+                options[label] += "\n" + line
+            else:
+                stem.append(line)
+        if len(options) >= 2:
+            result[number] = {"stem": "\n".join(stem).strip(), "options": options,
+                "block": "\n".join(lines),
+                "complete": len(occurrences) == 1 and not duplicate and bool("\n".join(stem).strip())}
+            if re.search(r"(?i)(?:following|given|shown|above|below).{0,30}(?:diagram|figure|graph|table)|(?:diagram|figure|graph|table).{0,30}(?:above|below|shown)", " ".join(stem)):
+                result[number]["complete"] = False  # Text-only keys cannot verify a referenced visual.
+    return result

@@ -76,7 +76,7 @@ def generate_html(
 
 
 def generate_text(
-    prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 8000
+    prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 8000, *, system: str = None
 ) -> Tuple[str, Dict[str, int]]:
     """
     Blocking call — run via asyncio.to_thread() from async callers.
@@ -89,9 +89,12 @@ def generate_text(
             model=model,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
+            **({"system": system} if system else {}),
         )
 
         token_usage = _message_usage(message)
+        if getattr(message, "stop_reason", None) in {"max_tokens", "refusal"}:
+            raise RuntimeError("AI text output is incomplete or refused; it cannot be published")
         text = message.content[0].text.strip()
 
         return text, token_usage
