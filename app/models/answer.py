@@ -19,8 +19,8 @@ def _validate_cos(cos_list: List[Dict[str, Any]], question_max_marks: float):
         grace_marks = float(co.get("grace_marks", 0))
         max_marks = float(co.get("max_marks", 0))
 
-        if max_marks <= 0:
-            raise ValueError("co max_marks must be greater than 0")
+        if max_marks < 0 or (max_marks == 0 and (ai_marks != 0 or grace_marks != 0)):
+            raise ValueError("Zero-allocation COs must have zero marks")
         if ai_marks < 0:
             raise ValueError("ai_marks cannot be negative")
         if ai_marks > max_marks:

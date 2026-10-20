@@ -46,6 +46,9 @@ from app.services.job_submission import claim_submission, release_submission
 from app.services.paper_version import paper_snapshot_filter
 from app.services.exam_paper_lock import lock_exam_for_marks
 from app.services.result_revision import update_answer_result
+from app.services.grading_validation import validate_grading
+from app.services.evaluation_review import review_draft, pending_review, choice_review_required
+from app.services.grading import GRADING_PROMPT_VERSION, split_answer_pdf
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
 from app.services.faculty_ai_usage import tracked_faculty_call
@@ -171,6 +174,10 @@ async def _run_evaluation_job(
         # no-op (no AI call, no DB write) once the key is already saved — every
         # evaluation after the first on a given exam just reads it back instantly.
         mcq_answer_key: dict = await ensure_mcq_answer_key(db, exam, faculty_id, user_id)
+        from app.utils.mcq_detect import mcq_contexts
+        for n, context in mcq_contexts(question_text).items():
+            mcq_answer_key.setdefault(str(n), {"answer": "", "confident": False,
+                "options": context["options"], "reasoning": "Answer key needs faculty review."})
         paper_guard = paper_snapshot_filter(exam_object_id, exam.get("question_paper") or {})
         if not await db["newsavedDocs"].find_one(paper_guard):
             raise RuntimeError("Question paper changed. Start evaluation again for the current paper.")
@@ -186,13 +193,32 @@ async def _run_evaluation_job(
         confident_mcq_questions_with_options = {
             int(q_no): entry["options"]
             for q_no, entry in mcq_answer_key.items()
-            if entry.get("confident") and entry.get("options")
+            if entry.get("options")
         }
-        answer_text, ans_gemini_tokens = await tracked_faculty_call(
-            db, extract_answer_text_with_gemini, student_pdf_bytes, confident_mcq_questions_with_options or None,
-            faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI,
-            model=GEMINI_OCR_MODEL, feature=Feature.GRADING_ANSWER_OCR, job_id=job_id,
-        )
+        extraction_issue = False
+        try:
+            pdf_pages = await asyncio.to_thread(split_answer_pdf, student_pdf_bytes)
+            page_texts, page_usages = [], []
+            for page_no, page_bytes in enumerate(pdf_pages, 1):
+                # Each page has its own durable billing event: a later unknown
+                # failure cannot erase known usage from earlier pages.
+                page_text, page_usage = await tracked_faculty_call(
+                    db, extract_answer_text_with_gemini, page_bytes, confident_mcq_questions_with_options or None,
+                    faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI,
+                    model=GEMINI_OCR_MODEL, feature=Feature.GRADING_ANSWER_OCR, job_id=job_id,
+                )
+                page_texts.append(f"ANSWER PAGE {page_no}\n{page_text}")
+                page_usages.append(page_usage)
+            answer_text = "\n\n".join(page_texts)
+            ans_gemini_tokens = {key: sum(u.get(key, 0) for u in page_usages)
+                for key in ("prompt_tokens", "candidate_tokens", "total_tokens")}
+            ans_gemini_tokens.update(page_count=len(pdf_pages), pages_processed=len(page_texts))
+        except RuntimeError as extraction_error:
+            if not str(extraction_error).startswith("Answer script OCR failed:"):
+                raise  # Billing/ledger failures must never be presented as unreadable handwriting.
+            extraction_issue = True
+            answer_text = "[UNREADABLE: extraction could not be confirmed complete]"
+            ans_gemini_tokens = getattr(extraction_error, "usage", None) or {"usage_status": "unknown"}
         gemini_calls = [ans_gemini_tokens]
 
         async def claude_step(function, *args, feature):
@@ -200,13 +226,20 @@ async def _run_evaluation_job(
                 db, function, *args, faculty_id=faculty_id, user_id=user_id,
                 provider=Provider.CLAUDE, model=CLAUDE_GRADING_MODEL,
                 feature=feature, job_id=job_id,
+                prompt_version=GRADING_PROMPT_VERSION,
             )
 
         # Step 4 — grading (+ transcript, in parallel when requested)
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 50, "step": "AI grading in progress"})
         student_name = answer.get("student_name") or "Student"
 
-        if generate_transcript_pdf:
+        if extraction_issue:
+            import json
+            grading_result_raw = json.dumps(review_draft(evaluation_rules, "Extraction incomplete; inspect the original answer sheet."))
+            claude_calls = []
+            transcript_html = None
+            generate_transcript_pdf = False
+        elif generate_transcript_pdf:
             (grading_result_raw, grade_claude_tokens), (transcript_html, transcript_claude_tokens) = await asyncio.gather(
                 claude_step(grade_with_claude, question_text, answer_text, evaluation_rules,
                             feature=Feature.GRADING_ANSWER_EVALUATION),
@@ -223,6 +256,13 @@ async def _run_evaluation_job(
             claude_calls = [grade_claude_tokens]
 
         grading_json = safe_json_parse(grading_result_raw)
+        eval_total_marks = (evaluation_doc or {}).get("totalMarks")
+        if eval_total_marks is None:
+            eval_total_marks = sum(r["maxMarks"] for r in evaluation_rules)
+        grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text)
+        if "[UNREADABLE" in answer_text.upper():
+            for q in grading_json["questionwise_marking"]:
+                q["flags"]["needs_review"] = True
 
         # Step 4b — deterministic MCQ override. Claude graded every question above
         # exactly as before (unchanged, zero risk to that path) — this replaces only
@@ -234,6 +274,13 @@ async def _run_evaluation_job(
         grading_json["questionwise_marking"], mcq_override_count = apply_deterministic_mcq_overrides(
             grading_json.get("questionwise_marking", []), mcq_answer_key, student_mcq_answers,
         )
+        grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text,
+            trusted_mcq={int(n) for n in mcq_answer_key})
+        if extraction_issue or "[UNREADABLE" in answer_text.upper() or choice_review_required(question_text):
+            for q in grading_json["questionwise_marking"]:
+                q["flags"]["needs_review"] = True
+        requires_review = pending_review(grading_json)
+        grading_json["requires_review"] = requires_review
         if mcq_override_count:
             logging.info(
                 "[eval-job %s] %d MCQ question(s) scored deterministically (answer key match)",
@@ -302,7 +349,7 @@ async def _run_evaluation_job(
                 {
                     "co_code": c.get("co_code"),
                     "ai_marks": 0 if unanswered else c.get("ai_marks", 0),
-                    "max_marks": 0 if unanswered else c.get("max_marks", 0),
+                    "max_marks": c.get("max_marks", 0),
                 }
                 for c in cos
             ]
@@ -326,8 +373,14 @@ async def _run_evaluation_job(
                 "questionwise_marking": questionwise_marking,
                 "total_ai_marks": total_ai_marks,
                 "total_max_marks": total_max_marks,
-                "total_final_marks": total_ai_marks,
-                "co": co_results_per_question,
+                "total_final_marks": None if requires_review else total_ai_marks,
+                "evaluation_status": "pending_review" if requires_review else "evaluated",
+                "co": [] if requires_review else co_results_per_question,
+                "prompt_version": GRADING_PROMPT_VERSION,
+                "rubric_revision": exam.get("rubric_revision"),
+                "paper_version": (exam.get("question_paper") or {}).get("version"),
+                "ocr_page_count": ans_gemini_tokens.get("page_count"),
+                "ocr_pages_processed": ans_gemini_tokens.get("pages_processed"),
                 "reviewed_by_professor": False,
                 "evaluated_at": now,
                 "updated_at": now,
@@ -355,6 +408,7 @@ async def _run_evaluation_job(
             "step": "Completed",
             "result": {
                 "success": True,
+                "evaluation_status": "pending_review" if requires_review else "evaluated",
                 "message": "Answer script evaluated successfully",
                 "answer_id": answer_id,
                 "filename": answer.get("filename", "Result.pdf"),

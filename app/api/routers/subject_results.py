@@ -127,7 +127,8 @@ async def _get_subject_results(
             final_marks = finite_number(final_marks, "Saved final marks") if final_marks is not None else None
         except ValueError:
             return {"error": "Saved marks are invalid; correct the answer before reporting"}, 409
-        evaluated = final_marks is not None and max_marks > 0
+        from app.services.evaluation_review import pending_review
+        evaluated = final_marks is not None and max_marks > 0 and not pending_review(ans)
         if evaluated and not 0 <= final_marks <= max_marks:
             return {"error": "Saved marks are outside the allowed range"}, 409
         percentage = round(final_marks / max_marks * 100, 2) if evaluated else None
@@ -951,6 +952,9 @@ async def download_detailed_excel(
     answers = [a async for a in db["answerDetails"].find({"exam_id": exam_object_id})]
     if not answers:
         raise HTTPException(status_code=404, detail="No answer scripts found")
+    from app.services.evaluation_review import pending_review
+    if any(pending_review(a) for a in answers):
+        raise HTTPException(409, "Faculty review is pending. Resolve uncertain evaluations before exporting final marks.")
 
     xlsx_bytes = await asyncio.to_thread(_build_detailed_excel_workbook, folder, eval_details, answers)
 

@@ -194,6 +194,10 @@ async def save_self_evaluation(
             "questionwise_marking": questionwise_marking,
             "total_final_marks": total_final_marks,
             "reviewed_by_professor": True,
+            "evaluation_status": "faculty_reviewed",
+            "report_is_draft": True,
+            "reviewed_at": datetime.now(timezone.utc),
+            "reviewed_by": identity["user_id"],
             "updated_at": datetime.now(timezone.utc),
         }},
     )

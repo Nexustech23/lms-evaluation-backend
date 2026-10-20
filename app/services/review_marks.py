@@ -67,6 +67,9 @@ def validate_review_marks(submitted, answer):
     normalized = []
     for number, question in reviewed.items():
         original = saved[number]
+        if original.get("flags", {}).get("needs_review"):
+            if question.get("review_confirmed") is not True or not isinstance(question.get("review_note"), str) or not question["review_note"].strip():
+                raise ValueError(f"Question {number}: inspect the original and explicitly confirm the review with a note")
         question = _marks(question, original, "ai_awarded_marks")
         question["question_no"] = number
         saved_cos = _co_map(original.get("cos") or [])
@@ -85,6 +88,11 @@ def validate_review_marks(submitted, answer):
         normalized.append(question)
 
     validated = validate_questionwise(normalized)
+    for q in validated:
+        source = reviewed[q["question_no"]]
+        q["review_note"] = source.get("review_note", "").strip()
+        q["review_confirmed"] = source.get("review_confirmed") is True
+        q["flags"] = {**q.get("flags", {}), "needs_review": False}
     total = sum(q["final_marks"] for q in validated)
     if not math.isfinite(total):
         raise ValueError("Final total must be finite")

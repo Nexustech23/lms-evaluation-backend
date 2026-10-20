@@ -298,6 +298,10 @@ def _safe_float(v, default=0.0):
 
 
 def _normalise_answer(ans):
+    from app.services.evaluation_review import pending_review
+    if pending_review(ans):
+        from fastapi import HTTPException
+        raise HTTPException(409, "Faculty review is pending. Resolve uncertain evaluations before exporting official CO results.")
     name = (ans.get("student_name") or ans.get("studentName") or ans.get("name") or "").strip()
     fname = (ans.get("filename") or ans.get("file_name") or ans.get("originalName") or "").strip()
     raw_qs = (

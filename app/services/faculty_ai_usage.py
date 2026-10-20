@@ -12,7 +12,7 @@ _in_flight = set()
 
 
 async def tracked_faculty_call(db, function, *args, faculty_id, user_id, provider,
-                               model, feature, job_id=None):
+                               model, feature, job_id=None, prompt_version=None):
     institute_id = None
     event_id = ObjectId()
     try:
@@ -35,6 +35,8 @@ async def tracked_faculty_call(db, function, *args, faculty_id, user_id, provide
             event.update(_id=event_id, input_tokens=None, output_tokens=None,
                          total_tokens=None, cost_usd=None, usage_status="unknown",
                          cost_status="unknown", call_status="started")
+            if prompt_version:
+                event["prompt_version"] = prompt_version
             await db["aiUsageEvents"].insert_one(event)
     except Exception as exc:
         logger.exception("Could not persist AI attempt %s", event_id)
