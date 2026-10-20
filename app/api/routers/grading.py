@@ -45,6 +45,7 @@ from app.services.job_store import get_owned_job, set_job, update_job, claim_job
 from app.services.job_submission import claim_submission, release_submission
 from app.services.paper_version import paper_snapshot_filter
 from app.services.exam_paper_lock import lock_exam_for_marks
+from app.services.result_revision import update_answer_result
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
 from app.services.faculty_ai_usage import tracked_faculty_call
@@ -314,7 +315,7 @@ async def _run_evaluation_job(
         if not await db["newsavedDocs"].find_one(paper_guard):
             raise RuntimeError("Question paper changed. Start evaluation again for the current paper.")
         now = datetime.now(timezone.utc)
-        save_result = await db["answerDetails"].update_one(
+        save_result = await update_answer_result(db, exam,
             {"_id": answer_object_id, "exam_id": exam_object_id,
              "reviewed_by_professor": {"$ne": True}},
             {"$set": {
@@ -333,7 +334,7 @@ async def _run_evaluation_job(
                 "token_usage": {**token_usage, "transcript_generated": generate_transcript_pdf},
             }, "$addToSet": {"verified_storage_ids": {"$each": [
                 upload["file_id"] for upload in (evaluation_upload, transcript_upload) if upload.get("file_id")
-            ]}}},
+            ]}}}, paper_guard=paper_guard,
         )
         if save_result.matched_count != 1:
             raise RuntimeError("Answer was deleted or reviewed while AI ran. Existing marks were preserved.")
