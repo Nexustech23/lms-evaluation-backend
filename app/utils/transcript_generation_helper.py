@@ -25,6 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.transcript import get_semesters
 from app.utils.grade_points import get_grade_point
+from app.services.result_revision import source_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,9 @@ async def generate_transcript_for_semester(
         tgpa = round(semester_credit_points / semester_credits, 2) if semester_credits else 0
 
         prior = await get_semesters(db, student_id, institute_id, batch_id)
-        prior = [p for p in prior if p.get("semester_no") != int(semester)]
+        prior = [p for p in prior if p.get("semester_no", 0) < int(semester)]
+        if any(p.get("is_stale") for p in prior):
+            raise HTTPException(409, "Regenerate earlier stale semesters before calculating this semester's CGPA.")
         cumulative_credits = sum(p.get("total_credits", 0) for p in prior) + semester_credits
         cumulative_credit_points = sum(p.get("total_credit_points", 0) for p in prior) + semester_credit_points
         cgpa = round(cumulative_credit_points / cumulative_credits, 2) if cumulative_credits else 0
@@ -188,6 +191,11 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
         if not grading_config:
             return
 
+        batch_snapshot = await db["batchDetails"].find_one({"_id": batch_id, "institute_id": institute_id})
+        if not batch_snapshot:
+            return
+        expected_revision = source_snapshot(batch_snapshot)
+
         documents, _summary = await generate_transcript_for_semester(
             db, institute_id, str(batch_id), str(semester)
         )
@@ -206,6 +214,6 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
             "source": "auto-refresh",
             "record_count": len(documents),
             "imported_at": datetime.now(timezone.utc),
-        }, semester=semester)
+        }, semester=semester, expected_revision=expected_revision)
     except Exception:
         logger.exception("Automatic transcript refresh failed for exam_id=%s", exam_id)

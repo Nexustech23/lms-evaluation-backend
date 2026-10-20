@@ -27,6 +27,9 @@ from app.utils.uploads import read_upload_capped
 from app.services.exam_paper_lock import lock_exam_for_marks
 from app.services.manual_marks import prepare_manual_marks
 from app.services.review_marks import validate_review_marks
+from app.services.answer_identity import answer_student_id, require_unique_identity
+from app.services.answer_persistence import save_uploaded_answer, remove_answer
+from app.services.result_revision import update_answer_result, touch_result_source, transaction
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["answers"])
 
@@ -47,7 +50,7 @@ async def upload_answer_file(folder_id: str, file: UploadFile = File(...),
     await db["storageAssets"].insert_one({"_id": upload["file_id"],
         "owner_user_id": ObjectId(identity["user_id"]), "exam_id": exam["_id"],
         "url": upload["url"], "filename": filename, "purpose": "answer-script",
-        "answer_id": None, "created_at": datetime.now(timezone.utc)})
+        "answer_id": None, "state": "uploaded", "created_at": datetime.now(timezone.utc)})
     return {"url": upload["url"], "fileId": upload["file_id"], "name": filename}
 
 
@@ -63,54 +66,9 @@ async def upload_answer_script(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     folder = await require_exam_access(identity, db, folder_id)
-    folder_object_id = folder["_id"]
-    faculty_id = ObjectId(str(folder["faculty_id"]))
-
-    answer_script_url = payload.answer_script_url
-    file_id = payload.fileId
-    filename = payload.filename
-
-    receipt_query = {"_id": file_id, "owner_user_id": ObjectId(identity["user_id"]),
-        "exam_id": folder_object_id, "purpose": "answer-script", "url": answer_script_url,
-        "filename": filename}
-    receipt = await db["storageAssets"].find_one(receipt_query)
-    if not receipt:
-        raise HTTPException(404, "Verified upload not found. Upload this answer script again.")
-    candidate = ObjectId()
-    claim = await db["storageAssets"].update_one({**receipt_query, "answer_id": None},
-        {"$set": {"answer_id": candidate}})
-    receipt = await db["storageAssets"].find_one(receipt_query)
-    answer_id = receipt["answer_id"]
-    existing = await db["answerDetails"].find_one({"_id": answer_id})
-    if not claim.matched_count and not existing:
-        raise HTTPException(409, "This upload was already saved or its save is incomplete. Refresh; upload again if the answer was deleted.")
-
-    now = datetime.now(timezone.utc)
-    answer_doc = {
-        "_id": answer_id,
-        "exam_id": folder_object_id,
-        "faculty_id": ObjectId(faculty_id),
-        "filename": filename,
-        "answer_script_url": answer_script_url,
-        "fileId": file_id,
-        "verified_storage_ids": [file_id],
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    from pymongo.errors import DuplicateKeyError
-    if not existing:
-        try:
-            await db["answerDetails"].insert_one(answer_doc)
-        except DuplicateKeyError:
-            pass  # Concurrent retry of the same server-issued receipt.
-
-    return {
-        "success": True,
-        "answer_id": str(answer_id),
-        "filename": filename,
-        "answer_script_url": answer_script_url,
-    }
+    answer = await save_uploaded_answer(db, identity, folder, payload)
+    return {"success": True, "answer_id": str(answer["_id"]), "filename": answer["filename"],
+            "answer_script_url": answer["answer_script_url"]}
 
 
 # =====================================================
@@ -127,15 +85,18 @@ async def rename_file(
     new_filename = payload.newFilename
 
     answer = await require_answer_access(identity, db, answer_id)
+    student_id = answer_student_id(answer)
+    await require_unique_identity(db, answer["exam_id"], student_id, answer["_id"])
 
     result = await db["answerDetails"].update_one(
-        {"_id": answer["_id"], "exam_id": answer["exam_id"]},
-        {"$set": {"filename": new_filename, "updated_at": datetime.now(timezone.utc)}}
+        {"_id": answer["_id"], "exam_id": answer["exam_id"], "filename": answer.get("filename"),
+         "student_id": answer.get("student_id")},
+        {"$set": {"filename": new_filename, "student_id": student_id, "updated_at": datetime.now(timezone.utc)}}
     )
-    if result.modified_count == 1:
+    if result.matched_count == 1:
         return {"success": True, "message": "Filename updated"}
 
-    raise HTTPException(status_code=500, detail="Update failed")
+    raise HTTPException(status_code=409, detail="Answer changed. Refresh before renaming.")
 
 
 @router.delete("/delete-file")
@@ -148,11 +109,8 @@ async def delete_file(
     answer_doc = await require_answer_access(identity, db, answer_id)
     answer_object_id = answer_doc["_id"]
 
-    # Delete the authorized record first. A failed DB write must never leave a
-    # live record pointing to a file we already destroyed.
-    result = await db["answerDetails"].delete_one({"_id": answer_object_id, "exam_id": answer_doc["exam_id"]})
-    if result.deleted_count != 1:
-        raise HTTPException(409, "Answer changed or was already deleted")
+    folder = await require_exam_access(identity, db, str(answer_doc["exam_id"]))
+    answer_doc = await remove_answer(db, identity, folder, answer_object_id)
     deleted_files, errors, retained_files = [], [], []
     verified = answer_doc.get("verified_storage_ids") or []
     for field, label in (("fileId", "answer_script"), ("evaluated_report_fileId", "evaluated_report"),
@@ -228,8 +186,9 @@ async def save_self_evaluation(
     total_final_marks = sum(q["final_marks"] for q in questionwise_marking)
 
     await lock_exam_for_marks(db, answer["exam_id"])
+    exam = await require_exam_access(identity, db, str(answer["exam_id"]))
 
-    result = await db["answerDetails"].update_one(
+    result = await update_answer_result(db, exam,
         {"_id": answer["_id"], "exam_id": answer["exam_id"]},
         {"$set": {
             "questionwise_marking": questionwise_marking,
@@ -284,20 +243,30 @@ async def manual_marks_entry(
     await lock_exam_for_marks(db, ObjectId(exam_id), exam.get("question_paper") or {},
                               rubric_revision=exam.get("rubric_revision"))
     now = datetime.now(timezone.utc)
-    saved = 0
-    for entry in entries:
-        filename = f"MANUAL-{entry['student_id']}"
-        await db["answerDetails"].update_one(
-            {"exam_id": ObjectId(exam_id), "filename": filename},
-            {"$set": {
-                **entry, "faculty_id": faculty_id, "student_name": entry["student_id"],
-                "reviewed_by_professor": True, "evaluated_at": now, "updated_at": now,
-            }, "$setOnInsert": {
-                "exam_id": ObjectId(exam_id), "filename": filename, "created_at": now,
-            }},
-            upsert=True,
-        )
-        saved += 1
+    async def save_batch(session):
+        parent = await db["newsavedDocs"].update_one({"_id": exam["_id"], "faculty_id": exam["faculty_id"]},
+            {"$inc": {"answer_write_revision": 1}}, session=session)
+        if parent.matched_count != 1:
+            raise HTTPException(409, "Exam changed while saving manual marks")
+        current_exam = await db["newsavedDocs"].find_one({"_id": exam["_id"]}, session=session)
+        await touch_result_source(db, current_exam, session)
+        for entry in entries:
+            filename = f"MANUAL-{entry['student_id']}"
+            existing = await db["answerDetails"].find_one({"exam_id": exam["_id"], "filename": filename}, session=session)
+            await require_unique_identity(db, exam["_id"], entry["student_id"], (existing or {}).get("_id"), session)
+            await db["answerDetails"].update_one(
+                {"exam_id": ObjectId(exam_id), "filename": filename},
+                {"$set": {
+                    **entry, "faculty_id": faculty_id, "student_name": entry["student_id"],
+                    "reviewed_by_professor": True, "evaluated_at": now, "updated_at": now,
+                }, "$setOnInsert": {
+                    "exam_id": ObjectId(exam_id), "filename": filename, "created_at": now,
+                }},
+                upsert=True, session=session,
+            )
+        return len(entries)
+
+    saved = await transaction(db, save_batch)
 
     if saved:
         await enqueue("run_refresh_transcript", str(exam_id),

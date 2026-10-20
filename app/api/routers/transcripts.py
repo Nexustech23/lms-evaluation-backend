@@ -47,6 +47,7 @@ from app.utils.transcript_excel_helper import build_transcript_documents, parse_
 from app.utils.uploads import read_upload_capped
 from app.utils.transcript_generation_helper import generate_transcript_for_semester
 from app.services.transcript_commit import commit_transcript_set
+from app.services.result_revision import source_snapshot
 
 router = APIRouter(prefix="/transcript", dependencies=[Depends(get_current_identity)], tags=["transcripts"])
 
@@ -139,6 +140,8 @@ async def _get_academic_transcript(
         records = await get_semesters(db, student_id, institute_id, batch_id)
         if not records:
             return {"error": "No academic records found for this student"}, 404
+        if any(record.get("is_stale") for record in records):
+            return {"error": "Results changed. Regenerate the affected transcripts before viewing or downloading."}, 409
 
         if batch is None:
             batch = await db["batchDetails"].find_one({
@@ -209,6 +212,8 @@ async def confirm_transcript_import(
         institute_id = await _current_institute_id(identity, db)
         batch = await _owned_batch(batch_id, institute_id, db)
 
+        expected_revision = source_snapshot(batch)
+
         grading_config = await _grading_config(institute_id, db)
         if not grading_config:
             raise HTTPException(status_code=404, detail="Relative grading configuration not found")
@@ -228,7 +233,7 @@ async def confirm_transcript_import(
             "record_count": len(documents),
             "imported_by": ObjectId(identity["user_id"]),
             "imported_at": datetime.now(timezone.utc),
-        })
+        }, expected_revision=expected_revision)
 
         return JSONResponse(status_code=201, content={
             "success": True,
@@ -319,6 +324,7 @@ async def confirm_transcript_generation(
     try:
         institute_id = await _current_institute_id(identity, db)
         batch = await _owned_batch(payload.batch_id, institute_id, db)
+        expected_revision = source_snapshot(batch)
 
         semester = payload.semester
 
@@ -341,7 +347,7 @@ async def confirm_transcript_generation(
             "record_count": len(documents),
             "imported_by": ObjectId(identity["user_id"]),
             "imported_at": datetime.now(timezone.utc),
-        }, semester=semester)
+        }, semester=semester, expected_revision=expected_revision)
 
         return JSONResponse(status_code=201, content={
             "success": True,
@@ -387,6 +393,8 @@ async def export_transcript_excel(
                 else "No academic transcript records found for this batch"
             )
             raise HTTPException(status_code=404, detail=message)
+        if any(record.get("is_stale") for record in records):
+            raise HTTPException(409, "Results changed. Regenerate stale transcripts before exporting.")
 
         grouped_records: Dict[str, List[Dict[str, Any]]] = {}
         for record in records:

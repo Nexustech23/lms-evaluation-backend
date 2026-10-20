@@ -26,6 +26,7 @@ from app.api.subject_access import require_subject_report_access
 from app.api.exam_hierarchy import require_exam_hierarchy
 from app.services.exam_paper_lock import require_replaceable_paper
 from app.services.paper_version import paper_snapshot_filter
+from app.services.result_revision import touch_result_source, transaction
 from app.core.queue import enqueue
 from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
@@ -501,10 +502,20 @@ async def update_exam(
 
     await require_exam_hierarchy(identity, db, {**folder, **update_data})
 
-    result = await db["newsavedDocs"].update_one(
-        {"_id": folder_object_id, "faculty_id": folder["faculty_id"]},
-        {"$set": update_data},
-    )
+    async def save_exam(session):
+        current = await db["newsavedDocs"].find_one({"_id": folder_object_id}, session=session)
+        result = await db["newsavedDocs"].update_one(
+            {"_id": folder_object_id, "faculty_id": folder["faculty_id"],
+             "question_paper.url": (folder.get("question_paper") or {}).get("url")},
+            {"$set": update_data}, session=session)
+        if result.matched_count != 1:
+            raise HTTPException(409, "Exam changed while saving")
+        if {"weightage", "subject_id", "semester", "is_course_exit_summary"}.intersection(update_data):
+            await touch_result_source(db, current, session)
+            if update_data.get("subject_id", current.get("subject_id")) != current.get("subject_id"):
+                await touch_result_source(db, {**current, **update_data}, session)
+        return result
+    result = await transaction(db, save_exam)
     if result.matched_count == 0:
         raise HTTPException(
             status_code=409,
@@ -546,18 +557,16 @@ async def delete_folder(
 ):
     exam = await require_exam_access(identity, db, payload.id)
     exam_object_id = exam["_id"]
-    delete_result = await db["newsavedDocs"].delete_one(
-        {"_id": exam_object_id, "faculty_id": exam["faculty_id"]}
-    )
-    # Do not remove children if the exam was deleted or reassigned since authorization.
-    if delete_result.deleted_count != 1:
-        raise HTTPException(
-            status_code=409,
-            detail="Exam changed or was already deleted. Refresh and try again.",
-        )
-
-    await db["answerDetails"].delete_many({"exam_id": exam_object_id})
-    await db["evaluationDetails"].delete_many({"exam_id": exam_object_id})
+    async def remove(session):
+        current = await db["newsavedDocs"].find_one({"_id": exam_object_id}, session=session)
+        delete_result = await db["newsavedDocs"].delete_one(
+            {"_id": exam_object_id, "faculty_id": exam["faculty_id"]}, session=session)
+        if delete_result.deleted_count != 1:
+            raise HTTPException(409, "Exam changed or was already deleted")
+        await touch_result_source(db, current, session)
+        await db["answerDetails"].delete_many({"exam_id": exam_object_id}, session=session)
+        await db["evaluationDetails"].delete_many({"exam_id": exam_object_id}, session=session)
+    await transaction(db, remove)
     return {"success": True, "message": "Folder deleted successfully!"}
 
 
