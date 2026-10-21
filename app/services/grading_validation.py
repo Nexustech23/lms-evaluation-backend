@@ -13,7 +13,7 @@ def equal(a, b):
     return math.isclose(a, b, rel_tol=0, abs_tol=1e-6)
 
 
-def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=()):
+def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(), review_invalid_evidence=False):
     result = deepcopy(result)
     rows = result.get("questionwise_marking")
     if not isinstance(rows, list) or len(rows) != len(rules):
@@ -36,12 +36,15 @@ def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=())
             raise ValueError("Question flags must be booleans")
         if flags.get("unanswered") and awarded:
             raise ValueError("Unanswered question cannot earn marks")
+        evidence_invalid = False
         if awarded and n not in trusted_mcq:
             quotes = row.get("evidence")
             normalized = " ".join(answer_text.split())
             if not isinstance(quotes, list) or not quotes or any(
                     not isinstance(q, str) or not q.strip() or " ".join(q.split()) not in normalized for q in quotes):
-                raise ValueError(f"Question {n}: positive score requires a real student-answer evidence quote")
+                evidence_invalid = True
+                if not review_invalid_evidence:
+                    raise ValueError(f"Question {n}: positive score requires a real student-answer evidence quote")
         for field in ("reasoning", "feedback", "improvement"):
             if not isinstance(row.get(field), str):
                 raise ValueError(f"Question {n}: missing {field}")
@@ -80,6 +83,17 @@ def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=())
                 param_total += score
             if params and not equal(param_total, awarded):
                 raise ValueError("Parameter scores must sum to the question score")
+        if evidence_invalid:
+            # Only evidence failures are recoverable here. All rubric, score,
+            # CO and parameter checks above must still pass before saving a draft.
+            from app.services.evaluation_review import review_draft
+            reason = "Positive AI marks could not be verified against the extracted student answer. Inspect the original answer sheet."
+            draft = review_draft([rule], reason)["questionwise_marking"][0]
+            draft["question_no"] = n
+            draft["proposed_ai_marks"] = awarded
+            row.clear()
+            row.update(draft)
+            awarded = 0
         row.update(max_marks=maximum, ai_awarded_marks=awarded, final_marks=awarded, grace_marks=0)
     rows.sort(key=lambda q: q["question_no"])
     rubric_total = sum(number(r["maxMarks"], "maximum") for r in rules)

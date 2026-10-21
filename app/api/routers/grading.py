@@ -259,7 +259,8 @@ async def _run_evaluation_job(
         eval_total_marks = (evaluation_doc or {}).get("totalMarks")
         if eval_total_marks is None:
             eval_total_marks = sum(r["maxMarks"] for r in evaluation_rules)
-        grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text)
+        grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text,
+            review_invalid_evidence=True)
         if "[UNREADABLE" in answer_text.upper():
             for q in grading_json["questionwise_marking"]:
                 q["flags"]["needs_review"] = True
@@ -409,7 +410,7 @@ async def _run_evaluation_job(
             "result": {
                 "success": True,
                 "evaluation_status": "pending_review" if requires_review else "evaluated",
-                "message": "Answer script evaluated successfully",
+                "message": "Faculty review required before marks are final" if requires_review else "Answer script evaluated successfully",
                 "answer_id": answer_id,
                 "filename": answer.get("filename", "Result.pdf"),
                 "evaluated_report_url": evaluation_upload["url"],
@@ -418,9 +419,10 @@ async def _run_evaluation_job(
                 "transcript_pdf_fileId": transcript_upload["file_id"],
                 "transcript_generated": generate_transcript_pdf,
                 "total_ai_marks": total_ai_marks,
+                "total_final_marks": None if requires_review else total_ai_marks,
                 "total_max_marks": total_max_marks,
                 "questionwise_marking": questionwise_marking,
-                "co": co_results_per_question,
+                "co": [] if requires_review else co_results_per_question,
                 "evaluated_at": now.isoformat(),
                 "token_usage": {
                     "gemini_total_tokens": token_usage["gemini"]["total_tokens"],
