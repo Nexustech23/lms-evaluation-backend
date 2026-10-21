@@ -134,8 +134,8 @@ def determine_mcq_answer_keys(
     except Exception as e:
         logger.warning("determine_mcq_answer_keys: Claude call failed: %s", e)
         if getattr(e, "usage", None):
-            return {}, {**e.usage, "call_status": "failed"}
-        return {}, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "usage_status": "unknown"}
+            return unresolved, {**e.usage, "call_status": "failed"}
+        return unresolved, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "usage_status": "unknown", "call_status": "failed"}
 
     try:
         cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
@@ -146,7 +146,7 @@ def determine_mcq_answer_keys(
             raise ValueError("'answers' is not an object")
     except Exception as e:
         logger.warning("determine_mcq_answer_keys: could not parse model response as JSON: %s", e)
-        return {}, usage
+        return unresolved, {**usage, "call_status": "failed"}
 
     # Only keep entries for questions actually asked, with a valid shape —
     # never trust the model to have echoed back exactly the right set of keys.

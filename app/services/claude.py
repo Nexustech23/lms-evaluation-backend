@@ -9,6 +9,22 @@ from app.core.config import settings
 _client: anthropic.Anthropic | None = None
 
 
+def _response_text(message):
+    """Read text blocks without treating an empty/non-text response as text."""
+    parts = []
+    for block in getattr(message, "content", None) or []:
+        block_type = getattr(block, "type", None)
+        if isinstance(block_type, str) and block_type != "text":
+            continue
+        value = getattr(block, "text", None)
+        if isinstance(value, str):
+            parts.append(value)
+    text = "\n".join(parts).strip()
+    if not text:
+        raise RuntimeError("AI response contained no usable text")
+    return text
+
+
 def _message_usage(message):
     usage = {"input_tokens": message.usage.input_tokens,
             "output_tokens": message.usage.output_tokens,
@@ -49,7 +65,7 @@ def generate_html(
 
         token_usage = _message_usage(message)
 
-        html_content = message.content[0].text
+        html_content = _response_text(message)
         html_content = re.sub(r"^```html\s*", "", html_content, flags=re.IGNORECASE)
         html_content = re.sub(r"^```\s*", "", html_content)
         html_content = re.sub(r"\s*```\s*$", "", html_content)
@@ -95,7 +111,7 @@ def generate_text(
         token_usage = _message_usage(message)
         if getattr(message, "stop_reason", None) in {"max_tokens", "refusal"}:
             raise RuntimeError("AI text output is incomplete or refused; it cannot be published")
-        text = message.content[0].text.strip()
+        text = _response_text(message)
 
         return text, token_usage
 
