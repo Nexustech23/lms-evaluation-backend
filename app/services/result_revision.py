@@ -38,7 +38,7 @@ async def touch_result_source(db, exam, session):
         {"$set": {**stale, "cgpa_stale": True}}, session=session)
 
 
-async def update_answer_result(db, exam, query, changes, paper_guard=None):
+async def update_answer_result(db, exam, query, changes, paper_guard=None, review_event=None):
     async def update(session):
         parent = {"_id": exam["_id"], "faculty_id": exam["faculty_id"]}
         if paper_guard:
@@ -52,5 +52,7 @@ async def update_answer_result(db, exam, query, changes, paper_guard=None):
         result = await db["answerDetails"].update_one(query, changes, session=session)
         if result.matched_count != 1:
             raise HTTPException(409, "Answer changed or was deleted while saving results")
+        if review_event is not None:
+            await db["answerReviewHistory"].insert_one(review_event, session=session)
         return result
     return await transaction(db, update)

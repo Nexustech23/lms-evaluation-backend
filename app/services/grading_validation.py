@@ -84,16 +84,10 @@ def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(),
             if params and not equal(param_total, awarded):
                 raise ValueError("Parameter scores must sum to the question score")
         if evidence_invalid:
-            # Only evidence failures are recoverable here. All rubric, score,
-            # CO and parameter checks above must still pass before saving a draft.
-            from app.services.evaluation_review import review_draft
-            reason = "Positive AI marks could not be verified against the extracted student answer. Inspect the original answer sheet."
-            draft = review_draft([rule], reason)["questionwise_marking"][0]
-            draft["question_no"] = n
-            draft["proposed_ai_marks"] = awarded
-            row.clear()
-            row.update(draft)
-            awarded = 0
+            # The approved policy publishes valid AI marks immediately. Keep
+            # uncertainty visible inside Self Evaluate without changing scores.
+            from app.services.evaluation_review import flag_review
+            flag_review(row, "Supporting evidence could not be verified against the extracted answer. Inspect the original answer sheet.")
         row.update(max_marks=maximum, ai_awarded_marks=awarded, final_marks=awarded, grace_marks=0)
     rows.sort(key=lambda q: q["question_no"])
     rubric_total = sum(number(r["maxMarks"], "maximum") for r in rules)

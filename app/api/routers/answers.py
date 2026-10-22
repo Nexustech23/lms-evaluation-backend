@@ -30,6 +30,7 @@ from app.services.review_marks import validate_review_marks
 from app.services.answer_identity import answer_student_id, require_unique_identity
 from app.services.answer_persistence import save_uploaded_answer, remove_answer
 from app.services.result_revision import update_answer_result, touch_result_source, transaction
+from app.services.faculty_review import publish_faculty_review
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["answers"])
 
@@ -183,32 +184,18 @@ async def save_self_evaluation(
         questionwise_marking = validate_review_marks(payload.questionwise_marking, answer)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    total_final_marks = sum(q["final_marks"] for q in questionwise_marking)
-
     await lock_exam_for_marks(db, answer["exam_id"])
     exam = await require_exam_access(identity, db, str(answer["exam_id"]))
-
-    result = await update_answer_result(db, exam,
-        {"_id": answer["_id"], "exam_id": answer["exam_id"]},
-        {"$set": {
-            "questionwise_marking": questionwise_marking,
-            "total_final_marks": total_final_marks,
-            "reviewed_by_professor": True,
-            "evaluation_status": "faculty_reviewed",
-            "report_is_draft": True,
-            "reviewed_at": datetime.now(timezone.utc),
-            "reviewed_by": identity["user_id"],
-            "updated_at": datetime.now(timezone.utc),
-        }},
-    )
-
-    if result.modified_count == 1:
-        if answer and answer.get("exam_id"):
-            await enqueue("run_refresh_transcript", str(answer["exam_id"]),
-                          background_tasks=background_tasks)
-        return {"success": True, "total_final_marks": total_final_marks}
-
-    raise HTTPException(status_code=500, detail="Failed to save evaluation")
+    response = await publish_faculty_review(db, exam, answer, questionwise_marking, identity,
+                                           revision=payload.result_revision)
+    if response["transcript_refresh"] == "pending":
+        try:
+            await enqueue("run_refresh_transcript", str(answer["exam_id"]), background_tasks=background_tasks)
+        except Exception:
+            # Marks and matching PDF are committed. Stale transcript guards
+            # remain active even if retry scheduling is temporarily unavailable.
+            pass
+    return response
 
 
 # =====================================================

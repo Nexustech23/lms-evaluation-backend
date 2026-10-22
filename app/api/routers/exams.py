@@ -663,6 +663,8 @@ async def get_folder_details(
             "total_final_marks": answer.get("total_final_marks", 0),
             "reviewed_by_professor": answer.get("reviewed_by_professor", False),
             "evaluation_status": answer.get("evaluation_status"),
+            "review_policy": answer.get("review_policy"),
+            "result_revision": answer.get("result_revision", 0),
             "report_is_draft": answer.get("report_is_draft", False),
             "student_name": answer.get("student_name"),
             "created_at": answer.get("created_at"),

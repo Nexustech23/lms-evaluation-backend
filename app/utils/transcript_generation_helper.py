@@ -186,21 +186,21 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
         from app.models.relative_grading import build_grading_config
         grading = await db["relativeGradings"].find_one({"university_id": institute_id})
         if not grading:
-            return
+            return "pending"
         grading_config = build_grading_config(grading)
         if not grading_config:
-            return
+            return "pending"
 
         batch_snapshot = await db["batchDetails"].find_one({"_id": batch_id, "institute_id": institute_id})
         if not batch_snapshot:
-            return
+            return "pending"
         expected_revision = source_snapshot(batch_snapshot)
 
         documents, _summary = await generate_transcript_for_semester(
             db, institute_id, str(batch_id), str(semester)
         )
         if not documents:
-            return
+            return "pending"
 
         generation_id = str(uuid.uuid4())
         for document in documents:
@@ -215,5 +215,7 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
             "record_count": len(documents),
             "imported_at": datetime.now(timezone.utc),
         }, semester=semester, expected_revision=expected_revision)
+        return "updated"
     except Exception:
         logger.exception("Automatic transcript refresh failed for exam_id=%s", exam_id)
+        return "pending"

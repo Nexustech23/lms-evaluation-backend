@@ -432,8 +432,6 @@ def _status_label(flags: Dict[str, Any]) -> tuple:
     """Single priority-ordered status for the summary table + its pill color
     (matching the original Flask-era report: unanswered beats incomplete
     beats irrelevant beats a clean "Evaluated")."""
-    if flags.get("needs_review"):
-        return "Faculty review required", "#92400e", "#fef3c7"
     if flags.get("unanswered"):
         return "Not Attempted", "#dc2626", "#fee2e2"
     if flags.get("incomplete"):
@@ -459,14 +457,19 @@ def generate_evaluation_report_html(
     summary = grading_json.get("summary", {}) or {}
     questions = grading_json.get("questionwise_marking", []) or []
 
-    total_ai_marks = summary.get("total_ai_marks", sum(q.get("ai_awarded_marks", 0) for q in questions))
+    def final_score(item, final_field="final_marks", ai_field="ai_awarded_marks"):
+        value = item.get(final_field)
+        return item.get(ai_field, 0) if value is None else value
+
+    total_ai_marks = round(sum(final_score(q) for q in questions), 2)
     max_marks = total_max_marks if total_max_marks is not None else summary.get("total_max_marks", 0)
     percentage = round((total_ai_marks / max_marks) * 100, 2) if max_marks else 0
     grade = _grade_letter(percentage)
-    if grading_json.get("requires_review"):
-        grade = "Pending"
-        percentage = "Pending"
-    attempted = summary.get("questions_attempted", "-")
+    from app.services.evaluation_review import OPTIONAL_REVIEW_POLICY
+    legacy_pending = grading_json.get("requires_review") and grading_json.get("review_policy") != OPTIONAL_REVIEW_POLICY
+    if legacy_pending:
+        grade, percentage = "Pending", "Pending"
+    attempted = sum(not q.get("flags", {}).get("unanswered", False) for q in questions)
     total_q = summary.get("questions_total", len(questions))
 
     # ── Question-wise Summary table ──────────────────────────────────────
@@ -474,11 +477,13 @@ def generate_evaluation_report_html(
     for q in questions:
         flags = q.get("flags", {}) or {}
         status_text, status_fg, status_bg = _status_label(flags)
+        if legacy_pending and flags.get("needs_review"):
+            status_text, status_fg, status_bg = "Faculty review required", "#92400e", "#fef3c7"
         summary_rows.append(f"""
 <tr>
   <td>{q.get('question_no', '')}</td>
   <td>{q.get('max_marks', 0)}</td>
-  <td><strong>{q.get('ai_awarded_marks', 0)}</strong></td>
+  <td><strong>{final_score(q)}</strong></td>
   <td><span class="status-pill" style="color:{status_fg};background:{status_bg};">{status_text}</span></td>
 </tr>""")
 
@@ -497,14 +502,14 @@ def generate_evaluation_report_html(
             if on
         )
 
-        q_marks = q.get("ai_awarded_marks", 0)
+        q_marks = final_score(q)
         q_max = q.get("max_marks", 0) or 1
         q_pct = round((q_marks / q_max) * 100, 1) if q_max else 0
         bar_color = _score_bar_color(q_pct)
 
         co_rows = "".join(
             f"<tr><td><span class=\"co-chip\">{_escape_html(c.get('co_code'))}</span></td>"
-            f"<td>{c.get('ai_marks', 0)}</td><td>{_escape_html(c.get('remarks'))}</td></tr>"
+            f"<td>{final_score(c, 'final_co_marks', 'ai_marks')}</td><td>{_escape_html(c.get('remarks'))}</td></tr>"
             for c in (q.get("cos") or [])
         )
         param_rows = "".join(
@@ -512,12 +517,20 @@ def generate_evaluation_report_html(
             f"<td>{p.get('ai_score', 0)}</td><td>{_escape_html(p.get('remarks'))}</td></tr>"
             for p in (q.get("parameters") or [])
         )
+        review_detail = ""
+        if q.get("grace_marks") or q.get("review_confirmed"):
+            review_detail = (
+                '<div class="callout callout-blue"><div class="callout-label">Faculty assessment</div>'
+                f"Original AI marks: {q.get('ai_awarded_marks', 0)}; "
+                f"faculty adjustment: {q.get('grace_marks', 0)}; final marks: {q_marks}. "
+                f"{_escape_html(q.get('review_note') or '')}</div>")
 
         question_blocks.append(f"""
 <div class="question">
   <div class="q-title">Question {q.get('question_no', '')}</div>
   <div class="q-badges">{flag_badges}</div>
   <div class="score-bar" style="background:{bar_color};">{q_marks} / {q_max} <span class="pct">({q_pct}%)</span></div>
+  {review_detail}
   {f'<div class="section-label">&#128218; CO-wise Marks</div><table class="co-table"><tr><th>CO Code</th><th>Marks Awarded</th><th>Remarks</th></tr>{co_rows}</table>' if co_rows else ''}
   {f'<div class="section-label">&#128202; Parameter-wise Breakdown</div><table class="param-table"><tr><th>Parameter</th><th>Weight</th><th>Score</th><th>Remarks</th></tr>{param_rows}</table>' if param_rows else ''}
   <div class="callout callout-green"><div class="callout-label">&#128269; Reasoning</div>{_escape_html(q.get('reasoning'))}</div>
@@ -567,7 +580,7 @@ def generate_evaluation_report_html(
 </head>
 <body>
   <div class="banner">
-    <h1>{'PROVISIONAL - FACULTY REVIEW REQUIRED' if grading_json.get('requires_review') else 'EVALUATION REPORT'}</h1>
+    <h1>{'PROVISIONAL - FACULTY REVIEW REQUIRED' if legacy_pending else 'EVALUATION REPORT'}</h1>
     <div class="meta"><strong>Student:</strong> {_escape_html(student_name)}</div>
   </div>
 
@@ -588,7 +601,7 @@ def generate_evaluation_report_html(
   {"".join(question_blocks)}
 
   <div class="footer">
-    <div>Note: This is an AI-generated evaluation.</div>
+    <div>{'AI evaluation with faculty-confirmed adjustments.' if grading_json.get('faculty_reviewed') else 'Note: This is an AI-generated evaluation.'}</div>
     <div>Generated by Gradelytics | &copy; 2025</div>
   </div>
 </body>

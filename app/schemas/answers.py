@@ -28,6 +28,7 @@ class DeleteFileRequest(BaseModel):
 
 class SelfEvaluationRequest(BaseModel):
     answer_id: str
+    result_revision: Optional[int] = Field(default=None, ge=0)
     # Review validation runs after ownership checks, against saved question
     # limits. Keep the flexible AI evaluation shape at the transport boundary.
     questionwise_marking: List[Dict[str, Any]] = []
