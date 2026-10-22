@@ -1,6 +1,7 @@
 """Validate faculty reviews against the saved answer's question limits."""
 
 import math
+from app.services.evaluation_review import optional_review
 
 from app.models.answer import validate_questionwise
 
@@ -48,9 +49,11 @@ def _co_map(cos):
 def _marks(item, saved, ai_field):
     maximum = _number(saved.get("max_marks"), "Saved max_marks")
     submitted_maximum = _number(item.get("max_marks"), "max_marks")
-    if maximum <= 0 or submitted_maximum != maximum:
+    if maximum < 0 or submitted_maximum != maximum:
         raise ValueError("max_marks must match the saved evaluation")
     ai = _number(item.get(ai_field, 0), ai_field)
+    if not math.isclose(ai, _number(saved.get(ai_field, 0), "Saved AI marks"), rel_tol=0, abs_tol=1e-7):
+        raise ValueError("Original AI marks cannot change; use faculty adjustment")
     grace = _number(item.get("grace_marks", 0), "grace_marks")
     final = ai + grace
     if not 0 <= ai <= maximum or not 0 <= final <= maximum:
@@ -67,8 +70,16 @@ def validate_review_marks(submitted, answer):
     normalized = []
     for number, question in reviewed.items():
         original = saved[number]
+        confirmed = question.get("review_confirmed") is True
         if original.get("flags", {}).get("needs_review"):
-            if question.get("review_confirmed") is not True or not isinstance(question.get("review_note"), str) or not question["review_note"].strip():
+            changed = _number(question.get("grace_marks", 0), "grace_marks") != _number(original.get("grace_marks", 0), "Saved grace marks")
+            old_cos = _co_map(original.get("cos") or [])
+            new_cos = _co_map(question.get("cos") or [])
+            changed = changed or any(
+                _number(co.get("grace_marks", 0), "CO adjustment") != _number(old_cos.get(code, {}).get("grace_marks", 0), "Saved CO adjustment")
+                for code, co in new_cos.items())
+            if (not optional_review(answer) or changed or confirmed) and (
+                    not confirmed or not isinstance(question.get("review_note"), str) or not question["review_note"].strip()):
                 raise ValueError(f"Question {number}: inspect the original and explicitly confirm the review with a note")
         question = _marks(question, original, "ai_awarded_marks")
         question["question_no"] = number
@@ -90,9 +101,18 @@ def validate_review_marks(submitted, answer):
     validated = validate_questionwise(normalized)
     for q in validated:
         source = reviewed[q["question_no"]]
-        q["review_note"] = source.get("review_note", "").strip()
+        original = saved[q["question_no"]]
+        for field in ("evidence", "review_reasons", "proposed_ai_marks"):
+            if field in original:
+                q[field] = original[field]
+        note = source.get("review_note") or ""
+        if not isinstance(note, str):
+            raise ValueError("Review note must be text")
+        q["review_note"] = note.strip()
         q["review_confirmed"] = source.get("review_confirmed") is True
-        q["flags"] = {**q.get("flags", {}), "needs_review": False}
+        q["flags"] = {**original.get("flags", {}), "needs_review": bool(original.get("flags", {}).get("needs_review") and not q["review_confirmed"])}
+        if q["final_marks"] > 0:
+            q["flags"]["unanswered"] = False
     total = sum(q["final_marks"] for q in validated)
     if not math.isfinite(total):
         raise ValueError("Final total must be finite")

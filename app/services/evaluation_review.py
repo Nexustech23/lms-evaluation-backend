@@ -1,6 +1,27 @@
-"""Keep uncertain model judgments provisional until explicit faculty resolution."""
+"""Separate official marks from optional, question-level faculty review."""
+
+OPTIONAL_REVIEW_POLICY = "official_ai_optional_review_v1"
+
+
+def optional_review(answer):
+    return answer.get("review_policy") == OPTIONAL_REVIEW_POLICY
+
+
+def flag_review(question, reason):
+    question.setdefault("flags", {})["needs_review"] = True
+    reasons = question.setdefault("review_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def review_count(questions):
+    return sum(bool(q.get("flags", {}).get("needs_review")) for q in questions)
 
 def pending_review(answer):
+    # Older drafts may contain placeholder zeros and missing original scores.
+    # Never silently publish those as official marks under the new policy.
+    if optional_review(answer) and answer.get("total_final_marks") is not None:
+        return False
     return answer.get("evaluation_status") == "pending_review" or any(
         q.get("flags", {}).get("needs_review") for q in answer.get("questionwise_marking", []))
 

@@ -47,7 +47,7 @@ from app.services.paper_version import paper_snapshot_filter
 from app.services.exam_paper_lock import lock_exam_for_marks
 from app.services.result_revision import update_answer_result
 from app.services.grading_validation import validate_grading
-from app.services.evaluation_review import review_draft, pending_review, choice_review_required
+from app.services.evaluation_review import OPTIONAL_REVIEW_POLICY, flag_review, review_count, choice_review_required
 from app.services.grading import GRADING_PROMPT_VERSION, split_answer_pdf
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
@@ -234,11 +234,7 @@ async def _run_evaluation_job(
         student_name = answer.get("student_name") or "Student"
 
         if extraction_issue:
-            import json
-            grading_result_raw = json.dumps(review_draft(evaluation_rules, "Extraction incomplete; inspect the original answer sheet."))
-            claude_calls = []
-            transcript_html = None
-            generate_transcript_pdf = False
+            raise RuntimeError("Answer extraction is incomplete. No new official marks were saved; upload a readable answer sheet before retrying.")
         elif generate_transcript_pdf:
             (grading_result_raw, grade_claude_tokens), (transcript_html, transcript_claude_tokens) = await asyncio.gather(
                 claude_step(grade_with_claude, question_text, answer_text, evaluation_rules,
@@ -263,7 +259,7 @@ async def _run_evaluation_job(
             review_invalid_evidence=True)
         if "[UNREADABLE" in answer_text.upper():
             for q in grading_json["questionwise_marking"]:
-                q["flags"]["needs_review"] = True
+                flag_review(q, "Some answer text is unreadable. Check this question against the original sheet.")
 
         # Step 4b — deterministic MCQ override. Claude graded every question above
         # exactly as before (unchanged, zero risk to that path) — this replaces only
@@ -274,14 +270,15 @@ async def _run_evaluation_job(
         student_mcq_answers = parse_mcq_answers_from_ocr_text(answer_text)
         grading_json["questionwise_marking"], mcq_override_count = apply_deterministic_mcq_overrides(
             grading_json.get("questionwise_marking", []), mcq_answer_key, student_mcq_answers,
+            preserve_uncertain=True,
         )
         grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text,
-            trusted_mcq={int(n) for n in mcq_answer_key})
+            trusted_mcq={int(n) for n in mcq_answer_key}, review_invalid_evidence=True)
         if extraction_issue or "[UNREADABLE" in answer_text.upper() or choice_review_required(question_text):
             for q in grading_json["questionwise_marking"]:
-                q["flags"]["needs_review"] = True
-        requires_review = pending_review(grading_json)
-        grading_json["requires_review"] = requires_review
+                flag_review(q, "Check unreadable content or the paper's optional-question selection policy.")
+        grading_json["review_policy"] = OPTIONAL_REVIEW_POLICY
+        pending_questions = review_count(grading_json["questionwise_marking"])
         if mcq_override_count:
             logging.info(
                 "[eval-job %s] %d MCQ question(s) scored deterministically (answer key match)",
@@ -363,9 +360,11 @@ async def _run_evaluation_job(
         if not await db["newsavedDocs"].find_one(paper_guard):
             raise RuntimeError("Question paper changed. Start evaluation again for the current paper.")
         now = datetime.now(timezone.utc)
+        revision_guard = {"result_revision": answer["result_revision"]} if "result_revision" in answer else {
+            "result_revision": {"$exists": False}}
         save_result = await update_answer_result(db, exam,
             {"_id": answer_object_id, "exam_id": exam_object_id,
-             "reviewed_by_professor": {"$ne": True}},
+             "reviewed_by_professor": {"$ne": True}, **revision_guard},
             {"$set": {
                 "evaluated_report_url": evaluation_upload["url"],
                 "evaluated_report_fileId": evaluation_upload["file_id"],
@@ -374,9 +373,12 @@ async def _run_evaluation_job(
                 "questionwise_marking": questionwise_marking,
                 "total_ai_marks": total_ai_marks,
                 "total_max_marks": total_max_marks,
-                "total_final_marks": None if requires_review else total_ai_marks,
-                "evaluation_status": "pending_review" if requires_review else "evaluated",
-                "co": [] if requires_review else co_results_per_question,
+                "total_final_marks": total_ai_marks,
+                "evaluation_status": "evaluated",
+                "review_policy": OPTIONAL_REVIEW_POLICY,
+                "review_pending_count": pending_questions,
+                "report_is_draft": False,
+                "co": co_results_per_question,
                 "prompt_version": GRADING_PROMPT_VERSION,
                 "rubric_revision": exam.get("rubric_revision"),
                 "paper_version": (exam.get("question_paper") or {}).get("version"),
@@ -386,7 +388,7 @@ async def _run_evaluation_job(
                 "evaluated_at": now,
                 "updated_at": now,
                 "token_usage": {**token_usage, "transcript_generated": generate_transcript_pdf},
-            }, "$addToSet": {"verified_storage_ids": {"$each": [
+            }, "$inc": {"result_revision": 1}, "$addToSet": {"verified_storage_ids": {"$each": [
                 upload["file_id"] for upload in (evaluation_upload, transcript_upload) if upload.get("file_id")
             ]}}}, paper_guard=paper_guard,
         )
@@ -409,8 +411,12 @@ async def _run_evaluation_job(
             "step": "Completed",
             "result": {
                 "success": True,
-                "evaluation_status": "pending_review" if requires_review else "evaluated",
-                "message": "Faculty review required before marks are final" if requires_review else "Answer script evaluated successfully",
+                "evaluation_status": "evaluated",
+                "review_policy": OPTIONAL_REVIEW_POLICY,
+                "review_pending_count": pending_questions,
+                "message": "Answer script evaluated successfully",
+                "result_revision": answer.get("result_revision", 0) + 1,
+                "report_is_draft": False,
                 "answer_id": answer_id,
                 "filename": answer.get("filename", "Result.pdf"),
                 "evaluated_report_url": evaluation_upload["url"],
@@ -419,10 +425,10 @@ async def _run_evaluation_job(
                 "transcript_pdf_fileId": transcript_upload["file_id"],
                 "transcript_generated": generate_transcript_pdf,
                 "total_ai_marks": total_ai_marks,
-                "total_final_marks": None if requires_review else total_ai_marks,
+                "total_final_marks": total_ai_marks,
                 "total_max_marks": total_max_marks,
                 "questionwise_marking": questionwise_marking,
-                "co": [] if requires_review else co_results_per_question,
+                "co": co_results_per_question,
                 "evaluated_at": now.isoformat(),
                 "token_usage": {
                     "gemini_total_tokens": token_usage["gemini"]["total_tokens"],

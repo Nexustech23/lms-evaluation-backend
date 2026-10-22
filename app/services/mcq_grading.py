@@ -297,6 +297,7 @@ def apply_deterministic_mcq_overrides(
     questionwise_marking: List[Dict[str, Any]],
     mcq_answer_key: Dict[str, Dict[str, Any]],
     student_mcq_answers: Dict[str, Optional[str]],
+    *, preserve_uncertain: bool = False,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Returns (new_questionwise_marking, override_count). Pure function, no AI/network
     call — testable with synthetic data. Leaves any question not in mcq_answer_key
@@ -322,6 +323,13 @@ def apply_deterministic_mcq_overrides(
             max_marks=q.get("max_marks", 0),
             cos=q.get("cos"),
         )
+        if preserve_uncertain and deterministic["flags"].get("needs_review"):
+            from copy import deepcopy
+            from app.services.evaluation_review import flag_review
+            preserved = deepcopy(q)
+            flag_review(preserved, deterministic["reasoning"])
+            result.append(preserved)
+            continue
         result.append(deterministic)
         override_count += 1
 
