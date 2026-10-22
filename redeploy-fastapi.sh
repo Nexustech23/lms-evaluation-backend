@@ -1,41 +1,66 @@
-#!/bin/bash
-# Run this on the server (nexus1) inside
-# /home/ubuntu/lms-evaluation-backend/fastapi-backend
-# whenever FastAPI backend code changes need to go live.
-#
-# Post-cutover: FastAPI is now the sole backend, running on host port
-# 5050 (Flask's lms-backend has been stopped and retired — see the
-# docker-compose.yml comment for why the port mapping changed from
-# 5051:5050 to 5050:5050). Flask's old redeploy.sh in the parent
-# directory should no longer be used.
-set -e
-
+#!/usr/bin/env bash
+# Run: bash redeploy-fastapi.sh in /home/ubuntu/lms-evaluation-backend-new.
+# For the current inline queue mode; wait for active jobs before redeploying.
+set -Eeuo pipefail
 cd "$(dirname "$0")"
 
-echo "==> Pulling latest code..."
-git pull
-
-echo "==> Rebuilding image (should be fast if the Docker cache is warm — dependency"
-echo "    layers only re-run when requirements.txt or the Dockerfile change)..."
-BUILD_START=$(date +%s)
-docker compose build lms-backend-fastapi
-BUILD_SECS=$(( $(date +%s) - BUILD_START ))
-
-echo "==> Recreating container..."
-docker compose up -d lms-backend-fastapi
-
-echo "==> Verifying network attachment..."
-docker network inspect lms-shared --format "Containers on lms-shared: {{range .Containers}}{{.Name}} {{end}}"
-
-echo "==> Done. FastAPI is now live on port 5050 (sole backend — Flask has been retired)."
-echo "==> Health check: curl http://localhost:5050/health"
-
-echo "==> Build took ${BUILD_SECS}s."
-if [ "$BUILD_SECS" -gt 120 ]; then
-  echo "    ⚠ That's much slower than a cached build (normally under a minute)."
-  echo "    Likely cause: requirements.txt/Dockerfile changed, or the Docker build"
-  echo "    cache was evicted. Check disk space below — Docker auto-prunes its"
-  echo "    cache when the disk gets full."
+exec 9>".git/lms-deploy.lock"
+flock -n 9 || { echo "Another deployment is running." >&2; exit 1; }
+if [ "$(git branch --show-current)" != main ]; then
+  echo "Switch to main before deploying." >&2
+  exit 1
 fi
-echo "==> Docker disk usage (watch the 'RECLAIMABLE' build-cache row over time):"
-docker system df
+git pull --ff-only origin main
+
+SERVICE=lms-backend-fastapi
+ROLLBACK_IMAGE=local/lms-backend-fastapi:rollback
+BACKUP_IMAGE=local/lms-backend-fastapi:deploy-backup
+CACHE_KEEP="${BUILD_CACHE_KEEP:-2GB}"
+old_image=$(docker inspect --format '{{.Image}}' "$SERVICE" 2>/dev/null || true)
+old_rollback=$(docker image inspect --format '{{.Id}}' "$ROLLBACK_IMAGE" 2>/dev/null || true)
+if [ -n "$old_image" ]; then
+  docker image tag "$old_image" "$BACKUP_IMAGE"
+fi
+trap 'echo "Deployment stopped. Check the error above; retain rollback/backup images for recovery." >&2' ERR
+
+echo "==> Building backend..."
+docker compose build "$SERVICE"
+docker compose up -d --no-build --no-deps "$SERVICE"
+
+healthy=false
+for attempt in {1..30}; do
+  if [ "$(docker inspect --format '{{.State.Running}}' "$SERVICE")" = true ] &&
+    docker compose exec -T "$SERVICE" python -c '
+import json
+import urllib.request
+with urllib.request.urlopen("http://127.0.0.1:5050/health", timeout=5) as response:
+    status = json.load(response)
+assert status.get("status") == "healthy" and status.get("database") == "connected"
+' >/dev/null 2>&1; then
+    healthy=true
+    break
+  fi
+  sleep 2
+done
+if [ "$healthy" != true ]; then
+  echo "Backend/database health check failed. No cleanup performed. Backup: $BACKUP_IMAGE" >&2
+  exit 1
+fi
+
+new_image=$(docker inspect --format '{{.Image}}' "$SERVICE")
+if [ -n "$old_image" ] && [ "$old_image" != "$new_image" ]; then
+  docker image tag "$old_image" "$ROLLBACK_IMAGE"
+fi
+if [ -n "$old_image" ]; then
+  docker image rm --no-prune "$BACKUP_IMAGE" >/dev/null
+fi
+rollback_image=$(docker image inspect --format '{{.Id}}' "$ROLLBACK_IMAGE" 2>/dev/null || true)
+if [ -n "$old_rollback" ] && [ "$old_rollback" != "$rollback_image" ] && [ "$old_rollback" != "$new_image" ]; then
+  # Only the superseded rollback from this project, without force deletion.
+  docker image rm --no-prune "$old_rollback" || echo "Old image is still referenced; retained."
+fi
+
+echo "==> Healthy. Cleaning unused build cache (shared Docker cache; keep $CACHE_KEEP)..."
+docker builder prune -af --keep-storage "$CACHE_KEEP" || echo "Cache cleanup failed; deployment remains healthy."
+echo "==> Backend deployed. Previous release retained as $ROLLBACK_IMAGE (when available)."
+df -h /
