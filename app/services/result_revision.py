@@ -2,17 +2,22 @@
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from pymongo.errors import PyMongoError
+from app.core.diagnostics import event, trace_function
 
 
 def source_snapshot(batch):
     return (batch.get("result_source_revision", 0), batch.get("transcript_write_revision", 0))
 
 
+@trace_function("results.transaction")
 async def transaction(db, operation):
     try:
         async with await db.client.start_session() as session:
-            return await session.with_transaction(operation)
+            result = await session.with_transaction(operation)
+            event("results.transaction_committed")
+            return result
     except PyMongoError as exc:
+        event("results.transaction_unconfirmed", error_type=type(exc).__name__)
         raise HTTPException(503, "Result change could not be confirmed. Refresh and retry; MongoDB transactions are required.") from exc
 
 

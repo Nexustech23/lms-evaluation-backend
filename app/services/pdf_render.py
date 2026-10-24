@@ -1,3 +1,4 @@
+from app.core.diagnostics import trace_function
 # Sync API, not async — the async API launches Chromium via
 # asyncio.create_subprocess_exec on whatever event loop is currently running,
 # which fails with NotImplementedError under uvicorn's default Windows loop
@@ -41,6 +42,7 @@ def _guard_request(route):
     route.abort()
 
 
+@trace_function('report.pdf_render')
 def render_html_to_pdf(html_content: str) -> bytes:
     try:
         with sync_playwright() as p:

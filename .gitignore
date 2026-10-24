@@ -7,3 +7,6 @@ __pycache__/
 # runtime debug artifact from safe_json_parse() — never commit this
 bad_llm_json.txt
 .vscode
+# Local diagnostics (never publish student or operational records)
+logs/
+*.jsonl

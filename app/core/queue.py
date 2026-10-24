@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from app.core.config import settings
+from app.core.diagnostics import context, event
 
 logger = logging.getLogger("queue")
 
@@ -61,11 +63,11 @@ async def close_queue() -> None:
     _pool = None
 
 
-async def _run_inline(job_name: str, args: tuple) -> None:
+async def _run_inline(job_name: str, args: tuple, trace=None) -> None:
     from app.worker import JOB_REGISTRY
 
     try:
-        await JOB_REGISTRY[job_name](None, *args)  # ctx=None
+        await JOB_REGISTRY[job_name](None, *args, _lms_trace=trace)  # ctx=None
     except Exception:
         # Job bodies catch their own errors and write a "failed" status; this
         # only fires on something truly unexpected. Log it — a bare
@@ -83,16 +85,22 @@ async def enqueue(job_name: str, *args: Any, background_tasks: Any = None) -> No
     rather than a bare asyncio task.
     """
     mode = settings.QUEUE_MODE
+    trace = context()
+    trace["dispatch_epoch"] = time.time()
+    event("job.dispatch", job_kind=job_name, queue_mode=mode, job_id=str(args[0]) if args else None)
 
     if mode in _INLINE_MODES:
         if mode == "inline_sync":
-            await _run_inline(job_name, args)
+            event("job.enqueue_accepted",job_kind=job_name,job_id=str(args[0]) if args else None,queue_mode=mode,acceptance="inline_execution")
+            await _run_inline(job_name, args, trace)
         elif background_tasks is not None:
-            background_tasks.add_task(_run_inline, job_name, args)
+            background_tasks.add_task(_run_inline, job_name, args, trace)
+            event("job.enqueue_accepted",job_kind=job_name,job_id=str(args[0]) if args else None,queue_mode=mode,acceptance="background_task_registered")
         else:
-            task = asyncio.create_task(_run_inline(job_name, args))
+            task = asyncio.create_task(_run_inline(job_name, args, trace))
             _pending.add(task)
             task.add_done_callback(_pending.discard)
+            event("job.enqueue_accepted",job_kind=job_name,job_id=str(args[0]) if args else None,queue_mode=mode,acceptance="async_task_created")
         return
 
     if _pool is None:
@@ -101,11 +109,31 @@ async def enqueue(job_name: str, *args: Any, background_tasks: Any = None) -> No
         from arq import create_pool
         from arq.connections import RedisSettings
 
-        pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
         try:
-            await pool.enqueue_job(job_name, *args)
+            pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+        except Exception as exc:
+            event('job.enqueue_not_accepted',job_kind=job_name,job_id=str(args[0]) if args else None,
+                  queue_mode='redis',reason='pool_unavailable',error_type=type(exc).__name__)
+            raise
+        try:
+            await _enqueue_redis(pool, job_name, args, trace)
         finally:
             await pool.aclose()
         return
 
-    await _pool.enqueue_job(job_name, *args)
+    await _enqueue_redis(_pool, job_name, args, trace)
+
+
+async def _enqueue_redis(pool,job_name,args,trace):
+    identity=str(args[0]) if args else None
+    try:
+        queued=await pool.enqueue_job(job_name,*args,_lms_trace=trace)
+    except BaseException as exc:
+        event("job.enqueue_unconfirmed",job_kind=job_name,job_id=identity,queue_mode="redis",
+              error_type=type(exc).__name__,exc_info=True)
+        raise
+    arq_id=getattr(queued,'job_id',None)
+    event("job.enqueue_accepted" if queued is not None else "job.enqueue_not_accepted",
+          job_kind=job_name,job_id=identity,queue_mode="redis",
+          queue_job_id=arq_id if isinstance(arq_id,str) else None,
+          acceptance="redis_acknowledged" if queued is not None else "arq_job_id_already_exists")

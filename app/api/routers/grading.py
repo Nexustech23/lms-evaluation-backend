@@ -1,3 +1,4 @@
+from app.core.diagnostics import trace_function
 # ============================================================
 # AI ANSWER-SCRIPT GRADING ROUTER
 # Ported from the QuizGradingAssistant pipeline embedded in Flask's
@@ -61,6 +62,7 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["grading"
 EVAL_JOB_PREFIX = "job:"
 
 
+@trace_function('evaluation.download')
 def _download_pdf(url: str) -> bytes:
     # SSRF-checked: rejects internal / metadata addresses and redirects.
     return safe_get(url, timeout=60)
@@ -159,6 +161,12 @@ async def _run_evaluation_job(
             await _fail(job_id, "No evaluation rules found for this exam")
             return
 
+        from app.core.workflow_diagnostics import configuration_snapshot, check_result_consistency
+        from app.services.mcq_grading import MCQ_ANSWER_KEY_MODEL
+        configuration_snapshot(exam, answer, evaluation_doc,
+            ocr_model=GEMINI_OCR_MODEL, grading_model=CLAUDE_GRADING_MODEL,
+            prompt_version=GRADING_PROMPT_VERSION, transcript_pdf=generate_transcript_pdf, job_id=job_id,
+            mcq_model=MCQ_ANSWER_KEY_MODEL)
         institute_id = await _resolve_institute_id(db, exam)
 
         # Step 2 — download
@@ -200,6 +208,8 @@ async def _run_evaluation_job(
             pdf_pages = await asyncio.to_thread(split_answer_pdf, student_pdf_bytes)
             page_texts, page_usages = [], []
             for page_no, page_bytes in enumerate(pdf_pages, 1):
+                from app.core.diagnostics import event as log_event
+                log_event("evaluation.ocr_page_started", job_id=job_id, page_number=page_no, page_count=len(pdf_pages))
                 # Each page has its own durable billing event: a later unknown
                 # failure cannot erase known usage from earlier pages.
                 page_text, page_usage = await tracked_faculty_call(
@@ -209,12 +219,16 @@ async def _run_evaluation_job(
                 )
                 page_texts.append(f"ANSWER PAGE {page_no}\n{page_text}")
                 page_usages.append(page_usage)
+                log_event("evaluation.ocr_page_completed", job_id=job_id, page_number=page_no, extracted_characters=len(page_text or ""))
             answer_text = "\n\n".join(page_texts)
             ans_gemini_tokens = {key: sum(u.get(key, 0) for u in page_usages)
                 for key in ("prompt_tokens", "candidate_tokens", "total_tokens")}
             ans_gemini_tokens.update(page_count=len(pdf_pages), pages_processed=len(page_texts))
+            log_event("ocr.coverage",job_id=job_id,page_count=len(pdf_pages),pages_processed=len(page_texts),outcome="completed")
         except RuntimeError as extraction_error:
             if not str(extraction_error).startswith("Answer script OCR failed:"):
+                from app.core.diagnostics import event as log_event
+                log_event("evaluation.path",job_id=job_id,reason_code="NON_OCR_FAILURE_PROPAGATED",outcome="aborted",error_type=type(extraction_error).__name__)
                 raise  # Billing/ledger failures must never be presented as unreadable handwriting.
             extraction_issue = True
             answer_text = "[UNREADABLE: extraction could not be confirmed complete]"
@@ -234,6 +248,8 @@ async def _run_evaluation_job(
         student_name = answer.get("student_name") or "Student"
 
         if extraction_issue:
+            from app.core.diagnostics import event as log_event
+            log_event("evaluation.path",job_id=job_id,reason_code="OCR_INCOMPLETE_NO_NEW_MARKS",outcome="aborted")
             raise RuntimeError("Answer extraction is incomplete. No new official marks were saved; upload a readable answer sheet before retrying.")
         elif generate_transcript_pdf:
             (grading_result_raw, grade_claude_tokens), (transcript_html, transcript_claude_tokens) = await asyncio.gather(
@@ -258,6 +274,7 @@ async def _run_evaluation_job(
         grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text,
             review_invalid_evidence=True)
         if "[UNREADABLE" in answer_text.upper():
+            log_event("evaluation.path",job_id=job_id,reason_code="UNREADABLE_TEXT_MARKER",outcome="optional_review_flagged")
             for q in grading_json["questionwise_marking"]:
                 flag_review(q, "Some answer text is unreadable. Check this question against the original sheet.")
 
@@ -275,6 +292,9 @@ async def _run_evaluation_job(
         grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text,
             trusted_mcq={int(n) for n in mcq_answer_key}, review_invalid_evidence=True)
         if extraction_issue or "[UNREADABLE" in answer_text.upper() or choice_review_required(question_text):
+            log_event("evaluation.path",job_id=job_id,
+                      reason_code="OCR_EXTRACTION_ISSUE" if extraction_issue else "UNREADABLE_TEXT_MARKER" if "[UNREADABLE" in answer_text.upper() else "OPTIONAL_CHOICE_POLICY",
+                      outcome="optional_review_flagged")
             for q in grading_json["questionwise_marking"]:
                 flag_review(q, "Check unreadable content or the paper's optional-question selection policy.")
         grading_json["review_policy"] = OPTIONAL_REVIEW_POLICY
@@ -288,6 +308,10 @@ async def _run_evaluation_job(
         # Step 5 — recompute marks server-side (never trust Claude's self-reported totals)
         await update_job(EVAL_JOB_PREFIX, job_id, {"progress": 65, "step": "Computing marks"})
         questionwise_marking = grading_json.get("questionwise_marking", [])
+        from app.core.diagnostics import question_marks, event as log_event
+        question_marks(questionwise_marking, "ai_evaluated")
+        log_event("evaluation.marks_ready", exam_id=str(exam_id), answer_id=str(answer_id),
+                  job_id=job_id, question_count=len(questionwise_marking), review_count=pending_questions)
         total_ai_marks = round(sum(float(q.get("ai_awarded_marks", 0)) for q in questionwise_marking), 2)
         grading_json.setdefault("summary", {})
         grading_json["summary"]["total_ai_marks"] = total_ai_marks
@@ -395,6 +419,14 @@ async def _run_evaluation_job(
         if save_result.matched_count != 1:
             raise RuntimeError("Answer was deleted or reviewed while AI ran. Existing marks were preserved.")
         saved = True
+        check_result_consistency(questionwise_marking, total_ai=total_ai_marks,
+            total_final=total_ai_marks,total_max=total_max_marks,phase="ai_commit_payload",
+            job_id=job_id,exam_id=str(exam_id),answer_id=str(answer_id))
+        log_event("report.published",job_id=job_id,exam_id=str(exam_id),answer_id=str(answer_id),
+                  report_file_id=evaluation_upload.get("file_id"),
+                  transcript_pdf_file_id=transcript_upload.get("file_id"),
+                  transcript_pdf_requested=generate_transcript_pdf,
+                  result_revision=answer.get("result_revision",0)+1,publication="transaction_confirmed")
 
         # Already running as a background job, so just await this directly —
         # if this subject's batch/semester already has a generated academic

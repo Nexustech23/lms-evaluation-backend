@@ -18,6 +18,7 @@
 # blocking grading — see determine_and_save_mcq_answer_keys).
 # ============================================================
 
+from app.core.diagnostics import event as diagnostic_event
 import asyncio
 import json
 import logging
@@ -242,6 +243,7 @@ def score_mcq_answer(
         return entries
 
     if not correct_letter or not key_confident:
+        diagnostic_event("mcq.comparison",question_no=question_no,reason_code="KEY_UNCONFIRMED",outcome="uncertain")
         return {
             "question_no": question_no, "max_marks": max_marks, "ai_awarded_marks": 0, "final_marks": 0,
             "parameters": [], "cos": _co_entries(all_or_nothing_marks=False),
@@ -253,6 +255,7 @@ def score_mcq_answer(
         }
 
     if not student_letter or student_letter == "BLANK":
+        diagnostic_event("mcq.comparison",question_no=question_no,reason_code="STUDENT_BLANK" if student_letter=="BLANK" else "SELECTION_UNCLEAR",outcome="blank" if student_letter=="BLANK" else "uncertain")
         return {
             "question_no": question_no, "max_marks": max_marks, "ai_awarded_marks": 0, "final_marks": 0,
             "parameters": [], "cos": _co_entries(all_or_nothing_marks=False),
@@ -265,6 +268,7 @@ def score_mcq_answer(
 
     is_correct = student_letter.strip().upper() == correct_letter.strip().upper()
     marks = float(max_marks) if is_correct else 0.0
+    diagnostic_event("mcq.comparison",question_no=question_no,reason_code="OPTION_MATCH" if is_correct else "OPTION_MISMATCH",outcome="match" if is_correct else "mismatch",awarded_marks=marks)
     return {
         "question_no": question_no, "max_marks": max_marks, "ai_awarded_marks": marks, "final_marks": marks,
         "parameters": [{
@@ -304,6 +308,10 @@ def apply_deterministic_mcq_overrides(
     (subjective questions, or MCQ questions Claude never had a resolved key for)
     completely untouched — Claude's own grading of those stands as-is."""
     if not mcq_answer_key:
+        if isinstance(questionwise_marking,list):
+            for q in questionwise_marking:
+                if isinstance(q,dict):
+                    diagnostic_event("grading.question_source",question_no=q.get("question_no"),source="claude_judgment",reason_code="NO_MCQ_KEY_ENTRIES",override_applied=False)
         return questionwise_marking, 0
 
     override_count = 0
@@ -312,6 +320,7 @@ def apply_deterministic_mcq_overrides(
         q_no = q.get("question_no")
         key_entry = mcq_answer_key.get(str(q_no))
         if key_entry is None:
+            diagnostic_event("grading.question_source",question_no=q_no,source="claude_judgment",reason_code="NO_KEY_ENTRY",override_applied=False)
             result.append(q)
             continue
 
@@ -328,8 +337,10 @@ def apply_deterministic_mcq_overrides(
             from app.services.evaluation_review import flag_review
             preserved = deepcopy(q)
             flag_review(preserved, deterministic["reasoning"])
+            diagnostic_event("grading.question_source",question_no=q_no,source="claude_judgment",reason_code="UNCERTAIN_MCQ_PRESERVED",override_applied=False,review_flagged=True)
             result.append(preserved)
             continue
+        diagnostic_event("grading.question_source",question_no=q_no,source="deterministic_mcq",reason_code="MCQ_OVERRIDE_APPLIED",override_applied=True,review_flagged=bool(deterministic["flags"].get("needs_review")))
         result.append(deterministic)
         override_count += 1
 
@@ -365,11 +376,13 @@ async def determine_and_save_mcq_answer_keys(
         if (not exam or paper.get("text") != paper_text
                 or paper.get("version") != paper_version
                 or (paper_url is not None and paper.get("url") != paper_url)):
+            diagnostic_event("mcq.key_resolution",exam_id=str(folder_id),reason_code="SNAPSHOT_INPUT_MISMATCH",outcome="skipped")
             return {}
         snapshot_filter = paper_snapshot_filter(folder_id, paper)
         key_version = paper_key_version(paper)
         mcq_questions = {n: list(c["options"].values()) for n, c in mcq_contexts(paper_text).items()}
         if not mcq_questions:
+            diagnostic_event("mcq.key_resolution",exam_id=str(folder_id),reason_code="NO_MCQS_DETECTED",outcome="skipped")
             logger.info("[mcq-key] folder %s: no MCQ questions detected, skipping", folder_id)
             return {}
 
@@ -377,6 +390,7 @@ async def determine_and_save_mcq_answer_keys(
                     folder_id, len(mcq_questions))
         from app.services.faculty_ai_usage import tracked_faculty_call
         from app.models.ai_usage_event import Feature, Provider
+        diagnostic_event("mcq.key_resolution",exam_id=str(folder_id),reason_code="GENERATION_STARTED",question_count=len(mcq_questions),outcome="generating")
         answer_key, usage = await tracked_faculty_call(
             db, determine_mcq_answer_keys, mcq_questions, paper_text, faculty_id=faculty_id, user_id=user_id,
             provider=Provider.CLAUDE, model=MCQ_ANSWER_KEY_MODEL, feature=Feature.GRADING_MCQ_ANSWER_KEY,
@@ -414,6 +428,7 @@ async def determine_and_save_mcq_answer_keys(
                     folder_id, len(answer_key), needs_review_count)
 
 
+        diagnostic_event("mcq.key_resolution",exam_id=str(folder_id),reason_code="KEY_SAVED" if result.matched_count else "STALE_SNAPSHOT_NOT_SAVED",outcome="saved" if result.matched_count else "discarded",key_entry_count=len(answer_key),needs_review_count=needs_review_count)
         return answer_key if result.matched_count else {}
 
     except Exception as e:
@@ -422,6 +437,7 @@ async def determine_and_save_mcq_answer_keys(
         # must never surface as a question-paper-upload failure, or as a grading
         # failure on the lazy path; the exam simply keeps no mcq_answer_key, and
         # every question is graded by Claude as before.
+        diagnostic_event("mcq.key_resolution",exam_id=str(folder_id),reason_code="RESOLUTION_FAILED",outcome="unavailable",error_type=type(e).__name__)
         logger.warning("[mcq-key] folder %s: failed (non-fatal): %s", folder_id, e)
         return {}
 
@@ -455,19 +471,25 @@ async def ensure_mcq_answer_key(
     paper = exam.get("question_paper") or {}
     paper_text = paper.get("text")
     if not paper_text:
+        diagnostic_event("mcq.key_selection",exam_id=str(exam.get("_id")),reason_code="PAPER_TEXT_MISSING",source="unavailable")
         return {}
     if not await db["newsavedDocs"].find_one(paper_snapshot_filter(exam["_id"], paper)):
+        diagnostic_event("mcq.key_selection",exam_id=str(exam.get("_id")),reason_code="PAPER_SNAPSHOT_MISMATCH",source="unavailable")
         return {}
     existing = exam.get("mcq_answer_key")
     if existing and not exam.get("mcq_answer_key_version"):
+        diagnostic_event("mcq.key_selection",exam_id=str(exam.get("_id")),reason_code="LEGACY_VERSION_MISSING",source="legacy_uncertain",key_entry_count=len(existing))
         return {n: {**entry, "confident": False, "reasoning": "Untagged legacy key requires faculty review."}
                 for n, entry in existing.items()}
     if existing and exam.get("mcq_answer_key_version") == paper_key_version(paper):
         if exam.get("mcq_answer_key_context_version") != 1:
+            diagnostic_event("mcq.key_selection",exam_id=str(exam.get("_id")),reason_code="LEGACY_CONTEXT_MISSING",source="legacy_uncertain",key_entry_count=len(existing))
             return {n: {**entry, "confident": False, "reasoning": "Legacy key requires faculty review; full question context was not recorded."}
                     for n, entry in existing.items()}
+        diagnostic_event("mcq.key_selection",exam_id=str(exam.get("_id")),reason_code="CACHE_CURRENT",source="cached",key_entry_count=len(existing))
         return existing
 
+    diagnostic_event("mcq.key_selection",exam_id=str(exam.get("_id")),reason_code="KEY_VERSION_MISMATCH" if existing else "KEY_MISSING",source="lazy_resolution")
     logger.info("[mcq-key] folder %s: no answer key yet — resolving lazily at evaluation time",
                 exam["_id"])
     return await determine_and_save_mcq_answer_keys(

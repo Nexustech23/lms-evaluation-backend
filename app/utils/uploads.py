@@ -1,3 +1,4 @@
+from app.core.diagnostics import trace_function, event
 # ============================================================
 # Bounded reads for multipart file uploads.
 #
@@ -21,11 +22,13 @@ def _too_large(max_bytes: int) -> HTTPException:
     )
 
 
+@trace_function('upload.read')
 async def read_upload_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> bytes:
     """Read an UploadFile fully, aborting with HTTP 413 once it exceeds
     max_bytes instead of letting an unbounded body into RAM."""
     size_hint = getattr(file, "size", None)
     if isinstance(size_hint, int) and size_hint > max_bytes:
+        event("upload.rejected",reason_code="DECLARED_SIZE_EXCEEDS_LIMIT",declared_bytes=size_hint,read_bytes=0,size_limit=max_bytes)
         raise _too_large(max_bytes)
 
     chunks: list[bytes] = []
@@ -36,6 +39,8 @@ async def read_upload_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES
             break
         total += len(chunk)
         if total > max_bytes:
+            event("upload.rejected",reason_code="READ_SIZE_EXCEEDS_LIMIT",declared_bytes=size_hint if isinstance(size_hint,int) else None,read_bytes=total,size_limit=max_bytes)
             raise _too_large(max_bytes)
         chunks.append(chunk)
+    event("upload.buffered", file_size=total, size_limit=max_bytes)
     return b"".join(chunks)

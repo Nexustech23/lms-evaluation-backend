@@ -1,3 +1,4 @@
+from app.core.diagnostics import trace_function
 import base64
 import hashlib
 import hmac
@@ -35,11 +36,13 @@ def get_imagekit_client():
     )
 
 
+@trace_function('storage.delete')
 def delete_imagekit_file(file_id: str) -> None:
     """Blocking call — run via asyncio.to_thread() from async callers."""
     get_imagekit_client().delete_file(file_id)
 
 
+@trace_function('storage.upload')
 def upload_file_to_imagekit(file_binary: bytes, filename: str, folder: str, tags: List[str]) -> Dict[str, Any]:
     """Blocking call — run via asyncio.to_thread() from async callers. Content-agnostic (PDF/docx/image/...)."""
     from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions

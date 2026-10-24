@@ -68,7 +68,7 @@ async def summarize_nodes(
         summaries = json.loads(_strip_code_fence(text))
         logger.info("summarize_nodes: summarized %d/%d eligible nodes", len(summaries), len(targets))
     except json.JSONDecodeError:
-        logger.warning("summarize_nodes: failed to parse summary JSON, falling back to titles: %r", text[:200])
+        logger.warning("summarize_nodes: failed to parse summary JSON, falling back to titles; characters=%d", len(text))
         summaries = {}
 
     for n in targets:

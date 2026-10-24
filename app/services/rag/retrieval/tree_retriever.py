@@ -61,7 +61,7 @@ async def retrieve(
         picked_ids = parsed.get("node_ids", [])
         confidence = float(parsed.get("confidence", 0.0))
     except (json.JSONDecodeError, ValueError):
-        logger.warning("tree_retriever: doc_id=%s failed to parse node-picking response: %r", doc_id, text[:200])
+        logger.warning("tree_retriever: doc_id=%s failed to parse node-picking response; characters=%d", doc_id, len(text))
         picked_ids, confidence = [], 0.0
 
     id_to_node = {n.id: n for n in nodes}

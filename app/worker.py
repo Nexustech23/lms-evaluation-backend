@@ -30,6 +30,9 @@ import sys
 from bson import ObjectId
 
 from app.core.config import settings
+from app.core.diagnostics import configure_logging, trace_job, trace_function, event
+from app.core.diagnostic_details import resource_monitor, resources
+from app.core.workflow_diagnostics import dependency_monitor
 
 logger = logging.getLogger("worker")
 
@@ -126,12 +129,16 @@ _FUNCTIONS = [
 # run a job body in the web process instead of shipping it to Redis. This
 # module's WorkerSettings is only loaded when a lms-worker container
 # actually runs (QUEUE_MODE="redis").
+_FUNCTIONS = [trace_job(fn) for fn in _FUNCTIONS]
 JOB_REGISTRY = {fn.__name__: fn for fn in _FUNCTIONS}
 
 
 # ── arq worker lifecycle ────────────────────────────────────
 
+@trace_function('worker.startup')
 async def _on_startup(ctx) -> None:
+    configure_logging()
+    event('worker.starting', resources=resources.sample())
     # Mirror app/main.py: on Windows, flip the policy back to Proactor so
     # Playwright (PDF render) and libreoffice subprocesses can spawn.
     if sys.platform == "win32":
@@ -151,6 +158,8 @@ async def _on_startup(ctx) -> None:
     connect_to_mongo()
     await ping_mongo()
     connect_to_redis()
+    ctx['resource_log_task'] = asyncio.create_task(resource_monitor())
+    ctx['dependency_log_task'] = asyncio.create_task(dependency_monitor())
     logger.info("arq worker started — Mongo + Redis connected")
 
 
@@ -158,6 +167,22 @@ async def _on_shutdown(ctx) -> None:
     from app.core.redis_client import close_redis_connection
     from app.db.mongodb import close_mongo_connection
 
+    dependency_task = ctx.pop('dependency_log_task',None)
+    if dependency_task:
+        dependency_task.cancel()
+        try:
+            await dependency_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            event('dependency.monitor_stopped',error_type='MonitorFailure')
+    task = ctx.pop('resource_log_task', None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await close_redis_connection()
     close_mongo_connection()
 

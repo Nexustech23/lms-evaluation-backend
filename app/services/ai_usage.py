@@ -178,6 +178,12 @@ async def _record_ai_usage_once(
         stored = await db["aiUsageEvents"].find_one({"_id": event_id})
         if stored.get("usage_status") == "known":
             await project_usage_event(db, stored)
+        from app.core.diagnostics import event as log_event
+        log_event("ai.usage_finalized", ai_event_id=str(event_id),
+                  **{k:stored.get(k) for k in ("user_id","institute_id","job_id","provider","model",
+                      "feature","input_tokens","output_tokens","total_tokens","cache_tokens",
+                      "cost_usd","usage_status","cost_status","call_status")},
+                  rollup_pending_before_projection=stored.get('rollup_pending'))
         return True
     except Exception as e:
         logger.warning(

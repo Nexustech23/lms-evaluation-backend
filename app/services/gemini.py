@@ -1,3 +1,6 @@
+from app.core.diagnostics import trace_function
+from app.core.diagnostics import event as diagnostic_event
+from app.core.diagnostic_details import external_error_details
 import asyncio
 import csv
 import io
@@ -255,6 +258,7 @@ def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "
     return text, _parse_token_usage(getattr(response, "usage_metadata", None))
 
 
+@trace_function('ai.gemini_generate')
 def _call_generate_content_with_retry(client: genai.Client, model: str, contents: list, config=None):
     """
     Shared retry/backoff for client.models.generate_content calls: up to 5 attempts on
@@ -297,6 +301,9 @@ def _call_generate_content_with_retry(client: genai.Client, model: str, contents
             logging.warning(
                 "Gemini request failed (retryable error). Retry %d/5 in %.2fs.", attempt + 1, wait_time
             )
+            diagnostic_event('ai.retry_scheduled', provider='gemini', model=model,
+                             attempt=attempt+1, wait_seconds=wait_time,
+                             external_error=external_error_details(e))
             time.sleep(wait_time)
 
     if response is None:

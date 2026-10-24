@@ -12,6 +12,14 @@ if [ "$(git branch --show-current)" != main ]; then
 fi
 git pull --ff-only origin main
 
+# Stamp the image that is built, rather than guessing a release inside the container.
+export APP_GIT_COMMIT
+APP_GIT_COMMIT=$(git rev-parse HEAD)
+export APP_SOURCE_DIRTY=false
+if [ -n "$(git status --porcelain)" ]; then
+  APP_SOURCE_DIRTY=true
+fi
+
 SERVICE=lms-backend-fastapi
 ROLLBACK_IMAGE=local/lms-backend-fastapi:rollback
 BACKUP_IMAGE=local/lms-backend-fastapi:deploy-backup
