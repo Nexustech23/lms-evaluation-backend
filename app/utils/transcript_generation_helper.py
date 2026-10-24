@@ -1,3 +1,4 @@
+from app.core.diagnostics import trace_function
 # ============================================================
 # Ported from utils/transcript_generation_helper.py. Builds
 # academic_transcripts-shaped documents for one batch/semester directly
@@ -150,6 +151,7 @@ async def generate_transcript_for_semester(
     return documents, summary
 
 
+@trace_function('transcript.refresh')
 async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) -> None:
     """Fire-and-forget: if a transcript has already been generated for the
     batch/semester an exam's subject belongs to, silently regenerate it so
@@ -161,38 +163,50 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
     generated before — only refreshes what already exists, so a single
     answer save doesn't trigger full-batch recomputation for every batch in
     the institute."""
+    from app.core.diagnostics import event
+    targets = {"exam_id":str(exam_id)}
+    def observed(outcome, reason, **fields):
+        event("transcript.refresh_outcome",outcome=outcome,reason_code=reason,**targets,**fields)
+    event("transcript.refresh_started",**targets)
     try:
         exam_object_id = exam_id if isinstance(exam_id, ObjectId) else ObjectId(str(exam_id))
         exam = await db["newsavedDocs"].find_one({"_id": exam_object_id}, {"subject_id": 1})
         if not exam or not exam.get("subject_id"):
+            observed("skipped","EXAM_SUBJECT_LINK_MISSING")
             return
 
         subject = await db["subjectDetails"].find_one(
             {"_id": exam["subject_id"]}, {"batch_id": 1, "semester": 1, "institute_id": 1},
         )
         if not subject or not subject.get("batch_id") or subject.get("semester") is None:
+            observed("skipped","SUBJECT_BATCH_OR_SEMESTER_MISSING")
             return
 
         institute_id = subject.get("institute_id")
         batch_id = subject["batch_id"]
         semester = subject["semester"]
+        targets.update(batch_id=str(batch_id),institute_id=str(institute_id),semester=semester)
 
         existing = await db["academic_transcripts"].find_one({
             "institute_id": institute_id, "batch_id": batch_id, "semester_no": int(semester),
         })
         if not existing:
+            observed("skipped","TRANSCRIPT_NOT_PREVIOUSLY_GENERATED")
             return  # this batch/semester's transcript was never generated — nothing to refresh
 
         from app.models.relative_grading import build_grading_config
         grading = await db["relativeGradings"].find_one({"university_id": institute_id})
         if not grading:
+            observed("pending","GRADING_POLICY_MISSING")
             return "pending"
         grading_config = build_grading_config(grading)
         if not grading_config:
+            observed("pending","GRADING_POLICY_INVALID")
             return "pending"
 
         batch_snapshot = await db["batchDetails"].find_one({"_id": batch_id, "institute_id": institute_id})
         if not batch_snapshot:
+            observed("pending","BATCH_SNAPSHOT_MISSING")
             return "pending"
         expected_revision = source_snapshot(batch_snapshot)
 
@@ -200,6 +214,7 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
             db, institute_id, str(batch_id), str(semester)
         )
         if not documents:
+            observed("pending","NO_TRANSCRIPT_DOCUMENTS")
             return "pending"
 
         generation_id = str(uuid.uuid4())
@@ -215,7 +230,9 @@ async def refresh_transcript_for_exam(db: AsyncIOMotorDatabase, exam_id: Any) ->
             "record_count": len(documents),
             "imported_at": datetime.now(timezone.utc),
         }, semester=semester, expected_revision=expected_revision)
+        observed("updated","COMMIT_CONFIRMED",generation_id=generation_id,record_count=len(documents))
         return "updated"
-    except Exception:
+    except Exception as exc:
+        observed("failed_or_unconfirmed","REFRESH_EXCEPTION",error_type=type(exc).__name__,returned_status="pending")
         logger.exception("Automatic transcript refresh failed for exam_id=%s", exam_id)
         return "pending"

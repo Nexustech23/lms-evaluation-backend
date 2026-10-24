@@ -10,6 +10,7 @@
 
 import ast
 import json
+from app.core.diagnostics import event as diagnostic_event
 import logging
 import re
 import io
@@ -138,12 +139,14 @@ def extract_answer_text_with_gemini(
             usage.update(page_count=len(reader.pages), pages_processed=index,
                 usage_status="unknown" if any(u.get("usage_status") == "unknown" for u in calls) else "known")
             if truncated or not page_text.strip().endswith("PAGE_COMPLETE"):
+                diagnostic_event("ocr.decision",reason_code="OUTPUT_TRUNCATED" if truncated else "PAGE_COMPLETE_MARKER_MISSING",page_number=index,page_count=len(reader.pages),outcome="rejected_incomplete")
                 error = RuntimeError(f"Answer extraction incomplete on page {index}")
                 error.usage = usage
                 raise error
             pages.append(f"PAGE {index}\n" + page_text.rsplit("PAGE_COMPLETE", 1)[0].strip())
         text = "\n\n".join(pages)
     except Exception as e:
+        diagnostic_event("ocr.decision",reason_code="EXTRACTION_FAILED",outcome="failed",error_type=type(e).__name__)
         error = RuntimeError(f"Answer script OCR failed: {e}")
         failed_usage = getattr(e, "usage", None)
         previous = locals().get("usage")
@@ -360,6 +363,7 @@ def generate_transcript_html_with_claude(answer_text: str, student_name: str = "
     try:
         html, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=18000)
         html = _strip_fences(html)
+        diagnostic_event("transcript.generation_path",source="claude",reason_code="CLAUDE_TRANSCRIPT_COMPLETED")
         return html, {
             **usage,
             "call": "generate_transcript_html_with_claude", "model": CLAUDE_GRADING_MODEL,
@@ -367,6 +371,7 @@ def generate_transcript_html_with_claude(answer_text: str, student_name: str = "
             "total_tokens": usage["total_tokens"],
         }
     except Exception as e:
+        diagnostic_event("transcript.generation_path",source="basic_template",reason_code="CLAUDE_TRANSCRIPT_FAILED",error_type=type(e).__name__)
         logging.warning("Transcript generation via Claude failed, using basic fallback: %s", e)
         usage = getattr(e, "usage", None)
         return generate_basic_transcript_html(answer_text, student_name), (
@@ -666,5 +671,5 @@ def safe_json_parse(text: str) -> Dict[str, Any]:
     # 9. give up — log a bounded snippet (never write the full raw model
     #    output to a file on disk: unbounded, and this path is reachable by
     #    an unauthenticated-ish caller triggering a grading job).
-    logging.warning("safe_json_parse: unparseable AI response (first 500 chars): %s", cleaned[:500])
+    logging.warning("safe_json_parse: unparseable AI response; characters=%d", len(cleaned))
     raise ValueError("Could not parse the AI model's response as JSON.")

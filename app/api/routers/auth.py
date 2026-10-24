@@ -484,6 +484,9 @@ async def login(
         serialized_user["hasQPGAccess"] = user.get("hasQPGAccess", False)
         serialized_user["must_change_password"] = bool(user.get("must_change_password", False))
 
+        from app.core.diagnostics import bind, event
+        bind(user_id=str(user["_id"]), role=user["role"])
+        event("auth.login_succeeded")
         set_access_cookie(response, access_token)
 
         return {"message": "Login successful", "user": serialized_user}
@@ -493,6 +496,8 @@ async def login(
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception:
+        from app.core.diagnostics import event
+        event("auth.login_failed", exc_info=True)
         raise HTTPException(status_code=500, detail="Login failed")
 
 

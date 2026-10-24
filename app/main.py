@@ -5,14 +5,22 @@ import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from app.core.diagnostics import configure_logging, event, install_route_diagnostics, stage
+from app.core.diagnostic_details import resource_monitor, resources
+from app.core.workflow_diagnostics import dependency_monitor
+configure_logging()
 
 from app.api.routers import (
     ai_tutor,
     answers,
     auth,
+    client_diagnostics,
     contact,
     course_material,
     evaluation,
@@ -44,12 +52,12 @@ from app.db.mongodb import close_mongo_connection, connect_to_mongo, get_databas
 from app.services.ai_usage import ensure_ai_usage_indexes
 from app.services.ai_usage_rollups import usage_reconciliation_loop
 
-logging.basicConfig(level=logging.INFO)
 logging.getLogger("pymongo").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    event('application.starting', resources=resources.sample())
     # uvicorn forces WindowsSelectorEventLoopPolicy on Windows (its default
     # asyncio loop backend, since uvloop isn't available there), which has no
     # subprocess transport — any code that spawns a subprocess raises
@@ -72,17 +80,33 @@ async def lifespan(app: FastAPI):
     )
 
     # Must register the command listener BEFORE the Mongo client is created.
-    install_slow_query_logging()
-    connect_to_mongo()
-    await ping_mongo()
-    await ensure_ai_usage_indexes(get_database())
-    await ensure_indexes(get_database())
-    connect_to_redis()
-    await connect_to_queue()
+    with stage('application.startup_dependencies'):
+        install_slow_query_logging()
+        connect_to_mongo()
+        await ping_mongo()
+        await ensure_ai_usage_indexes(get_database())
+        await ensure_indexes(get_database())
+        connect_to_redis()
+        await connect_to_queue()
     usage_reconciler = asyncio.create_task(usage_reconciliation_loop(get_database()))
+    resource_task = asyncio.create_task(resource_monitor())
+    dependency_task = asyncio.create_task(dependency_monitor())
+    event("application.ready", queue_mode=settings.QUEUE_MODE)
     try:
         yield
     finally:
+        dependency_task.cancel()
+        try:
+            await dependency_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            event('dependency.monitor_stopped',error_type='MonitorFailure')
+        resource_task.cancel()
+        try:
+            await resource_task
+        except asyncio.CancelledError:
+            pass
         usage_reconciler.cancel()
         try:
             await usage_reconciler
@@ -91,6 +115,7 @@ async def lifespan(app: FastAPI):
     await close_queue()
     await close_redis_connection()
     close_mongo_connection()
+    event("application.stopped")
 
 
 app = FastAPI(title="LMS Evaluation API", lifespan=lifespan)
@@ -112,6 +137,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-Response-Time-ms"],
 )
 
 # Registered last => outermost => measures total wall-clock per request,
@@ -142,6 +168,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     else:
         body = {"detail": exc.detail, "error": exc.detail}
 
+    event("api.rejected", status=exc.status_code, error_type="HTTPException")
     return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
 
 # All routers are mounted at root (no /api prefix) to match the Flask
@@ -170,6 +197,7 @@ app.include_router(course_material.router)
 app.include_router(self_learner_course_material.router)
 app.include_router(student_subjects.router)
 app.include_router(transcripts.router)
+app.include_router(client_diagnostics.router)
 
 
 @app.get("/")
@@ -197,3 +225,21 @@ async def health():
             "evaluation": "evaluationDetails",
         },
     }
+
+
+@app.exception_handler(RequestValidationError)
+async def diagnostic_validation_error(request, exc):
+    event("api.validation_failed", status=422,
+          reason_code='REQUEST_SCHEMA_INVALID',
+          errors=[{"location":list(e["loc"]), "type":e["type"]} for e in exc.errors()])
+    return await request_validation_exception_handler(request, exc)
+
+@app.exception_handler(Exception)
+async def diagnostic_unhandled_error(request: Request, exc: Exception):
+    # Preserve Starlette's default safe 500 text while exposing its trace ID.
+    request_id = getattr(request.state, 'diagnostic_request_id', '')
+    return PlainTextResponse('Internal Server Error', status_code=500,
+                             headers={'X-Request-ID': request_id})
+
+
+install_route_diagnostics(app)

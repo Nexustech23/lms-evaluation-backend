@@ -1,4 +1,4 @@
-from pydantic import model_validator
+from pydantic import model_validator, Field
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -123,7 +123,17 @@ class Settings(BaseSettings):
     # steady-state prod if the log volume is unwanted.
     PERF_LOG_ENABLED: bool = True
     PERF_LOG_SLOW_MS: int = 500          # requests slower than this log at WARNING
-    SLOW_QUERY_MS: int = 100             # 0 disables the Mongo command monitor
+    SLOW_QUERY_MS: int = 100             # slow threshold; detailed mode also records fast commands
+    # Testing diagnostics: JSON console + per-process files, no automatic rotation.
+    # Empty LOG_FILE disables disk output. Never enable raw body/provider dumps.
+    LOG_LEVEL: str = "INFO"
+    DETAILED_LOGGING: bool = True
+    LOG_FILE: str = "logs/application-{hostname}-{pid}.jsonl"
+    RESOURCE_LOG_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600, allow_inf_nan=False)
+    DEPENDENCY_LOG_INTERVAL_SECONDS: float = Field(default=30.0, ge=5, le=3600, allow_inf_nan=False)
+    DEPENDENCY_PROBE_TIMEOUT_SECONDS: float = Field(default=2.0, ge=0.1, le=10, allow_inf_nan=False)
+    JOB_HEARTBEAT_SECONDS: float = Field(default=30.0, ge=5, le=300, allow_inf_nan=False)
+    JOB_STALL_WARNING_SECONDS: float = Field(default=300.0, ge=30, le=86400, allow_inf_nan=False)
 
     # Concurrency (Phase 1). THREAD_POOL_WORKERS sizes the executor used by
     # asyncio.to_thread for the blocking SDK calls (Gemini/Claude/Playwright/

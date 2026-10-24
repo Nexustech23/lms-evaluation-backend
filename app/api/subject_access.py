@@ -1,4 +1,5 @@
 """Read access to a subject's combined student reports."""
+from app.core.workflow_diagnostics import access_denied
 from bson import ObjectId
 from fastapi import HTTPException
 
@@ -13,18 +14,22 @@ def _object_id(value):
 async def require_subject_report_access(identity: dict, db, subject_id: str) -> dict:
     role = identity.get("role")
     if role not in (FACULTY, INSTITUTE):
+        access_denied("ROLE_NOT_ALLOWED",identity,"subject_report")
         raise HTTPException(status_code=403, detail="Access denied")
     subject_oid = _object_id(subject_id)
     if subject_oid is None:
+        access_denied("SUBJECT_ID_INVALID",identity,"subject_report")
         raise HTTPException(status_code=400, detail="Invalid subject_id")
     subject = await db["subjectDetails"].find_one({"_id": subject_oid})
     if not subject or subject.get("is_deleted") is True:
+        access_denied("SUBJECT_NOT_FOUND" if not subject else "SUBJECT_DELETED",identity,"subject_report",subject_id)
         raise HTTPException(status_code=404, detail="Subject not found")
 
     subject_institute = _object_id(subject.get("institute_id"))
     if role == FACULTY:
         _, faculty_id, error = await get_current_user_and_faculty_details(identity, db)
         if error:
+            access_denied("FACULTY_PROFILE_UNAVAILABLE",identity,"subject_report",subject_id)
             message, code = error
             raise HTTPException(status_code=code, detail=message)
         faculty_oid = _object_id(faculty_id)
@@ -41,5 +46,11 @@ async def require_subject_report_access(identity: dict, db, subject_id: str) -> 
         allowed = subject_institute is not None and _object_id((institute or {}).get("_id")) == subject_institute
 
     if not allowed:
+        reason = "SUBJECT_INSTITUTE_MISMATCH"
+        if subject_institute is None:
+            reason = "SUBJECT_INSTITUTE_LINK_INVALID"
+        elif role == FACULTY and _object_id(subject.get("faculty_id")) != faculty_oid:
+            reason = "SUBJECT_FACULTY_MISMATCH"
+        access_denied(reason,identity,"subject_report",subject_id)
         raise HTTPException(status_code=404, detail="Subject not found")
     return subject

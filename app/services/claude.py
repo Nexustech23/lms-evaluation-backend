@@ -1,3 +1,4 @@
+from app.core.diagnostics import trace_function
 import logging
 import re
 from typing import Dict, Tuple
@@ -43,6 +44,7 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
+@trace_function('ai.claude_html')
 def generate_html(
     prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 16000
 ) -> Tuple[str, Dict[str, int]]:
@@ -91,6 +93,7 @@ def generate_html(
         raise error from e
 
 
+@trace_function('ai.claude_text')
 def generate_text(
     prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 8000, *, system: str = None
 ) -> Tuple[str, Dict[str, int]]:

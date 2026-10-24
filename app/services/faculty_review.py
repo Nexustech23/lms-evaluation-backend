@@ -1,4 +1,6 @@
 """Publish faculty marks, a matching report and an immutable review event."""
+from app.core.diagnostics import trace_function
+from app.core.workflow_diagnostics import trace_report_refresh
 import asyncio
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -23,10 +25,16 @@ def co_projection(questions):
         for c in q.get("cos", [])]} for q in questions if q.get("cos")]
 
 
+@trace_function('faculty.publish_review')
+@trace_report_refresh
 async def publish_faculty_review(db, exam, answer, questions, identity, revision=None):
     current_revision = answer.get("result_revision", 0)
     if revision is not None and revision != current_revision:
         raise HTTPException(409, "Marks changed since this review was opened. Refresh and review the latest result.")
+    from app.core.diagnostics import event as log_event
+    from app.core.workflow_diagnostics import check_result_consistency
+    log_event("report.refresh_started",answer_id=str(answer["_id"]),exam_id=str(exam["_id"]),
+              target_revision=current_revision+1,source="faculty_review")
     now = datetime.now(timezone.utc)
     total = round(sum(q["final_marks"] for q in questions), 2)
     maximum = answer.get("total_max_marks") or sum(q["max_marks"] for q in questions)
@@ -61,6 +69,8 @@ async def publish_faculty_review(db, exam, answer, questions, identity, revision
              "$inc": {"result_revision": 1},
              "$addToSet": {"verified_storage_ids": upload["file_id"]}}, review_event=event)
     except Exception:
+        log_event("report.publication_unconfirmed",answer_id=str(answer["_id"]),exam_id=str(exam["_id"]),
+                  report_file_id=upload.get("file_id"),target_revision=current_revision+1)
         # An unknown commit outcome may have saved the report. Only remove a
         # fresh upload if a database read confirms it was not committed.
         try:
@@ -72,7 +82,21 @@ async def publish_faculty_review(db, exam, answer, questions, identity, revision
         raise
     # Source revision invalidation is in the transaction. Existing transcripts
     # are refreshed before returning; failed refreshes remain explicitly stale.
+    from app.core.diagnostics import event as log_event, question_marks
+    log_event("faculty.marks_committed", answer_id=str(answer["_id"]), exam_id=str(exam["_id"]),
+              user_id=identity["user_id"], review_event_id=str(event["_id"]),
+              from_revision=current_revision, to_revision=current_revision+1,
+              previous_total=answer.get("total_final_marks"), new_total=total)
+    question_marks(answer.get("questionwise_marking", []), "before_faculty_review")
+    question_marks(questions, "after_faculty_review")
+    check_result_consistency(questions,total_ai=answer.get("total_ai_marks"),
+        total_final=total,total_max=maximum,phase="faculty_commit_payload",
+        answer_id=str(answer["_id"]),exam_id=str(exam["_id"]))
+    log_event("report.published",answer_id=str(answer["_id"]),exam_id=str(exam["_id"]),
+              report_file_id=upload.get("file_id"),result_revision=current_revision+1,
+              source="faculty_review",publication="transaction_confirmed")
     refresh = await refresh_transcript_for_exam(db, exam["_id"])
+    log_event("faculty.transcript_refresh", answer_id=str(answer["_id"]), outcome=refresh or "not_applicable")
     return {"success": True, "total_final_marks": total, "result_revision": current_revision + 1,
         "evaluated_report_url": upload["url"], "evaluation_status": "faculty_reviewed",
         "transcript_refresh": refresh or "not_applicable"}

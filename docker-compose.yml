@@ -2,7 +2,11 @@ version: "3.9"
 
 services:
   lms-backend-fastapi:
-    build: .
+    build:
+      context: .
+      args:
+        APP_GIT_COMMIT: ${APP_GIT_COMMIT:-unknown}
+        APP_SOURCE_DIRTY: ${APP_SOURCE_DIRTY:-unknown}
     container_name: lms-backend-fastapi
     ports:
       # Flask's lms-backend previously owned host port 5050; the FastAPI
@@ -16,6 +20,8 @@ services:
     environment:
       # gunicorn worker processes inside this one container. ~2*vCPU+1.
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-3}
+    volumes:
+      - ./logs:/app/logs
     restart: unless-stopped
     networks:
       - lms-shared
@@ -33,11 +39,17 @@ services:
   #   2. docker compose --profile queue up -d
   # Scale it independently: docker compose --profile queue up -d --scale lms-worker=3
   lms-worker:
-    build: .
+    build:
+      context: .
+      args:
+        APP_GIT_COMMIT: ${APP_GIT_COMMIT:-unknown}
+        APP_SOURCE_DIRTY: ${APP_SOURCE_DIRTY:-unknown}
     command: arq app.worker.WorkerSettings
     profiles: ["queue"]
     env_file:
       - .env
+    volumes:
+      - ./logs:/app/logs
     restart: unless-stopped
     depends_on:
       - lms-backend-fastapi

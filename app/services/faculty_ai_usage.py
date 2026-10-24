@@ -2,6 +2,8 @@
 import asyncio
 import logging
 from bson import ObjectId
+from app.core.diagnostics import event as log_event, scope, stage
+from app.core.diagnostic_details import external_error_details
 from app.models.ai_usage_event import create_ai_usage_event_document
 from app.services.ai_usage import record_ai_usage
 from app.services.ai_attempt_context import retry_recorder
@@ -47,6 +49,8 @@ async def tracked_faculty_call(db, function, *args, faculty_id, user_id, provide
     def retry(error, retry_provider, retry_model):
         if not user_id:
             return
+        log_event("ai.retry", provider=retry_provider, model=retry_model, feature=feature,
+                  error_type=type(error).__name__, job_id=job_id, external_error=external_error_details(error))
         usage = getattr(error, "usage", None) or {"usage_status": "unknown"}
         future = asyncio.run_coroutine_threadsafe(record_ai_usage(
             db, user_id=str(user_id), provider=retry_provider, model=retry_model, feature=feature,
@@ -86,7 +90,10 @@ async def tracked_faculty_call(db, function, *args, faculty_id, user_id, provide
 
 async def _execute_call(db, function, args, user_id, provider, model, feature, job_id, institute_id, event_id):
     try:
-        result, usage = await asyncio.to_thread(function, *args)
+        with scope(ai_event_id=str(event_id), provider=provider, model=model, feature=feature,
+                   user_id=str(user_id), job_id=job_id, institute_id=str(institute_id) if institute_id else None):
+            with stage("ai.provider_call"):
+                result, usage = await asyncio.to_thread(function, *args)
     except BaseException as exc:
         # Cancellation also leaves an honest unknown-cost attempt, never a fake zero.
         usage = getattr(exc, "usage", None)
@@ -113,10 +120,13 @@ async def _execute_call(db, function, args, user_id, provider, model, feature, j
             institute_id=str(institute_id) if institute_id else None,
             event_id=event_id, record_institute=True,
         )
+    log_event("ai.call_accounted", ai_event_id=str(event_id), provider=provider, model=model,
+              feature=feature, job_id=job_id, usage_status=(usage or {}).get("usage_status", "known"))
     return result, usage
 
 
 async def _mark_unknown(db, event_id, status):
+    log_event("ai.usage_unknown", ai_event_id=str(event_id), call_status=status)
     try:
         await db["aiUsageEvents"].update_one(
             {"_id": event_id}, {"$set": {"usage_status": "unknown", "call_status": status}},

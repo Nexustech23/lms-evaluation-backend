@@ -91,5 +91,5 @@ async def generate_attempt_insight(items: List[Dict[str, Any]], db=None, user_id
     try:
         return json.loads(_strip_code_fence(text))
     except json.JSONDecodeError:
-        logger.warning("generate_attempt_insight: failed to parse insight JSON: %r", text[:200])
+        logger.warning("generate_attempt_insight: failed to parse insight JSON; characters=%d", len(text))
         return {"insights": []}

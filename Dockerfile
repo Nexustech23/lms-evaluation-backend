@@ -18,6 +18,12 @@ RUN playwright install --with-deps chromium
 
 COPY . .
 
+# Image metadata survives without copying the Git repository or running Git at runtime.
+ARG APP_GIT_COMMIT=unknown
+ARG APP_SOURCE_DIRTY=unknown
+ENV APP_GIT_COMMIT=${APP_GIT_COMMIT} APP_SOURCE_DIRTY=${APP_SOURCE_DIRTY}
+LABEL org.opencontainers.image.revision=${APP_GIT_COMMIT}
+
 EXPOSE 5050
 
 # Multi-process: gunicorn manages N uvicorn workers in one container, so a

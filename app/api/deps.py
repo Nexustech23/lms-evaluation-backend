@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.core.diagnostics import bind, event
 from app.core.redis_client import (
     get_cached_account_state,
     set_cached_account_state,
@@ -41,13 +42,16 @@ async def get_current_identity(
 ) -> dict:
     token = request.cookies.get(settings.JWT_COOKIE_NAME)
     if not token:
+        event('auth.denied', reason='missing_token')
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authentication token")
 
     try:
         payload = decode_access_token(token)
     except jwt.ExpiredSignatureError:
+        event('auth.denied', reason='expired_token')
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
     except jwt.InvalidTokenError:
+        event('auth.denied', reason='invalid_token')
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     user_id = payload.get("sub")
@@ -62,21 +66,28 @@ async def get_current_identity(
     # request; a Redis/Mongo error fails OPEN (unknown -> not blocked).
     state = await _resolve_account_state(db, user_id)
     if state.get("blocked"):
+        event('auth.denied', reason='inactive_account', user_id=user_id)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive")
 
     cutoff = await tokens_revoked_after(user_id)
     if cutoff is not None:
         iat = payload.get("iat", 0)
         if isinstance(iat, (int, float)) and iat < cutoff:
+            event('auth.denied', reason='revoked_session', user_id=user_id)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
 
     if state.get("must_change_password") and request.url.path not in _PASSWORD_CHANGE_EXEMPT_PATHS:
+        event('auth.denied', reason='password_change_required', user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Password change required. Set a new password to continue.",
         )
 
-    return {"user_id": user_id, "role": payload.get("role", state.get("role"))}
+    identity = {"user_id": user_id, "role": payload.get("role", state.get("role"))}
+    bind(**identity)
+    request.state.diagnostic_identity = identity
+    event("auth.authenticated")
+    return identity
 
 
 # Endpoints reachable while must_change_password is set (so the user can
@@ -115,6 +126,8 @@ def require_role(*allowed_roles: int):
 
     def _dependency(identity: dict = Depends(get_current_identity)) -> dict:
         if identity.get("role") not in allowed_roles:
+            from app.core.workflow_diagnostics import access_denied
+            access_denied("ROLE_NOT_ALLOWED",identity,"role_guard")
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
         return identity
 
