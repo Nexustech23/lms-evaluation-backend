@@ -86,7 +86,12 @@ def _normalized(text):
 
 def question_blocks(text, count):
     """Only bind to unambiguous consecutive top-level labels, never by guesswork."""
-    matches = list(re.finditer(r"(?im)^\s*(?:Q(?:uestion)?\s*)?(\d+)[.)]\s*", text))
+    # Explicit question labels take precedence over numbered instructions and
+    # numbered lists inside a question. Never fall back when explicit labels
+    # exist but are incomplete/ambiguous: that could silently change the mapping.
+    matches = list(re.finditer(r"(?im)^[ \t]*Q(?:uestion)?[ \t]*(\d+)[.)][ \t]*", text))
+    if not matches:
+        matches = list(re.finditer(r"(?m)^[ \t]*(\d+)[.)][ \t]*", text))
     numbers = [int(m[1]) for m in matches]
     if numbers != list(range(1, count + 1)):
         raise HTTPException(422, "Question labels must be unique and consecutive (Q1, Q2, ...). Correct the extracted paper text or question count before generating suggestions.")

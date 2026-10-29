@@ -22,7 +22,7 @@ The provider uses one bounded structured-output request, with no temperature arg
 
 ## Source and save guards
 
-The first version supports up to 60 uniquely and consecutively numbered top-level questions (`Q1.`, `1.`, `Question 1.`) and 80,000 extracted characters. Ambiguous numbering, question counts or subpart-only labels require manual correction rather than silent mapping. Suggestions use existing extracted text; they do not cause another OCR call.
+The first version supports up to 60 uniquely and consecutively numbered top-level questions (`Q1.`, `1.`, `Question 1.`) and 80,000 extracted characters. Explicit `Q1`/`Question 1` labels take precedence over bare numbered instructions and lists. Plain numbering is used only when no explicit question labels exist; malformed explicit labels still fail rather than silently falling back. Ambiguous numbering, question counts or subpart-only labels require manual correction rather than silent mapping. Suggestions use existing extracted text; they do not cause another OCR call.
 
 Quoted marks and CO tags must belong to their own question block. Maxima need explicit mark notation; minimums need explicit minimum-score evidence and cannot come from pass thresholds. Missing marks or essential context remain unresolved. CO codes outside the exam's covered subject outcomes are shown but cannot be automatically mapped into its rubric.
 

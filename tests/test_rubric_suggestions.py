@@ -110,6 +110,37 @@ def test_plain_numbered_questions_are_supported():
     assert len(service.question_blocks("1. One\n2. Two", 2)) == 2
 
 
+@pytest.mark.parametrize("label", ["Q", "Question "])
+def test_explicit_question_labels_ignore_numbered_instructions(label):
+    text = "INSTRUCTIONS:\n1. Attempt all questions.\n2. Write clearly.\n\n"
+    text += f"{label}1. Define learning. [2 Marks] [CO1]\n"
+    text += f"{label}2. Explain scaling. [3 Marks] [CO2]"
+    blocks = service.question_blocks(text, 2)
+    assert [b["question_no"] for b in blocks] == [1, 2]
+    assert blocks[0]["text"].startswith(f"{label}1.")
+    assert "Attempt all questions" not in blocks[0]["text"]
+    assert "[2 Marks] [CO1]" in blocks[0]["text"]
+    assert "[3 Marks] [CO2]" not in blocks[0]["text"]
+
+
+def test_numbered_content_inside_explicit_question_stays_in_its_block():
+    text = "Q1. Explain these steps.\n1. Clean data.\n2. Scale data.\nQ2. Define a label."
+    blocks = service.question_blocks(text, 2)
+    assert "1. Clean data." in blocks[0]["text"]
+    assert "2. Scale data." in blocks[0]["text"]
+    assert "Clean data" not in blocks[1]["text"]
+
+
+@pytest.mark.parametrize("text", [
+    "1. First\n2. Second\nQ1. Incomplete explicit set.",
+    "1. First\n2. Second\nQ1. Duplicated\nQ1. Again",
+])
+def test_invalid_explicit_labels_cannot_fall_back_to_plain_numbering(text):
+    with pytest.raises(Exception) as error:
+        service.question_blocks(text, 2)
+    assert error.value.status_code == 422
+
+
 def test_suggestion_job_is_registered_for_worker_dispatch():
     from app.worker import _FUNCTIONS
     assert sum(fn.__name__ == "run_rubric_suggestion" for fn in _FUNCTIONS) == 1
