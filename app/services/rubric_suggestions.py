@@ -14,7 +14,7 @@ from app.services.claude import _get_client, _message_usage, _response_text
 from app.services.faculty_ai_usage import tracked_faculty_call
 
 MODEL = "claude-sonnet-5-5"
-PROMPT_VERSION = "rubric-preparation-v1"
+PROMPT_VERSION = "rubric-preparation-v2"
 COLLECTION = "rubricSuggestions"
 
 # Short production version of the reviewed design; no student content is sent.
@@ -32,12 +32,33 @@ For a usable question, suggest distinct, observable academic parameters with
 positive percentages totaling 100 and isCustom=true. Design by task, not a fixed
 weight template: 1-2 marks usually need 1-2 criteria; longer questions only as many
 as genuinely needed. A factual list may use one criterion with item-level credit.
-Preserve explicit subpart budgets. Avoid overlapping accuracy/completeness credit.
-No grammar, presentation, length, formula, example, diagram or optimization credit
-unless assessed. Accept equivalent valid methods/terminology and concise answers.
-In guidelines name each criterion and define full, partial and zero credit; no
-automatic attempt credit. Do not fabricate institutional rounding rules or a
-reference answer. Explain inferred academic expectations in notes for review.
+Assess only what the question asks. Preserve explicit subpart budgets. Do not
+expand a definition, identification or list into an explanation task. Include
+essential academic content, but no optional textbook detail as a requirement.
+Use non-overlapping criteria: one omission must not lose credit under both
+accuracy and completeness/clarity. Do not add generic clarity or completeness
+criteria that re-score the same concept. Distinct required parts may each carry
+their own allocation. No grammar, presentation, length, formula, example, diagram
+or optimization credit unless assessed.
+In guidelines name each criterion and define full, partial and zero credit within
+its allocation. Full: the required concept/task is complete, including equivalent
+meaning, valid methods and concise answers; exact textbook words are unnecessary.
+Partial: identify which valid academic component earns credit and which required
+component is missing or incorrect. For lists, specify item-level credit and count
+repeated items once. Zero: no valid evidence for the criterion, an incorrect
+concept, or irrelevant content. Binary objective criteria need no partial band.
+Do not use 'too brief' or 'imprecise wording' alone as a deduction when meaning is
+sufficient. Missing explicitly required examples or steps lose only their own
+allocation; do not waive substantive errors. No automatic attempt credit, bonus,
+minimum earned score or rounding up. Do not fabricate institutional rounding
+rules or a reference answer. Explain inferred expectations in notes for review.
+Calibration examples (apply only to the matching task, not as extra requirements):
+- 'What does K represent in K-means?': one criterion, 100%; full for 'number of
+  clusters'. Do not require when K is chosen or how the algorithm runs.
+- 'Define data preprocessing': accept preparing/transforming raw data for model
+  fitting; do not separately deduct for an omitted synonymous purpose sentence.
+- 'Describe discretization with an example': separate method and required example
+  credit; a correct method without an example retains its method allocation.
 Objective questions use one Answer-key correctness parameter at 100%; do not
 invent the key. Missing required figures/data or conflicting mark allocations:
 status=needs_clarification, parameters=[], guidelines="", and actionable notes.

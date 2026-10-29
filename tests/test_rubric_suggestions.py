@@ -252,6 +252,27 @@ async def test_generation_is_explicit_and_concurrent_requests_reuse_one_job(isol
     assert len({r.json()["source_id"] for r in responses}) == 1
 
 
+async def test_prompt_upgrade_does_not_reuse_or_automatically_regenerate_old_draft(isolated, monkeypatch):
+    s = isolated
+    current_version = service.PROMPT_VERSION
+    monkeypatch.setattr(service, "PROMPT_VERSION", "rubric-preparation-v1")
+    old_response = (await s.client.post(s.url, json={})).json()
+    old_row = s.db[service.COLLECTION].docs[0]
+    old_row.update(status="completed", result=service.validate_suggestions(json.dumps(answer()), context()))
+    old_snapshot = deepcopy(old_row)
+
+    monkeypatch.setattr(service, "PROMPT_VERSION", current_version)
+    assert (await s.client.get(s.url)).json()["status"] == "not_started"
+    assert len(s.pending) == 1  # Reading after upgrade never queues a paid call.
+    assert old_row == old_snapshot
+
+    new_response = (await s.client.post(s.url, json={})).json()
+    assert new_response["source_id"] != old_response["source_id"]
+    assert len(s.pending) == 2
+    assert s.db[service.COLLECTION].docs[0] == old_snapshot
+    assert s.pending[-1][-1]["prompt_version"] == current_version
+
+
 @pytest.mark.parametrize("actor", ["other", "admin"])
 async def test_other_users_cannot_request_or_read_owner_drafts(isolated, actor):
     for method in (isolated.client.get, isolated.client.post):

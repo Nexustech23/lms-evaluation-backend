@@ -1,6 +1,20 @@
 # Answer-sheet grading model
 
-Answer checking uses `claude-sonnet-5-5` with `max_tokens=30000`, adaptive thinking and explicit `high` effort. Configuration is in `app/services/grading.py`. The existing `grading-evidence-v2` prompt and JSON contract remain in use.
+Answer checking uses `claude-sonnet-5-5` with `max_tokens=30000`, adaptive thinking and explicit `high` effort. Configuration is in `app/services/grading.py`. Phase 3 updates the grading prompt to `grading-evidence-v3`; the JSON contract remains unchanged.
+
+The v3 policy explicitly awards full allocated credit for concise, complete
+equivalent meaning. It requires academic reasons for deductions and component
+credit for valid incomplete understanding, separates optional improvements from
+deductions, and prohibits repeated deductions for one omission. Distinct missing
+requirements retain their own consequences. Explicit faculty-approved credit
+levels remain binding; excessive or overlapping saved criteria require review,
+not silent replacement. There is no automatic bonus, rounding up or matching of
+historical teacher totals. Deterministic MCQ scoring is unchanged.
+
+This prompt update does not regenerate existing rubrics or re-evaluate saved
+marks. Its version identifies future evaluations after deployment. Offline
+contract checks cannot demonstrate an accuracy increase; a representative,
+faculty-reviewed comparison needs separate authorization for provider calls.
 
 The cap covers thinking plus the visible grading JSON. It is a ceiling, not a guaranteed usage amount or accuracy improvement. Review actual completion rates and token usage on representative scripts before adjusting it. Thinking tokens are included in the provider's output-token usage and therefore in the existing usage ledger.
 

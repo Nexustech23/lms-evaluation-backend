@@ -5,6 +5,8 @@
 # credit, and they're where an accuracy regression would matter most.
 # ============================================================
 
+import pytest
+
 from app.services.mcq_grading import (
     _letter_map,
     apply_deterministic_mcq_overrides,
@@ -12,6 +14,15 @@ from app.services.mcq_grading import (
     score_mcq_answer,
 )
 from app.utils.mcq_detect import detect_mcq_questions
+
+
+@pytest.fixture(autouse=True)
+def block_network(monkeypatch):
+    import socket
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Live network calls are forbidden in MCQ tests")
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket.socket, "connect_ex", forbidden)
 
 
 # ---------- detect_mcq_questions ----------
@@ -88,8 +99,15 @@ def test_score_mcq_answer_wrong_match_is_always_zero_never_partial():
     assert result["ai_awarded_marks"] == 0.0
 
 
-def test_score_mcq_answer_unclear_ocr_is_unanswered_not_wrong():
+def test_score_mcq_answer_unclear_ocr_requires_review_not_confirmed_blank():
     result = score_mcq_answer(6, None, {"answer": "C", "confident": True}, max_marks=1)
+    assert result["final_marks"] == 0
+    assert result["flags"]["unanswered"] is False
+    assert result["flags"]["needs_review"] is True
+
+
+def test_score_mcq_answer_explicit_blank_is_unanswered_without_review():
+    result = score_mcq_answer(6, "BLANK", {"answer": "C", "confident": True}, max_marks=1)
     assert result["final_marks"] == 0
     assert result["flags"]["unanswered"] is True
     assert result["flags"]["needs_review"] is False
@@ -186,8 +204,18 @@ def test_letter_map_matches_detect_mcq_questions_option_order():
     assert _letter_map(detected[1]) == {"A": "Zebra", "B": "Apple", "C": "Mango"}
 
 
+def _single_page_pdf():
+    import io
+    import PyPDF2
+    writer = PyPDF2.PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
 def test_extract_answer_text_with_gemini_prompt_includes_option_wording(monkeypatch):
-    # No real API call — generate_content_from_file is monkeypatched to capture the
+    # No real API call — the checked OCR provider is monkeypatched to capture the
     # prompt instead of sending it anywhere. Confirms a student who writes the
     # answer's WORDING (not a bare letter) can actually be matched: the option text
     # itself must appear in the prompt sent to the OCR model, not just the question
@@ -198,12 +226,12 @@ def test_extract_answer_text_with_gemini_prompt_includes_option_wording(monkeypa
 
     def fake_generate_content_from_file(pdf_bytes, mime_type, prompt, model=None):
         captured["prompt"] = prompt
-        return "OCR text", {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}
+        return "OCR text\nPAGE_COMPLETE", {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}, False
 
-    monkeypatch.setattr(grading_module, "generate_content_from_file", fake_generate_content_from_file)
+    monkeypatch.setattr(grading_module, "generate_content_from_file_checked", fake_generate_content_from_file)
 
     grading_module.extract_answer_text_with_gemini(
-        b"fake-pdf-bytes",
+        _single_page_pdf(),
         mcq_questions_with_options={1: {"A": "Little or no autocorrelation", "B": "High multicollinearity"}},
     )
 
@@ -220,10 +248,21 @@ def test_extract_answer_text_with_gemini_omits_mcq_block_when_no_options(monkeyp
 
     def fake_generate_content_from_file(pdf_bytes, mime_type, prompt, model=None):
         captured["prompt"] = prompt
-        return "OCR text", {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}
+        return "OCR text\nPAGE_COMPLETE", {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}, False
 
-    monkeypatch.setattr(grading_module, "generate_content_from_file", fake_generate_content_from_file)
+    monkeypatch.setattr(grading_module, "generate_content_from_file_checked", fake_generate_content_from_file)
 
-    grading_module.extract_answer_text_with_gemini(b"fake-pdf-bytes", mcq_questions_with_options=None)
+    grading_module.extract_answer_text_with_gemini(_single_page_pdf(), mcq_questions_with_options=None)
 
     assert "MCQ_ANSWER" not in captured["prompt"]
+
+
+@pytest.mark.parametrize("page_text,truncated", [("OCR text", False), ("OCR text\nPAGE_COMPLETE", True)])
+def test_extract_answer_text_rejects_incomplete_page(monkeypatch, page_text, truncated):
+    import app.services.grading as grading_module
+    def fake_checked(*args, **kwargs):
+        return page_text, {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}, truncated
+    monkeypatch.setattr(grading_module, "generate_content_from_file_checked", fake_checked)
+    with pytest.raises(RuntimeError, match="incomplete") as error:
+        grading_module.extract_answer_text_with_gemini(_single_page_pdf())
+    assert error.value.usage["total_tokens"] == 2
