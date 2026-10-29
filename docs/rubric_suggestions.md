@@ -6,6 +6,21 @@ Both rubric editors offer **Generate suggestions (uses credits)**. Nothing is ge
 
 The production prompt is the concise `SYSTEM_PROMPT` in `app/services/rubric_suggestions.py`. It extracts explicit maxima and CO tags, defaults unspecified minimum scores to zero, and suggests editable parameters plus credit guidelines. It does not infer missing CO tags or invent multiple-CO allocations. Multiple tags require faculty allocation; one eligible tag receives the question maximum. Existing same-set allocations are preserved when their maximum is unchanged.
 
+Phase 2 uses `rubric-preparation-v2`: criteria assess only the requested task,
+accept concise equivalent meaning, define full/partial/zero credit, and avoid
+overlapping content/clarity deductions. Examples cover K-means K, preprocessing
+and discretization with a required example. Incorrect concepts and objective
+answers receive no automatic bonus or attempt credit. These are generation
+instructions, not evidence of measured model accuracy.
+
+The prompt version participates in the cache fingerprint. After deployment, old
+v1 drafts are not reused as v2 drafts; an unsaved form referencing a v1 suggestion
+may fail the existing freshness check and require review against current context.
+Saved evaluation parameters and historical marks are not rewritten. Generating a
+new v2 draft still requires the explicit paid generation action. This parameter
+update does not change model choices, token limits or deterministic MCQ scoring.
+The separate grading policy update is documented in `answer_grading_model.md`.
+
 ## API and execution
 
 - `GET /evaluation-details/{exam_id}/suggestions`: read current-paper draft/status. No spend.
