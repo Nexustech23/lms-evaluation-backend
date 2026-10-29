@@ -20,12 +20,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.services.claude import generate_text
 from app.services.gemini import generate_content_from_file_checked
 
-CLAUDE_GRADING_MODEL = "claude-sonnet-4-5"
+CLAUDE_GRADING_MODEL = "claude-sonnet-5-5"
+CLAUDE_GRADING_MAX_TOKENS = 30000
+CLAUDE_GRADING_EFFORT = "high"
+CLAUDE_TRANSCRIPT_MODEL = "claude-sonnet-4-5"
 GEMINI_OCR_MODEL = "gemini-3.1-flash-lite"
 
 
-def _empty_claude_tokens(call_name: str) -> Dict[str, Any]:
-    return {"call": call_name, "model": CLAUDE_GRADING_MODEL, "input_tokens": 0,
+def _empty_claude_tokens(call_name: str, *, model: str = CLAUDE_GRADING_MODEL) -> Dict[str, Any]:
+    return {"call": call_name, "model": model, "input_tokens": 0,
             "output_tokens": 0, "total_tokens": 0, "usage_status": "unknown", "call_status": "failed"}
 
 
@@ -403,14 +406,13 @@ def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: Li
         answer_text=json.dumps(answer_text), rubric=json.dumps(rubric))
 
     try:
-        # 20000 (back down from a brief 60000, 2026-09-28): the 60000 raise was a
-        # workaround for claude-sonnet-5's adaptive thinking (on by default at
-        # "high" effort) sharing this budget with the visible JSON answer and
-        # truncating long papers mid-JSON. Now that CLAUDE_GRADING_MODEL is back
-        # to claude-sonnet-4-5 — no adaptive thinking by default, same family as
-        # 4.6, which ran fine at 20000 for every prior real evaluation — that
-        # extra headroom is no longer needed.
-        text, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=20000, system=GRADING_POLICY)
+        # Sonnet 5.5 shares this output budget between adaptive thinking and JSON.
+        # Explicit effort avoids relying on provider defaults; the wrapper streams
+        # the response and rejects truncation before returning a grading result.
+        text, usage = generate_text(
+            prompt, model=CLAUDE_GRADING_MODEL, max_tokens=CLAUDE_GRADING_MAX_TOKENS,
+            system=GRADING_POLICY, effort=CLAUDE_GRADING_EFFORT,
+        )
         return text, {
             **usage,
             "call": "grade_with_claude", "model": CLAUDE_GRADING_MODEL,
@@ -450,12 +452,12 @@ def generate_transcript_html_with_claude(answer_text: str, student_name: str = "
     """Blocking — run via asyncio.to_thread(). Falls back to a non-LLM formatter on failure."""
     prompt = _TRANSCRIPT_PROMPT_TEMPLATE.format(student_name=student_name, answer_text=answer_text)
     try:
-        html, usage = generate_text(prompt, model=CLAUDE_GRADING_MODEL, max_tokens=18000)
+        html, usage = generate_text(prompt, model=CLAUDE_TRANSCRIPT_MODEL, max_tokens=18000)
         html = _strip_fences(html)
         diagnostic_event("transcript.generation_path",source="claude",reason_code="CLAUDE_TRANSCRIPT_COMPLETED")
         return html, {
             **usage,
-            "call": "generate_transcript_html_with_claude", "model": CLAUDE_GRADING_MODEL,
+            "call": "generate_transcript_html_with_claude", "model": CLAUDE_TRANSCRIPT_MODEL,
             "input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"],
             "total_tokens": usage["total_tokens"],
         }
@@ -464,8 +466,8 @@ def generate_transcript_html_with_claude(answer_text: str, student_name: str = "
         logging.warning("Transcript generation via Claude failed, using basic fallback: %s", e)
         usage = getattr(e, "usage", None)
         return generate_basic_transcript_html(answer_text, student_name), (
-            {**usage, "model": CLAUDE_GRADING_MODEL, "call_status": "failed"}
-            if usage else _empty_claude_tokens("generate_transcript_html_with_claude")
+            {**usage, "model": CLAUDE_TRANSCRIPT_MODEL, "call_status": "failed"}
+            if usage else _empty_claude_tokens("generate_transcript_html_with_claude", model=CLAUDE_TRANSCRIPT_MODEL)
         )
 
 

@@ -95,21 +95,34 @@ def generate_html(
 
 @trace_function('ai.claude_text')
 def generate_text(
-    prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 8000, *, system: str = None
+    prompt: str, model: str = "claude-sonnet-4-6", max_tokens: int = 8000, *,
+    system: str = None, effort: str | None = None
 ) -> Tuple[str, Dict[str, int]]:
     """
     Blocking call — run via asyncio.to_thread() from async callers.
     Like generate_html() but returns the raw response text unmodified (no markdown-fence
     stripping) — used where the output is plain text, not an HTML document.
+    An explicit effort opts into streamed adaptive thinking on supported models.
+    extra_body keeps these newer API fields compatible with the pinned SDK.
     """
     token_usage = None
     try:
-        message = _get_client().messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+        request = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
             **({"system": system} if system else {}),
-        )
+        }
+        if effort is not None:
+            request["extra_body"] = {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+            }
+            # Avoid a long non-streaming request for thinking + large JSON output.
+            with _get_client().messages.stream(**request) as stream:
+                message = stream.get_final_message()
+        else:
+            message = _get_client().messages.create(**request)
 
         token_usage = _message_usage(message)
         if getattr(message, "stop_reason", None) in {"max_tokens", "refusal"}:
