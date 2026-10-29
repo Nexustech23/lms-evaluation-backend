@@ -5,9 +5,11 @@ from pymongo.errors import PyMongoError
 from bson import ObjectId
 
 
-async def commit_rubric(db, exam, details, total_marks):
+async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=None):
+    from app.services.paper_version import paper_snapshot_filter
     query = {"_id": exam["_id"], "faculty_id": exam["faculty_id"],
-        "covered_cos": exam.get("covered_cos"), "paper_locked": {"$ne": True}}
+        "covered_cos": exam.get("covered_cos"), "paper_locked": {"$ne": True},
+        **paper_snapshot_filter(exam["_id"], exam.get("question_paper") or {})}
     async def save(session):
         legacy = await db["answerDetails"].find_one({"exam_id": exam["_id"], "$or": [
             {"reviewed_by_professor": True}, {"evaluated_at": {"$ne": None}},
@@ -23,7 +25,8 @@ async def commit_rubric(db, exam, details, total_marks):
         now = datetime.now(timezone.utc)
         await db["evaluationDetails"].update_one(
             {"exam_id": exam["_id"], "faculty_id": ObjectId(str(exam["faculty_id"]))},
-            {"$set": {"questionEvaluationDetails": details, "totalMarks": total_marks, "updated_at": now},
+            {"$set": {"questionEvaluationDetails": details, "totalMarks": total_marks, "updated_at": now,
+                       "suggestion_source_id": suggestion_source_id},
              "$setOnInsert": {"created_at": now}}, upsert=True, session=session)
     try:
         async with await db.client.start_session() as session:

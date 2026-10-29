@@ -11,6 +11,7 @@ class SaveEvaluationDetailsRequest(BaseModel):
     # shape (a non-empty list + a numeric totalMarks) before that runs.
     questionEvaluationDetails: List[Dict[str, Any]] = Field(min_length=1)
     totalMarks: float = Field(gt=0, allow_inf_nan=False)
+    suggestion_source_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @field_validator("totalMarks", mode="before")
     @classmethod

@@ -67,6 +67,7 @@ class Feature:
 
     # Faculty — exam question-paper text extraction (app/services/gemini.py)
     EXAM_QUESTION_PAPER_EXTRACTION = "exam_question_paper_extraction"
+    RUBRIC_SUGGESTION = "rubric_suggestion"
 
     # Faculty — one-time MCQ answer-key determination (app/services/mcq_grading.py),
     # runs once per exam at question-paper-upload time, not once per student.
@@ -78,6 +79,7 @@ class Feature:
 # /self-learners/activity-logs). Kept next to Feature so the two stay in
 # sync — every Feature constant should have an entry here.
 FEATURE_LABELS: Dict[str, str] = {
+    Feature.RUBRIC_SUGGESTION: "Suggested evaluation parameters",
     Feature.ROADMAP_CURRICULUM: "Generated roadmap",
     Feature.ROADMAP_PRE_ASSESSMENT: "Took pre-assessment quiz",
     Feature.ROADMAP_NOTES: "Generated topic notes",
@@ -119,6 +121,7 @@ def feature_label(feature: str) -> str:
 # split the shared aiUsageEvents ledger without duplicating a feature list
 # in the frontend.
 FACULTY_FEATURES = frozenset({
+    Feature.RUBRIC_SUGGESTION,
     Feature.QP_QUESTION_BANK_EXTRACTION,
     Feature.QP_COURSE_PLANNER_EXTRACTION,
     Feature.QP_GENERATION,
