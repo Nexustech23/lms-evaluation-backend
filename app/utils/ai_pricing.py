@@ -36,11 +36,11 @@ class ModelPrice:
 # https://www.anthropic.com/pricing and https://ai.google.dev/pricing
 # before trusting this for anything beyond an internal cost estimate.
 _PRICES: dict[str, ModelPrice] = {
+    # Answer-sheet grading and rubric preparation use Sonnet 5.5.
+    # https://platform.claude.com/docs/en/models/sonnet-5-5/overview
+    "claude-sonnet-5-5": ModelPrice(2.00, 10.00, date(2026, 10, 27)),
     # Claude — Sonnet family
-    # Answer-script grading (CLAUDE_GRADING_MODEL in grading.py) — Sonnet 5 is the
-    # current GA default: cheaper than 4.6 ($2/$10 vs $3/$15) and, per Anthropic's own
-    # pre-deployment testing, lower hallucination/sycophancy rates (claude.com/pricing,
-    # anthropic.com/news/claude-sonnet-5, checked 2026-09-26).
+    # Keep older model rates for other features and historical usage estimates.
     "claude-sonnet-5": ModelPrice(2.00, 10.00, date(2026, 9, 26)),
     "claude-sonnet-4-6": ModelPrice(3.00, 15.00, date(2026, 1, 1)),
     "claude-sonnet-4-5": ModelPrice(3.00, 15.00, date(2026, 1, 1)),
