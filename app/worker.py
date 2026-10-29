@@ -53,6 +53,11 @@ async def run_notes_job(ctx, job_id, params, file_bytes, filename, user_id):
     await _run_notes_job(job_id, params, file_bytes, filename, user_id)
 
 
+async def run_rubric_suggestion(ctx, job_id, attempt_id, context):
+    from app.services.rubric_suggestions import run_suggestion_job
+    await run_suggestion_job(job_id, attempt_id, context)
+
+
 async def run_ingest_job(ctx, job_id, file_bytes, filename, course_title, course_code, user_id, job_prefix):
     from app.api.routers.course_material import _run_ingest_job
 
@@ -113,6 +118,7 @@ async def run_refresh_transcript(ctx, exam_id):
 
 
 _FUNCTIONS = [
+    run_rubric_suggestion,
     run_homework_job,
     run_notes_job,
     run_ingest_job,
