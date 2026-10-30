@@ -206,7 +206,8 @@ def test_provider_call_is_scoped_bounded_and_has_no_temperature(monkeypatch):
     raw, usage = service.generate_suggestions(context())
     sent = provider.messages.create.call_args.kwargs
     assert sent["model"] == "claude-sonnet-5-5"
-    assert "temperature" not in sent and sent["max_tokens"] <= 24000
+    assert "temperature" not in sent and sent["max_tokens"] == 30000
+    assert sent["extra_body"]["output_config"]["effort"] == "medium"
     assert sent["extra_body"]["output_config"]["format"]["type"] == "json_schema"
     assert usage["total_tokens"] == 30 and json.loads(raw) == answer()
 

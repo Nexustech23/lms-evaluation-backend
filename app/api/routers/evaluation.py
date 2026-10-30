@@ -95,7 +95,8 @@ async def suggest_rubric(folder_id: str, payload: SuggestionRequest, background_
         raise HTTPException(422, "Regeneration requires an explicit failed-attempt retry.")
     if existing and (existing["status"] != "failed" or not payload.retry_failed):
         return {**public_job(existing), "source_id": job_id, "reused": True}
-    reuse_response = bool(existing and existing.get("raw_response") is not None and not payload.regenerate)
+    from app.services.rubric_suggestions import has_saved_complete_response
+    reuse_response = has_saved_complete_response(existing, context) and not payload.regenerate
     if not reuse_response:
         if not settings.ANTHROPIC_API_KEY:
             raise HTTPException(503, "AI parameter suggestions are not configured.")
@@ -113,6 +114,8 @@ async def suggest_rubric(folder_id: str, payload: SuggestionRequest, background_
         clear = {"error": "", "result": "", "failure_type": ""}
         if not reuse_response:
             clear.update(raw_response="", response_saved_at="")
+        if payload.regenerate:
+            clear.update(batch_responses="", incomplete_responses="", completed_questions="", completed_batches="", total_batches="")
         result = await db[COLLECTION].update_one({**query, "status": "failed", "attempt_id": existing["attempt_id"]},
             {"$set": pending, "$unset": clear})
         claimed = result.modified_count == 1
