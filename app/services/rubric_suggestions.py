@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Literal
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
 from app.models.ai_usage_event import Feature, Provider
 from app.services.claude import _get_client, _message_usage, _response_text
@@ -16,6 +16,7 @@ from app.services.faculty_ai_usage import tracked_faculty_call
 MODEL = "claude-sonnet-5-5"
 PROMPT_VERSION = "rubric-preparation-v3-question-mapping"
 COLLECTION = "rubricSuggestions"
+VALIDATION_VERSION = "rubric-validation-v2"
 
 # Short production version of the reviewed design; no student content is sent.
 SYSTEM_PROMPT = """You draft editable academic rubrics for faculty review, not student grades.
@@ -178,59 +179,89 @@ def generate_suggestions(context):
         raise error from exc
 
 
-def validate_suggestions(raw, context):
-    parsed = SuggestionResponse.model_validate_json(raw)
-    if [q.question_no for q in parsed.questions] != [q["question_no"] for q in context["questions"]]:
-        raise ValueError("Suggestion questions do not match the current paper")
+def _validated_row(q, block, context):
+    from app.services.rubric_marks import quoted_maximum_matches
     known = {c["co_code"]: c for c in context["available_cos"]}
+    text = _normalized(block["text"])
+    def evidence(quote):
+        return bool(quote.strip()) and _normalized(quote) in text
+    if q.max_marks is not None:
+        if q.max_marks <= 0 or not evidence(q.max_quote):
+            raise ValueError("Maximum marks need explicit question-level evidence")
+        if not quoted_maximum_matches(q.max_marks, q.max_quote, block, context):
+            raise ValueError(f"Confirm maximum marks: AI proposed {q.max_marks:g}, quoting {q.max_quote!r}. The printed maximum could not be verified.")
+    elif q.max_quote:
+        raise ValueError("Missing maximum cannot have a source quote")
+    if q.min_source == "default":
+        if q.min_marks != 0 or q.min_quote:
+            raise ValueError("An unspecified minimum must default to zero")
+    elif not evidence(q.min_quote) or not re.search(r"(?i)\bmin(?:imum)?\b", q.min_quote) or re.search(r"(?i)\bpass(?:ing)?\b", q.min_quote):
+        raise ValueError("Minimum marks need explicit minimum-score evidence")
+    elif not any(Decimal(n) == Decimal(str(q.min_marks)) for n in re.findall(r"\d+(?:\.\d+)?", q.min_quote)):
+        raise ValueError("Minimum marks do not match their source")
+    if q.max_marks is not None and q.min_marks > q.max_marks:
+        raise ValueError("Minimum marks exceed maximum")
+    if q.status == "draft_ready":
+        names = [p.name.strip().casefold() for p in q.parameters]
+        if q.max_marks is None or not names or not all(names) or len(names) != len(set(names)) or not q.guidelines.strip():
+            raise ValueError("Incomplete rubric suggestion")
+        if abs(sum(Decimal(str(p.percentage)) for p in q.parameters) - 100) > Decimal("0.0000001"):
+            raise ValueError("Parameter percentages must total 100")
+    elif q.parameters or q.guidelines or not q.notes:
+        raise ValueError("Questions needing clarification must not contain a usable draft")
+    tags = []
+    for tag in q.co_tags:
+        if not evidence(tag.quote) or not re.search(rf"\b{re.escape(tag.code)}\b", tag.quote, re.I):
+            raise ValueError("CO tags need explicit question-level evidence")
+        if tag.code in [c["co_code"] for c in tags]:
+            raise ValueError("Duplicate CO tag")
+        tags.append({"co_code": tag.code, "quote": tag.quote, "eligible": tag.code in known,
+                     "description": known.get(tag.code, {}).get("description", "")})
+    row = q.model_dump()
+    row["co_tags"] = tags
+    if any(not t["eligible"] for t in tags):
+        row["notes"].append("Some printed CO tags are not available in this exam. Correct covered COs before adding those mappings.")
+    return row
+
+
+def validate_suggestions(raw, context):
+    def invalid_constant(value):
+        raise ValueError("AI response contains a non-finite number")
+    data = json.loads(raw, parse_constant=invalid_constant)
+    if not isinstance(data, dict) or set(data) != {"questions"} or not isinstance(data["questions"], list):
+        raise ValueError("AI response must contain a questions list")
+    supplied = data["questions"]
+    if (any(not isinstance(q, dict) or type(q.get("question_no")) is not int for q in supplied)
+            or [q["question_no"] for q in supplied] != [q["question_no"] for q in context["questions"]]):
+        raise ValueError("Suggestion questions do not match the current paper")
     rows = []
-    for q, block in zip(parsed.questions, context["questions"]):
-        text = _normalized(block["text"])
-        def evidence(quote):
-            return bool(quote.strip()) and _normalized(quote) in text
-        if q.max_marks is not None:
-            if q.max_marks <= 0 or not evidence(q.max_quote):
-                raise ValueError("Maximum marks need explicit question-level evidence")
-            printed = re.findall(r"(?i)(\d+(?:\.\d+)?)\s*marks?\b|\bmarks?\s*[:=]\s*(\d+(?:\.\d+)?)", q.max_quote)
-            if not any(Decimal(a or b) == Decimal(str(q.max_marks)) for a, b in printed):
-                raise ValueError("Maximum marks do not match the quoted notation")
-        elif q.max_quote:
-            raise ValueError("Missing maximum cannot have a source quote")
-        if q.min_source == "default":
-            if q.min_marks != 0 or q.min_quote:
-                raise ValueError("An unspecified minimum must default to zero")
-        elif not evidence(q.min_quote) or not re.search(r"(?i)\bmin(?:imum)?\b", q.min_quote) or re.search(r"(?i)\bpass(?:ing)?\b", q.min_quote):
-            raise ValueError("Minimum marks need explicit minimum-score evidence")
-        elif not any(Decimal(n) == Decimal(str(q.min_marks)) for n in re.findall(r"\d+(?:\.\d+)?", q.min_quote)):
-            raise ValueError("Minimum marks do not match their source")
-        if q.max_marks is not None and q.min_marks > q.max_marks:
-            raise ValueError("Minimum marks exceed maximum")
-        if q.status == "draft_ready":
-            names = [p.name.strip().casefold() for p in q.parameters]
-            if q.max_marks is None or not names or not all(names) or len(names) != len(set(names)) or not q.guidelines.strip():
-                raise ValueError("Incomplete rubric suggestion")
-            if abs(sum(Decimal(str(p.percentage)) for p in q.parameters) - 100) > Decimal("0.0000001"):
-                raise ValueError("Parameter percentages must total 100")
-        elif q.parameters or q.guidelines or not q.notes:
-            raise ValueError("Questions needing clarification must not contain a usable draft")
-        tags = []
-        for tag in q.co_tags:
-            if not evidence(tag.quote) or not re.search(rf"\b{re.escape(tag.code)}\b", tag.quote, re.I):
-                raise ValueError("CO tags need explicit question-level evidence")
-            if tag.code in [c["co_code"] for c in tags]:
-                raise ValueError("Duplicate CO tag")
-            tags.append({"co_code": tag.code, "quote": tag.quote, "eligible": tag.code in known,
-                         "description": known.get(tag.code, {}).get("description", "")})
-        row = q.model_dump()
+    for candidate, block in zip(supplied, context["questions"]):
+        q = None
+        try:
+            q = SuggestedQuestion.model_validate(candidate)
+            row = _validated_row(q, block, context)
+        except (ValueError, ValidationError) as exc:
+            if isinstance(exc, ValidationError):
+                issue = "Invalid AI fields: " + ", ".join(".".join(map(str, e["loc"])) for e in exc.errors(include_input=False))
+            else:
+                issue = str(exc)
+            label = block.get("question_label", str(block["question_no"]))
+            row = {"question_no": block["question_no"], "status": "needs_clarification",
+                   "max_marks": None, "max_quote": "", "min_marks": 0, "min_source": "default", "min_quote": "",
+                   "parameters": [], "guidelines": "", "co_tags": [],
+                   "notes": [f"Question {label}: {issue}"]}
+            if q is not None:
+                row["review_draft"] = q.model_dump()
+            from app.core.diagnostics import event
+            event("rubric.question_needs_review", question_no=block["question_no"], question_label=label, reason=issue)
         for field in ("question_id", "question_label", "section"):
             if field in block:
                 row[field] = block[field]
         row["question_text"] = block["text"]
-        row["co_tags"] = tags
-        if any(not t["eligible"] for t in tags):
-            row["notes"].append("Some printed CO tags are not available in this exam. Correct covered COs before adding those mappings.")
         rows.append(row)
-    return {"questions": rows, "model": MODEL, "prompt_version": PROMPT_VERSION}
+    return {"questions": rows, "model": MODEL, "prompt_version": PROMPT_VERSION,
+            "validation_version": VALIDATION_VERSION,
+            "review_count": sum(row["status"] == "needs_clarification" for row in rows)}
 
 
 async def run_suggestion_job(job_id, attempt_id, context):
@@ -250,9 +281,16 @@ async def run_suggestion_job(job_id, attempt_id, context):
         current_id, _ = await build_context(db, exam, identity)
         if current_id != job_id:
             raise ValueError("Paper or course outcomes changed before generation")
-        raw, _ = await tracked_faculty_call(db, generate_suggestions, context,
-            faculty_id=context["faculty_id"], user_id=context["owner_user_id"], provider=Provider.CLAUDE,
-            model=MODEL, feature=Feature.RUBRIC_SUGGESTION, job_id=job_id, prompt_version=PROMPT_VERSION)
+        saved = await db[COLLECTION].find_one(query)
+        raw = (saved or {}).get("raw_response")
+        if raw is None:
+            raw, _ = await tracked_faculty_call(db, generate_suggestions, context,
+                faculty_id=context["faculty_id"], user_id=context["owner_user_id"], provider=Provider.CLAUDE,
+                model=MODEL, feature=Feature.RUBRIC_SUGGESTION, job_id=job_id, prompt_version=PROMPT_VERSION)
+            persisted = await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
+                "raw_response": raw, "response_saved_at": datetime.now(timezone.utc)}})
+            if persisted.matched_count != 1:
+                raise ValueError("The generation attempt changed before its response could be saved")
         result = validate_suggestions(raw, context)
         exam = await require_exam_access(identity, db, context["exam_id"])
         await require_replaceable_paper(db, exam)
@@ -261,11 +299,12 @@ async def run_suggestion_job(job_id, attempt_id, context):
             raise ValueError("Paper or course outcomes changed during generation")
         await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
             "status": "completed", "result": result, "completed_at": datetime.now(timezone.utc)}})
-    except Exception:
+    except Exception as exc:
         import logging
         logging.exception("Rubric suggestion failed: %s", job_id)
         await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
-            "status": "failed", "error": "Suggestions could not be completed or verified. Existing parameters were preserved. Review the paper and retry explicitly."}})
+            "status": "failed", "failure_type": type(exc).__name__,
+            "error": "Suggestions could not be completed or matched to this paper. Existing parameters were preserved. Saved AI responses are reused when available; otherwise an explicit retry uses credits."}})
 
 
 def public_job(row):
