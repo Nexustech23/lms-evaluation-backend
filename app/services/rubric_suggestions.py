@@ -14,9 +14,9 @@ from app.services.claude import _get_client, _message_usage, _response_text
 from app.services.faculty_ai_usage import tracked_faculty_call
 
 MODEL = "claude-sonnet-5-5"
-PROMPT_VERSION = "rubric-preparation-v4-batched-medium"
+PROMPT_VERSION = "rubric-preparation-v5-paper-scheme"
 COLLECTION = "rubricSuggestions"
-VALIDATION_VERSION = "rubric-validation-v2"
+VALIDATION_VERSION = "rubric-validation-v3"
 BATCH_SIZE = 6
 MAX_OUTPUT_TOKENS = 30000
 
@@ -27,8 +27,12 @@ Return exactly one row per supplied question_no, in order; do not invent questio
 question_no is an INTERNAL rubric index, not the printed question number. Use
 question_label, section and the supplied text to identify the printed question.
 Never renumber, merge optional alternatives or transfer marks between blocks.
-Extract max_marks only when explicitly stated in that question's text. Quote its
-exact mark notation in max_quote. Otherwise return null with needs_clarification.
+If a question has resolved_max_marks, the paper's own marking scheme fixes its total:
+use it as max_marks and set max_quote="". Marks printed as a sum (2+1), after only
+part I, or on one option of an OR pair all belong to the whole question; an OR pair
+is one question worth resolved_max_marks. Do not flag the allocation as conflicting.
+Otherwise extract max_marks only when explicitly stated in that question's text. Quote
+its exact mark notation in max_quote. Otherwise return null with needs_clarification.
 Extract min_marks only from an explicit minimum SCORE, quoting it in min_quote;
 otherwise set min_marks=0, min_source=default, min_quote="". Do not mistake a pass
 threshold or an attempt requirement for minimum credit.
@@ -166,6 +170,8 @@ async def build_context(db, exam, identity):
     covered = set(covered_co_list(exam.get("covered_cos")))
     cos = [{"co_code": c["co_code"], "description": c.get("description", "")}
            for c in (subject.get("co") or []) if c.get("co_code") in covered]
+    from app.services.paper_marks import apply_scheme
+    apply_scheme(blocks, text)
     context = {"owner_user_id": str(identity["user_id"]), "exam_id": str(exam["_id"]),
                "faculty_id": str(exam["faculty_id"]), "paper_version": paper.get("version"),
                "paper_url": paper.get("url"), "paper_file_id": paper.get("fileId"),
@@ -223,7 +229,20 @@ def _validated_row(q, block, context):
     text = _normalized(block["text"])
     def evidence(quote):
         return bool(quote.strip()) and _normalized(quote) in text
-    if q.max_marks is not None:
+    resolved = block.get("resolved_max_marks")
+    if resolved is not None and q.max_marks is not None:
+        # The paper's own marking scheme is complete and adds up to its printed total, so it
+        # settles awkward layouts ("2+1", one digit after part I, an OR pair) that a printed
+        # quote cannot. The AI must agree with it; any disagreement goes to the faculty.
+        if Decimal(str(q.max_marks)) != Decimal(str(resolved)):
+            raise ValueError(f"Confirm maximum marks: AI proposed {q.max_marks:g} but the paper's marking scheme gives {resolved:g}.")
+        q.max_quote = ""
+    elif resolved is not None:
+        q.max_marks = float(resolved)
+        q.max_quote = ""
+        if q.min_marks > q.max_marks:
+            raise ValueError("Minimum marks exceed maximum")
+    elif q.max_marks is not None:
         if q.max_marks <= 0 or not evidence(q.max_quote):
             raise ValueError("Maximum marks need explicit question-level evidence")
         if not quoted_maximum_matches(q.max_marks, q.max_quote, block, context):
@@ -256,6 +275,8 @@ def _validated_row(q, block, context):
         tags.append({"co_code": tag.code, "quote": tag.quote, "eligible": tag.code in known,
                      "description": known.get(tag.code, {}).get("description", "")})
     row = q.model_dump()
+    if resolved is not None:
+        row["max_source"] = block.get("resolved_max_source", "paper_scheme")
     row["co_tags"] = tags
     if any(not t["eligible"] for t in tags):
         row["notes"].append("Some printed CO tags are not available in this exam. Correct covered COs before adding those mappings.")
@@ -290,6 +311,13 @@ def validate_suggestions(raw, context):
                    "notes": [f"Question {label}: {issue}"]}
             if q is not None:
                 row["review_draft"] = q.model_dump()
+            resolved = block.get("resolved_max_marks")
+            if resolved is not None:
+                # The scheme fixes the marks even when another field of the row needs review.
+                row["max_marks"] = float(resolved)
+                row["max_source"] = block.get("resolved_max_source", "paper_scheme")
+                if "review_draft" in row and row["review_draft"].get("max_marks") is None:
+                    row["review_draft"]["max_marks"] = float(resolved)
             from app.core.diagnostics import event
             event("rubric.question_needs_review", question_no=block["question_no"], question_label=label, reason=issue)
         for field in ("question_id", "question_label", "section"):

@@ -1,0 +1,257 @@
+Subject: PHYSICS (042)
+Sample Question Paper
+Class - XII
+Academic Session 2026-27
+
+Maximum Marks: 70 Time Allowed: 3 hours
+
+General Instructions
+(1) There are 33 questions in all. All questions are compulsory.
+(2) This question paper has five sections: Section A, Section B, Section C, Section D and Section E.
+(3) All the sections are compulsory.
+(4) Section A contains sixteen questions, twelve MCQ and four Assertion-Reasoning based of 1mark each, Section B contains five questions of two marks each, Section C contains seven questions of three marks each, Section D contains two case study-based questions of four marks each and Section E contains three long answer questions of five marks each.
+(5) There is no overall choice. However, an internal choice has been provided in two questions in Section B, one question in Section C, and all three questions in Section E. You have to attempt only one of the choices in such questions.
+(6) Use of calculators is not allowed.
+(7) You may use the following values of physical constants where ever necessary.
+i. c = 3 x 10^8 m/s
+ii. me = 9.1x10^-31 kg
+iii. mp = 1.7 x 10^-27 kg
+iv. e = 1.6 x 10^-19 C
+v. µo = 4π x 10^-7 T m A^-1
+vi. h = 6.63 x10^-34 J s
+vii. εo = 8.854x10^-12C^2N^-1m^-2
+viii. Avogadro's number = 6.023 x 10^23 per gram mole
+ix. radius of nucleus ≈10^-15 m
+
+SECTION A
+Question (16 x 1 = 16) Marks
+1. A point charge +Q is placed at the centre of a spherical Gaussian surface of radius R. If the radius of the sphere is doubled, the electric flux through the surface will 1
+A. become half
+B. become double
+C. remain the same
+D. become four times
+
+2. If two identical heaters each rated as (1000 W, 220 V) are connected in parallel to 220 V, then the total power consumed is- 1
+A. 200 W
+B. 250 W
+C. 2000 W
+D. 2500 W
+
+3. An infinitely long cylinder is kept parallel to a uniform magnetic field B directed along negative y-axis. What will be the direction of induced current as seen from the y axis? 1
+A. clockwise of the negative y-axis
+B. anticlockwise of the negative y-axis
+C. no current will be induced
+D. along the direction of the magnetic field
+
+4. If electric field associated with an electromagnetic wave is given by 1
+E= 30 sin (0.2π x 10^-4 m^-1x −0.6 π x 10^4 Hz t)j then the direction of
+propagation of the wave is along,
+A. i
+B. -i
+C. k
+D. -k
+
+5. Which one of the following phenomenon is not explained by Huygens' construction of wave front? 1
+A. Diffraction
+B. Refraction
+C. Reflection
+D. Origin of spectra
+
+6. If wave front from star in nearby galaxy is detected by a telescope at the top of some mountain in India then the shape of the wavefront detected will be 1
+A. diverging spherical
+B. converging spherical
+C. plane
+D. cylindrical
+
+7. The binding energy per nucleon curve shows a maximum around mass number A=56. What does this imply about nuclei near iron (Fe)? 1
+A. They are the least stable nuclei.
+B. They are the most tightly bound nuclei.
+C. They undergo spontaneous fission releasing maximum energy.
+D. They cannot participate in nuclear reactions.
+
+8. A ball of superconducting material is dipped in liquid nitrogen and placed near a bar magnet. The direction of the movement of the ball and the magnetic moment would be- 1
+Direction of the movement of ball Direction of the magnetic moment
+A. Towards the bar magnet Opposite to that of the bar magnet
+B. Towards the bar magnet Same direction as that of the bar magnet
+C. Away from the bar magnet Same direction as that of the bar magnet
+D. Away from the bar magnet Opposite to that of the bar magnet
+
+9. A bridge circuit is shown in the following figure. The total current flowing in the circuit is- 1
+(Image of Wheatstone bridge with resistors 2Ω, 4Ω, 3Ω, 5Ω and a 6Ω resistor in the galvanometer arm, connected to 18V battery. X and Y are nodes.)
+A. 18 A
+B. 5 A
+C. 5/18 A
+D. 18/5A
+
+For Visually Impaired Students only
+In a Wheat-stone bridge, all the four arms have equal resistance R. If the resistance of the galvanometer arm is 2R, the equivalent resistance of the combination as seen by the battery is-
+A. 2R
+B. R
+C. R/2
+D. R/4
+
+10. Two electric bulbs, B1 and B2, are connected in series to an A.C. supply of 200 V. The power ratings printed on the bulbs are: 1
+(Image showing two bulbs B1 and B2 in series with an AC supply. Voltages V1 and V2 across bulbs respectively.)
+• B1: 200 V, 60 W
+• B2: 200 V, 100 W
+Using their rated voltage-power information, the ratio of their resistances R1/R2 is-
+A. 5:3
+B. 3:5
+C. 3:4
+D. 4:3
+
+11. If nucleus scaled to football size is approximately 22cm, then the radius of the orbit of electron will be approximately: 1
+A. 22 cm
+B. 22 m
+C. 22 km
+D. 22000 km
+
+12. A current of 5A is passing through a long wire which has semicircular loop of radius 10 cm as shown in the figure- 1
+(Image showing a long straight wire bending into a semicircular loop of radius 10 cm, with current 5A flowing.)
+The magnetic field produced at the center of the loop is-
+A. 2 πμ T
+B. 4 πμ T
+C. 5 πμ T
+D. 8 πμ T
+
+For Questions 13 to 16, two statements are given -one labelled Assertion (A) and other labelled Reason (R). Select the correct answer to these questions from the options as given below.
+A. both Assertion and Reason are true and Reason is the correct explanation of Assertion.
+B. both Assertion and Reason are true but Reason is not the correct explanation of Assertion.
+C. Assertion is true but Reason is false.
+D. both Assertion and Reason are false.
+
+13. Assertion (A): In Rutherford's scattering experiment, most of the alpha particles passed through the gold foil undeflected. 1
+Reason (R): The electrons in the atom are very light and do not affect the path of the alpha particles significantly.
+
+14. A convex lens of focal length 20 cm is used to form a real image of a point object placed 30 cm from the lens. The lens is then immersed in water of refractive index 1.33 (the lens material has refractive index 1.5). 1
+Assertion (A): The focal length of the lens increases when it is immersed in water.
+Reason (R): The focal length of a lens depends on the relative refractive index of the lens material with respect to the surrounding medium, as given by the lens maker's formula.
+
+15. In Young's double slit experiment, the distance between the slits is 0.25mm and the screen is placed 1.0m away. A student uses monochromatic light of wavelength 500nm. 1
+Assertion (A): The fringe width observed on the screen will be 2.0mm.
+Reason (R): The fringe width in YDSE is directly proportional to the slit separation and inversely proportional to the wavelength of light.
+
+16. Assertion (A): If a conductor is placed in an external electric field, the electric field inside the conductor becomes infinity in electrostatic equilibrium. 1
+Reason (R): Free electrons inside the conductor rearrange themselves in such a way that the internal electric field is in the same direction as that of the external field.
+
+SECTION B
+
+17. The electric and magnetic fields associated with an electromagnetic radiation in a medium are given as follows: 2
+E= 30 sin (2π x 10^18rads^-1 t + π x 10^10 m^-1 x) Vm^-1
+B= 10^-7 sin (2π x 10^18rad^-1 t + π x 10^10 m^-1 x) T
+I. What is the refractive index of the medium through which the wave is propagating?
+II. Find the frequency of the wave and identify the electromagnetic wave.
+
+18. Write the nature of path of free electrons in a conductor in the 2
+a) presence of electric field,
+b) absence of electric field.
+
+19. Two like charges +q and +q are placed at a distance d. What work must be done by an external agent to bring another charge +q from infinity to the midpoint of the line joining the two given charges? 2
+
+20(A) A certain magnetic substance is found to have a relative permeability of 800. What type of magnetic material is it? Write any two characteristics that such a material exhibits. 2
+OR
+20(B) State Gauss's law of magnetism. Also discuss its significance.
+
+21(A) I. Why hydrogen spectral lines are considered to be a fingerprint of the element? 2
+II. If energy of an electron of the hydrogen atom in ground state is -13.6 eV, what should be the minimum energy of photon which can ionize the atom?
+OR
+21(B) State Bohr's quantization condition for defining stationary orbit. How does de Broglie hypothesis explain the stationary orbit?
+
+SECTION C
+
+22. Compare the energy band diagrams of metals, insulators, and semiconductors. 3
+I. Explain how the band gap determines conductivity.
+II. Apply this reasoning to justify why diamond (C) is an insulator while tin (Sn) is a conductor, though both are the elements of group IV.
+
+23. Explain- 3
+I. It is easier to start a car engine on a warm day than on a chilly day.
+II. The resistance of our body is so large, even then one experiences a strong shock (sometimes even fatal)) when one accidentally touches the live wire of, say 240 V supply.
+III. Heat is generated continuously in an electric heater but its temperature becomes constant after some time.
+
+24. The atomic mass of 16/8 O is 15.99493 u. Calculate the binding energy per nucleon of the oxygen nucleus. 3
+(Given: mass of proton = 1.00727 u, mass of neutron = 1.00866 u, 1 u = 931.5 MeV/c^2)
+
+25. A diamond has a refractive index of 2.42. 2+1
+I. A ray of light inside the diamond strikes the surface at an angle of incidence of 30º.State whether it will undergo refraction or total internal reflection.
+II. Explain why diamonds sparkle when cut properly.
+
+26. Derive Snell's law of refraction using Huygens' wave theory. What prediction of the wave theory was later experimentally verified? 3
+
+27(A) I. An ammeter has an internal resistance of 13 Ω and is originally designed to measure currents only up to 100 A. To extend its range for high-current measurements, a shunt resistor is connected in parallel with it. After adding the shunt, the same meter can now read currents as high as 750 A without damage. Using the principle of current division in parallel circuits, determine the value of the shunt resistance required to increase the measuring range of the ammeter. 3
+II. The coil of a moving coil galvanometer is wound over a metal frame. Why?
+OR
+27(B) I. A small current loop behaves like a tiny magnet when placed in a magnetic field. Using this idea, explain what physical quantity determines the strength and orientation of such a magnetic dipole. Also state the SI unit of this quantity.
+II. A steel wire of length l has a magnetic moment m. It is bent into a semicircular arc. What is its new magnetic moment?
+
+28. I. A bar magnet falls from a height through a metal ring. Its acceleration will be less than 'g'. Explain. 3
+II. A coil of copper wire is wound uniformly on a wooden equilateral triangular frame. If each side of the triangle is increased to 5 times its original length, while keeping the number of turns per unit length unchanged, how does the self-inductance of the coil change?
+
+SECTION D
+
+29. In 2023, researchers developed flexible semiconductor films using organic polymers that could be printed like newspaper sheets. These films can bend, fold, and still conduct electricity efficiently. Unlike traditional silicon chips, polymer semiconductors are lightweight, biodegradable, and can be integrated into clothing or medical patches. Imagine a shirt that monitors your heartbeat or a bandage that tracks wound healing in real time. Such innovations extend the idea of semiconductors beyond rigid circuits, showing how manipulating band gaps and carrier mobility in new materials can revolutionize electronics for healthcare, sustainability, and wearable technology.
+I. Which advantage of semiconductors makes them ideal for wearable devices like smart shirts? 1
+A. High voltage operation (~100 V)
+B. Bulky design and short life
+C. Low power consumption and reliability
+D. Requirement of external heating
+
+II. Carbon (diamond) has a band gap of 5.4 eV, while silicon has 1.1 eV. Why is silicon used in electronic devices but not the diamond? 1
+A. Diamond has too many free electrons.
+B. Diamond's band gap is too large for thermal excitation at room temperature.
+C. Silicon has weaker covalent bonds than diamond.
+D. Diamond cannot form covalent bonds.
+
+III. In an intrinsic semiconductor at room temperature 1
+A. only electrons contribute to conduction.
+B. only holes contribute to conduction.
+C. number of electrons equals number of holes.
+D. no conduction occurs at all.
+
+IV. How will you use the concept of majority and minority carriers to explain the efficiency of polymer semiconductors in wearable technology? 1
+
+30. In 1905, Albert Einstein explained the photoelectric effect by proposing that light consists of discrete packets of energy called photons. Each photon carries an energy E=hv. When a photon strikes a metal surface, it can transfer its energy to an electron. If the photon's energy exceeds the work function of the metal, the electron can be emitted with maximum kinetic energy Kmax=hv-Φo. This discovery challenged the classical wave theory, which predicted that electron emission should depend only on the intensity of light. Instead, experiments showed that emission of electrons depends on frequency too, proving the particle nature of light.
+I. Define the term work function. 1
+
+II. Why the increase in the intensity of light does not increase the maximum kinetic energy of photoelectrons? 1
+
+III. A metal surface has a work function of 2 eV. The light of frequency 1.2 x10^15Hz falls on it. Which statement is correct? 1
+A. No electron is emitted because the intensity is low.
+B. Electrons are emitted with maximum kinetic energy less than 2 eV.
+C. Electrons are emitted with maximum kinetic energy greater than 0 eV.
+D. Electron emission depends only on the intensity of light and not on the frequency.
+
+IV. Which observation/s directly contradicts the classical wave theory of light? 1
+A. Photoelectric current increases with intensity
+B. The maximum kinetic energy depends only on the frequency and not on the intensity.
+C. The electrons are emitted instantaneously.
+D. Both B and C.
+
+SECTION E
+
+31(A) I. An isolated conductor cannot have a large capacitance. Why? 2+2+1
+II. How would you connect 6 µF, 9 µF and 18 µF capacitors to obtain-
+i. the minimum capacitance
+ii. the maximum capacitance
+III. The capacitance of a parallel plate capacitor is increased as the area of the plates increases. What are the other two factors on which the capacitance depends?
+OR
+31(B) I. Show that the electric field at any point is equal to the negative of the potential gradient at that point. 3+2
+II. A small metallic sphere is gradually charged in open air. It is observed that electrical breakdown of air occurs when the electric field at its surface reaches 2.5 x 10^6 V m^-1. If the sphere is allowed to attain a maximum potential of 5 x 10^5 V without causing any discharge, determine the minimum radius the insulated sphere must have.
+
+32(A) A compound microscope consists of an objective lens of focal length 2 cm and an eyepiece lens of focal length 5 cm. The object is placed 2.2 cm from the objective lens. 2+2+1
+I. Calculate the position of the image formed by the objective lens.
+II. The eyepiece is so placed that the final image is formed at infinity. Find the magnifying power of the microscope.
+III. Explain briefly why the compound microscope provides much higher magnification compared to a simple magnifier.
+OR
+32(B) An astronomical telescope uses an objective lens of focal length 100 cm and an eyepiece of focal length 5 cm.
+I. Calculate the magnifying power of the telescope when the final image is formed at infinity.
+II. If the least distance of distinct vision of the observer is 25 cm, calculate the magnifying power when the final image is formed at this distance.
+III. Explain why the objective lens of an astronomical telescope is made with a large focal length and aperture, while the eyepiece has a small focal length.
+
+33(A) I. A certain electrical device is used to convert an alternating voltage of smaller magnitude into a much larger alternating voltage without violating the law of conservation of energy. 2+2+1
+With the help of a neat labelled diagram, describe the principle on which this device operates and explain how it increases the voltage.
+II. State the basic working mechanism of the device and mention the condition required in its input signal for proper functioning.
+III. Give one reason why this device does not operate with 100% efficiency in practical situations.
+OR
+33(B) I. What do you mean by the resonance condition of a series LCR-circuit? 3+2
+Write an expression for the resonant frequency.
+II. Describe the use of a series resonant circuit in the tuning of a radio receiver.
