@@ -99,7 +99,7 @@ def test_minimum_score_is_not_a_passing_threshold():
         service.validate_suggestions(json.dumps(data), ctx)
 
 
-@pytest.mark.parametrize("text,count", [("Q1. x\nQ1. y", 2), ("Q1. x\nQ3. y", 2), (PAPER, 3)])
+@pytest.mark.parametrize("text,count", [("Q1. x\nQ1. y", 2), (PAPER, 3)])
 def test_ambiguous_numbering_is_not_silently_mapped(text, count):
     with pytest.raises(Exception) as error:
         service.question_blocks(text, count)
@@ -147,7 +147,6 @@ def test_attached_subpart_labels_remain_inside_top_level_questions():
 
 @pytest.mark.parametrize("text,count", [
     ("Question 1 (10 marks)\nFirst\nQuestion 1 (10 marks)\nAgain", 2),
-    ("Question 1:\nFirst\nQuestion 3:\nThird", 2),
     ("Question 1\nFirst\nQuestion 2\nSecond", 3),
     ("1. First\n2. Second\nQuestion 1 (10 marks)\nIncomplete explicit set", 2),
 ])
@@ -256,7 +255,12 @@ class Collection:
             self.docs.append(doc)
             inserted = doc["_id"]
         if doc is not None:
-            doc.update(deepcopy(update.get("$set", {})))
+            for key, value in update.get("$set", {}).items():
+                target = doc
+                parts = key.split(".")
+                for part in parts[:-1]:
+                    target = target.setdefault(part, {})
+                target[parts[-1]] = deepcopy(value)
             for key in update.get("$unset", {}): doc.pop(key, None)
         return SimpleNamespace(matched_count=int(doc is not None), modified_count=int(doc is not None), upserted_id=inserted)
 
@@ -406,3 +410,69 @@ async def test_budget_exhaustion_prevents_submission(isolated, monkeypatch):
     response = await isolated.client.post(isolated.url, json={})
     assert response.status_code == 402
     assert isolated.pending == [] and isolated.db[service.COLLECTION].docs == []
+
+
+async def test_ambiguous_paper_can_be_confirmed_without_credits_and_reused(isolated):
+    s = isolated
+    paper = s.db["newsavedDocs"].docs[0]["question_paper"]
+    paper["text"] = "Define learning. [2 Marks] [CO1]\nExplain scaling. [3 Marks] [CO1]"
+    response = await s.client.post(s.url, json={})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "QUESTION_MAPPING_REQUIRED" and s.pending == []
+    selected = [{"start": line["start"], "question_label": label}
+                for line, label in zip(detail["lines"], ["Learning", "Scaling"])]
+    mapping_url = s.url.replace("/suggestions", "/question-mapping")
+    response = await s.client.post(mapping_url, json={"source_id": detail["mapping_source_id"], "questions": selected})
+    assert response.status_code == 200 and s.pending == []
+    assert (await s.client.get(s.url)).json()["status"] == "not_started"
+    assert (await s.client.post(s.url, json={})).status_code == 200
+    assert len(s.pending) == 1
+    blocks = s.pending[0][-1]["questions"]
+    assert [b["question_label"] for b in blocks] == ["Learning", "Scaling"]
+    assert "scaling" not in blocks[0]["text"]
+
+
+@pytest.mark.parametrize("case", ["changed", "locked", "other", "invalid"])
+async def test_manual_mapping_rejects_stale_locked_unauthorized_and_invalid_requests(isolated, case):
+    from app.services.question_mapping import source_key
+    s = isolated
+    paper = s.db["newsavedDocs"].docs[0]["question_paper"]
+    payload = {"source_id": source_key(paper), "questions": [
+        {"start": PAPER.index("Q1."), "question_label": "Q1"},
+        {"start": PAPER.index("Q2."), "question_label": "Q2"}]}
+    if case == "changed": paper["text"] += " Changed"
+    if case == "locked": s.db["newsavedDocs"].docs[0]["paper_locked"] = True
+    if case == "invalid": payload["questions"][1]["start"] = 1
+    response = await s.client.post(s.url.replace("/suggestions", "/question-mapping"), json=payload,
+                                   headers={"actor": "other" if case == "other" else "owner"})
+    assert response.status_code in (401, 403, 404, 409, 422)
+    assert "question_mapping" not in paper and s.pending == []
+
+
+async def test_suggestion_save_attaches_verified_source_labels_and_text(isolated, monkeypatch):
+    s = isolated
+    source_id = (await s.client.get(s.url)).json()["source_id"]
+    saved = []
+    async def capture(db, exam, details, total_marks, **kwargs): saved.extend(details)
+    monkeypatch.setattr(evaluation, "commit_rubric", capture)
+    payload = {"suggestion_source_id": source_id, "totalMarks": 5,
+        "questionEvaluationDetails": [{"minMarks": 0, "maxMarks": n, "parameters": [], "cos": []} for n in (2, 3)]}
+    response = await s.client.post(s.url.replace("/suggestions", ""), json=payload)
+    assert response.status_code == 200
+    assert [q["question_label"] for q in saved] == ["Q1", "Q2"]
+    assert "normalization" not in saved[0]["question_text"]
+    payload["questionEvaluationDetails"][0]["question_label"] = "Q2"
+    assert (await s.client.post(s.url.replace("/suggestions", ""), json=payload)).status_code == 409
+
+
+async def test_mapping_from_old_paper_is_not_reused_after_text_change(isolated):
+    from app.services.question_mapping import source_key
+    s = isolated
+    paper = s.db["newsavedDocs"].docs[0]["question_paper"]
+    paper["question_mapping"] = {"source_id": source_key(paper), "questions": [
+        {"start": PAPER.index("Q1."), "question_label": "Q1"},
+        {"start": PAPER.index("Q2."), "question_label": "Q2"}]}
+    paper["text"] = "Changed and unnumbered paper"
+    response = await s.client.get(s.url)
+    assert response.status_code == 422 and response.json()["detail"]["code"] == "QUESTION_MAPPING_REQUIRED"

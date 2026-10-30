@@ -179,6 +179,10 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
     lines = []
     for idx, rule in enumerate(evaluation_rules, 1):
         lines.append(f"Question {idx}:")
+        if rule.get("question_label"):
+            lines.append(f"- Printed label: {rule['question_label']}; section: {rule.get('section') or 'unspecified'}")
+            lines.append(f"- Stable source ID: {rule.get('question_id', '')}")
+            lines.append(f"- Mapped question text: {json.dumps(rule.get('question_text', ''), ensure_ascii=False)}")
         lines.append(f"- Maximum marks: {rule.get('maxMarks', 0)}. Zero is valid when no credit is demonstrated.")
 
         guidelines = rule.get("guidelines")
@@ -341,6 +345,10 @@ TASK
 Assess this student's responses under the system grading policy. Use the rubric's
 Question 1..N indices for output, even when the paper uses other labels; flag any
 uncertain correspondence rather than assuming the labels are interchangeable.
+When rubric rows contain question_label, section and question_text, use that
+faculty-approved source mapping to identify the printed question and student
+response. Repeated labels in different sections are different questions. Keep
+the integer row index for output; never substitute a printed label for it.
 Return every rubric question exactly once.
 
 FLAG DEFINITIONS
