@@ -181,9 +181,14 @@ async def _run_evaluation_job(
         # once set, so an already-existing exam would otherwise never get one). A
         # no-op (no AI call, no DB write) once the key is already saved — every
         # evaluation after the first on a given exam just reads it back instantly.
-        mcq_answer_key: dict = await ensure_mcq_answer_key(db, exam, faculty_id, user_id)
+        from app.services.question_mapping import legacy_mcq_indices_match
+        legacy_mcq_safe = legacy_mcq_indices_match(evaluation_rules)
+        # Never apply an integer-keyed legacy cache to different printed labels
+        # or to restarted section numbering. Claude receives the mapped rubric;
+        # unresolved objective keys still require faculty review under its policy.
+        mcq_answer_key: dict = await ensure_mcq_answer_key(db, exam, faculty_id, user_id) if legacy_mcq_safe else {}
         from app.utils.mcq_detect import mcq_contexts
-        for n, context in mcq_contexts(question_text).items():
+        for n, context in (mcq_contexts(question_text) if legacy_mcq_safe else {}).items():
             mcq_answer_key.setdefault(str(n), {"answer": "", "confident": False,
                 "options": context["options"], "reasoning": "Answer key needs faculty review."})
         paper_guard = paper_snapshot_filter(exam_object_id, exam.get("question_paper") or {})

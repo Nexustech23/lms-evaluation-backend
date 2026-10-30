@@ -74,13 +74,22 @@ def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(guidelines, str):
         raise ValueError("guidelines must be text")
 
-    return {
+    result = {
         "minMarks": min_marks,
         "maxMarks": max_marks,
         "guidelines": guidelines.strip(),
         "parameters": validated_params,
         "cos": validated_cos,
     }
+    # Optional source identity preserves legacy rubrics while retaining printed
+    # labels and exact source blocks on new mapped rubrics used by AI grading.
+    for key, limit in (("question_id", 64), ("question_label", 120), ("section", 200), ("question_text", 80000)):
+        if key in q:
+            value = q[key]
+            if not isinstance(value, str) or len(value) > limit:
+                raise ValueError(f"{key} must be text up to {limit} characters")
+            result[key] = value
+    return result
 
 
 def validate_evaluation_details(details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
