@@ -110,7 +110,15 @@ def question_blocks(text, count):
     # Explicit question labels take precedence over numbered instructions and
     # numbered lists inside a question. Never fall back when explicit labels
     # exist but are incomplete/ambiguous: that could silently change the mapping.
-    matches = list(re.finditer(r"(?im)^[ \t]*Q(?:uestion)?[ \t]*(\d+)[.)][ \t]*", text))
+    # Extractors also preserve headings such as "Question 1 (10 marks)",
+    # "Question 1:" or a standalone "Q1". Punctuation is not required when
+    # the number ends at whitespace/the end of the line. Keep the digit
+    # boundary so Q10 cannot be partially read as Q1, and do not promote
+    # attached subpart labels such as Q1(a) to top-level questions.
+    matches = list(re.finditer(
+        r"(?im)^[ \t]*Q(?:uestion)?[ \t]*(\d+)(?!\d)(?:(?:\.(?!\d)|[):])[ \t]*|(?=[ \t]|\r?$))",
+        text,
+    ))
     if not matches:
         matches = list(re.finditer(r"(?m)^[ \t]*(\d+)[.)][ \t]*", text))
     numbers = [int(m[1]) for m in matches]
