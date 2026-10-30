@@ -70,8 +70,14 @@ def test_printed_marks_and_known_cos_are_reviewable():
 def test_invalid_or_misattributed_output_is_rejected(change):
     data = answer()
     change(data)
-    with pytest.raises(ValueError):
-        service.validate_suggestions(json.dumps(data), context())
+    if [q["question_no"] for q in data["questions"]] != [1, 2]:
+        with pytest.raises(ValueError):
+            service.validate_suggestions(json.dumps(data), context())
+    else:
+        rows = service.validate_suggestions(json.dumps(data), context())["questions"]
+        assert rows[0]["status"] == "needs_clarification"
+        assert rows[0]["parameters"] == [] and rows[0]["max_marks"] is None
+        assert rows[1]["status"] == "draft_ready"
 
 
 def test_missing_marks_produce_clarification_not_inferred_scores():
@@ -95,8 +101,8 @@ def test_minimum_score_is_not_a_passing_threshold():
     ctx["questions"][0]["text"] += " Minimum pass marks: 1"
     data = answer()
     data["questions"][0].update(min_source="explicit", min_marks=1, min_quote="Minimum pass marks: 1")
-    with pytest.raises(ValueError):
-        service.validate_suggestions(json.dumps(data), ctx)
+    row = service.validate_suggestions(json.dumps(data), ctx)["questions"][0]
+    assert row["status"] == "needs_clarification" and row["min_marks"] == 0
 
 
 @pytest.mark.parametrize("text,count", [("Q1. x\nQ1. y", 2), (PAPER, 3)])
@@ -476,3 +482,81 @@ async def test_mapping_from_old_paper_is_not_reused_after_text_change(isolated):
     paper["text"] = "Changed and unnumbered paper"
     response = await s.client.get(s.url)
     assert response.status_code == 422 and response.json()["detail"]["code"] == "QUESTION_MAPPING_REQUIRED"
+
+
+async def test_raw_response_is_saved_before_validation_and_not_exposed(isolated, monkeypatch):
+    s = isolated
+    monkeypatch.setattr("app.db.mongodb.get_database", lambda: s.db)
+    raw = json.dumps(answer())
+    async def tracked(*args, **kwargs): return raw, {}
+    monkeypatch.setattr(service, "tracked_faculty_call", tracked)
+    original = service.validate_suggestions
+    def verify_saved(response, ctx):
+        assert s.db[service.COLLECTION].docs[0]["raw_response"] == raw
+        return original(response, ctx)
+    monkeypatch.setattr(service, "validate_suggestions", verify_saved)
+    await s.client.post(s.url, json={})
+    _, job_id, attempt, ctx = s.pending[0]
+    await service.run_suggestion_job(job_id, attempt, ctx)
+    response = (await s.client.get(s.url)).json()
+    assert response["status"] == "completed"
+    assert "raw_response" not in response and "response_saved_at" not in response
+
+
+async def test_saved_failed_response_retry_never_calls_or_bills_ai(isolated, monkeypatch):
+    from app.utils import token_usage
+    s = isolated
+    monkeypatch.setattr("app.db.mongodb.get_database", lambda: s.db)
+    await s.client.post(s.url, json={})
+    row = s.db[service.COLLECTION].docs[0]
+    row.update(status="failed", raw_response=json.dumps(answer()))
+    async def forbidden(*args, **kwargs): raise AssertionError("Saved response must not call AI or check a paid budget")
+    monkeypatch.setattr(service, "tracked_faculty_call", forbidden)
+    monkeypatch.setattr(token_usage, "check_institute_token_budget", forbidden)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    response = await s.client.post(s.url, json={"retry_failed": True})
+    assert response.status_code == 200 and len(s.pending) == 2
+    _, job_id, attempt, ctx = s.pending[-1]
+    await service.run_suggestion_job(job_id, attempt, ctx)
+    assert row["status"] == "completed"
+
+
+async def test_schema_failure_keeps_raw_response_for_later_revalidation(isolated, monkeypatch):
+    s = isolated
+    monkeypatch.setattr("app.db.mongodb.get_database", lambda: s.db)
+    async def tracked(*args, **kwargs): return "not-json", {}
+    monkeypatch.setattr(service, "tracked_faculty_call", tracked)
+    await s.client.post(s.url, json={})
+    _, job_id, attempt, ctx = s.pending[0]
+    await service.run_suggestion_job(job_id, attempt, ctx)
+    row = s.db[service.COLLECTION].docs[0]
+    assert row["status"] == "failed" and row["raw_response"] == "not-json"
+    assert row["failure_type"] == "JSONDecodeError"
+
+
+async def test_explicit_paid_regeneration_checks_budget_before_discarding_saved_response(isolated, monkeypatch):
+    from app.utils import token_usage
+    s = isolated
+    await s.client.post(s.url, json={})
+    row = s.db[service.COLLECTION].docs[0]
+    row.update(status="failed", raw_response="stored response")
+    async def denied(*args): return {"allowed": False, "message": "Quota exhausted"}
+    monkeypatch.setattr(token_usage, "check_institute_token_budget", denied)
+    response = await s.client.post(s.url, json={"retry_failed": True, "regenerate": True})
+    assert response.status_code == 402
+    assert row["raw_response"] == "stored response" and len(s.pending) == 1
+
+
+async def test_incomplete_question_identity_fails_whole_job_but_retains_response(isolated, monkeypatch):
+    s = isolated
+    monkeypatch.setattr("app.db.mongodb.get_database", lambda: s.db)
+    data = answer()
+    data["questions"].reverse()
+    async def tracked(*args, **kwargs): return json.dumps(data), {}
+    monkeypatch.setattr(service, "tracked_faculty_call", tracked)
+    await s.client.post(s.url, json={})
+    _, job_id, attempt, ctx = s.pending[0]
+    await service.run_suggestion_job(job_id, attempt, ctx)
+    row = s.db[service.COLLECTION].docs[0]
+    assert row["status"] == "failed" and row["raw_response"]
+    assert "result" not in row

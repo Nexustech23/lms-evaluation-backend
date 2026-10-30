@@ -25,6 +25,7 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["evaluati
 class SuggestionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     retry_failed: bool = False
+    regenerate: bool = False
 
 
 class QuestionBoundary(BaseModel):
@@ -90,14 +91,18 @@ async def suggest_rubric(folder_id: str, payload: SuggestionRequest, background_
     job_id, context = await build_context(db, exam, identity)
     query = {"_id": job_id, "owner_user_id": str(identity["user_id"])}
     existing = await db[COLLECTION].find_one(query)
+    if payload.regenerate and not payload.retry_failed:
+        raise HTTPException(422, "Regeneration requires an explicit failed-attempt retry.")
     if existing and (existing["status"] != "failed" or not payload.retry_failed):
         return {**public_job(existing), "source_id": job_id, "reused": True}
-    if not settings.ANTHROPIC_API_KEY:
-        raise HTTPException(503, "AI parameter suggestions are not configured.")
-    await ai_rate_limit(identity)
-    budget = await check_institute_token_budget(db, str(exam["faculty_id"]), ["claude"])
-    if not budget["allowed"]:
-        raise HTTPException(402, budget["message"])
+    reuse_response = bool(existing and existing.get("raw_response") is not None and not payload.regenerate)
+    if not reuse_response:
+        if not settings.ANTHROPIC_API_KEY:
+            raise HTTPException(503, "AI parameter suggestions are not configured.")
+        await ai_rate_limit(identity)
+        budget = await check_institute_token_budget(db, str(exam["faculty_id"]), ["claude"])
+        if not budget["allowed"]:
+            raise HTTPException(402, budget["message"])
     attempt_id = uuid4().hex
     pending = {"status": "queued", "attempt_id": attempt_id,
                "exam_id": str(exam["_id"]), "faculty_id": str(exam["faculty_id"]),
@@ -105,8 +110,11 @@ async def suggest_rubric(folder_id: str, payload: SuggestionRequest, background_
                "model": context["model"], "prompt_version": context["prompt_version"],
                "owner_user_id": str(identity["user_id"]), "created_at": datetime.now(timezone.utc)}
     if existing:
+        clear = {"error": "", "result": "", "failure_type": ""}
+        if not reuse_response:
+            clear.update(raw_response="", response_saved_at="")
         result = await db[COLLECTION].update_one({**query, "status": "failed", "attempt_id": existing["attempt_id"]},
-            {"$set": pending, "$unset": {"error": "", "result": ""}})
+            {"$set": pending, "$unset": clear})
         claimed = result.modified_count == 1
     else:
         try:
