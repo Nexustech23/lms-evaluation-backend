@@ -110,6 +110,53 @@ def test_plain_numbered_questions_are_supported():
     assert len(service.question_blocks("1. One\n2. Two", 2)) == 2
 
 
+@pytest.mark.parametrize("heading", [
+    "Question {n} (10 marks)",
+    "Question {n}: Explain the concept.",
+    "Question {n}",
+    "Q{n}",
+    "Q{n} Explain the concept.",
+    "QUESTION {n}: Explain the concept.",
+    "Q{n}) Explain the concept.",
+])
+def test_extracted_heading_formats_preserve_question_boundaries(heading):
+    text = "Instructions:\n1. Answer both questions.\n2. Show relevant work.\n"
+    text += heading.format(n=1) + "\nFirst question content.\n(a) First part.\n"
+    text += heading.format(n=2) + "\nSecond question content."
+    blocks = service.question_blocks(text, 2)
+    assert [b["question_no"] for b in blocks] == [1, 2]
+    assert blocks[0]["text"].startswith(heading.format(n=1))
+    assert "(a) First part." in blocks[0]["text"]
+    assert "Answer both questions" not in blocks[0]["text"]
+    assert "Second question content" not in blocks[0]["text"]
+    assert blocks[1]["text"].endswith("Second question content.")
+
+
+def test_standalone_headings_support_crlf_and_multi_digit_numbers():
+    text = "\r\n".join(f"Question {n}\r\nContent {n}" for n in range(1, 13))
+    assert [b["question_no"] for b in service.question_blocks(text, 12)] == list(range(1, 13))
+
+
+def test_attached_subpart_labels_remain_inside_top_level_questions():
+    text = "Question 1 (10 marks)\nQ1(a) Explain A.\nQ1(b) Explain B.\nQ1.1 Explain a nested part.\nQuestion 2: Explain C."
+    blocks = service.question_blocks(text, 2)
+    assert "Q1(a) Explain A." in blocks[0]["text"]
+    assert "Q1(b) Explain B." in blocks[0]["text"]
+    assert "Q1.1 Explain a nested part." in blocks[0]["text"]
+
+
+@pytest.mark.parametrize("text,count", [
+    ("Question 1 (10 marks)\nFirst\nQuestion 1 (10 marks)\nAgain", 2),
+    ("Question 1:\nFirst\nQuestion 3:\nThird", 2),
+    ("Question 1\nFirst\nQuestion 2\nSecond", 3),
+    ("1. First\n2. Second\nQuestion 1 (10 marks)\nIncomplete explicit set", 2),
+])
+def test_flexible_headings_still_reject_ambiguous_question_mappings(text, count):
+    with pytest.raises(Exception) as error:
+        service.question_blocks(text, count)
+    assert error.value.status_code == 422
+
+
 @pytest.mark.parametrize("label", ["Q", "Question "])
 def test_explicit_question_labels_ignore_numbered_instructions(label):
     text = "INSTRUCTIONS:\n1. Attempt all questions.\n2. Write clearly.\n\n"
