@@ -40,12 +40,12 @@ def stream_client(monkeypatch, response):
     return client
 
 
-def test_grading_requests_55_with_30000_and_explicit_effort(monkeypatch):
+def test_grading_requests_55_with_90000_and_explicit_effort(monkeypatch):
     provider = Mock(return_value=('{}', {"input_tokens": 100, "output_tokens": 70, "total_tokens": 170}))
     monkeypatch.setattr(grading, "generate_text", provider)
     _, usage = grading.grade_with_claude("Q1 {question}", "Q1 {answer}", [{"maxMarks": 5}])
     kwargs = provider.call_args.kwargs
-    assert kwargs == {"model": "claude-sonnet-5-5", "max_tokens": 30000,
+    assert kwargs == {"model": "claude-sonnet-5-5", "max_tokens": 90000,
                       "system": grading.GRADING_POLICY, "effort": "high"}
     assert usage["model"] == "claude-sonnet-5-5"
     assert usage["output_tokens"] == 70
