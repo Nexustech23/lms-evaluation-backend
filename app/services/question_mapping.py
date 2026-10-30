@@ -14,9 +14,14 @@ SECTION = re.compile(r"^\s*(?:#{1,6}\s*)?(?:section|part)\s*[-:]?\s*([A-Z0-9IVX]
 LABEL = re.compile(
     r"^\s*(?:\|\s*)?(?:\*\*)?"
     r"(?P<label>(?P<prefix>Q(?:uestion)?\s*(?:No\.?\s*)?\.?\s*)?"
-    r"(?P<root>\d+)(?P<parts>(?:\s*\([a-z0-9ivx]+\)|\.[a-z0-9]+)*))"
+    # OCR may preserve Greek lookalikes (e.g. capital beta in '(B)'). Keep
+    # the printed label unchanged while still recognising it as a subpart.
+    r"(?P<root>\d+)(?P<parts>(?:[ \t]*\([^\W_]+\)|\.[a-z0-9]+)*))"
     r"(?P<end>[.):]|(?=\s|\||$))", re.I)
 SUBPART = re.compile(r"^\s*(?:\|\s*)?(?P<label>\([a-zivx]+\)|[a-zivx]+[.)])\s+", re.I)
+ALTERNATIVE = re.compile(
+    r"(?im)^[ \t]*(?:or[ \t]*[:.]?|for[ \t]+visually[ \t]+impaired[ \t]*:?)\s*$"
+)
 
 
 def source_key(paper):
@@ -113,9 +118,29 @@ def resolve_questions(text, count, confirmed=None):
         key = (row["section"], row["root"])
         groups.setdefault(key, []).append(row)
     grouped = []
+    positions = {row["start"]: index for index, row in enumerate(eligible)}
     for group in groups.values():
-        labels = [re.sub(r"\s+", "", row["question_label"]).casefold() for row in group]
-        if sum(not row["subpart"] for row in group) > 1 or len(labels) != len(set(labels)):
+        # Never fold a later repeated root across another question: that would
+        # attach its answer/marks to the wrong evaluation row.
+        indices = [positions[row["start"]] for row in group]
+        valid = indices == list(range(indices[0], indices[0] + len(indices)))
+        seen_labels = set()
+        parent_seen = False
+        for index, row in enumerate(group):
+            label = re.sub(r"\s+", "", row["question_label"]).casefold()
+            repeated = label in seen_labels or (not row["subpart"] and parent_seen)
+            if repeated:
+                # Printed alternatives can legitimately repeat a label, most
+                # notably accessibility alternatives. Require an explicit
+                # separator since the previous candidate, not any earlier OR.
+                previous = group[index - 1]
+                previous_line_end = text.find("\n", previous["start"])
+                between = text[previous_line_end + 1:row["start"]] if previous_line_end >= 0 else ""
+                if not ALTERNATIVE.search(between):
+                    valid = False
+            seen_labels.add(label)
+            parent_seen = parent_seen or not row["subpart"]
+        if not valid:
             grouped = []
             break
         first = dict(group[0])

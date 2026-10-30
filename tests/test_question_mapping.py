@@ -40,6 +40,49 @@ def test_subparts_can_be_grouped_without_losing_a_root():
     assert "1(ii)" in blocks[0]["text"] and "2(a)" not in blocks[0]["text"]
 
 
+def test_math_paper_alternatives_map_to_38_parent_questions():
+    paper = "General Instructions:\n1. Answer all 38 questions.\nSECTION -A\n"
+    for number in range(1, 39):
+        if number in (21, 26, 32, 36):
+            paper += f"SECTION -{ {21: 'B', 26: 'C', 32: 'D', 36: 'E'}[number]}\n"
+        if number in (21, 23, 28, 29, 30, 32, 34):
+            paper += f"Q{number} (A). First alternative [3 Marks]\nOR\nQ{number} (Β). Second alternative [3 Marks]\n"
+            if number == 34:
+                paper += "Page 6 of 8\nFor Visually Impaired:\nQ34 (A). Accessible first [3 Marks]\nOR\nQ34 (Β). Accessible second [3 Marks]\n"
+        else:
+            paper += f"Q{number}. Question content [1 Mark]\n"
+    blocks = resolve_questions(paper, 38)
+    assert [row["question_no"] for row in blocks] == list(range(1, 39))
+    assert "Q21 (Β)" in blocks[20]["text"]
+    assert "Accessible first" in blocks[33]["text"]
+    assert "Accessible second" in blocks[33]["text"]
+    assert "Q35." not in blocks[33]["text"]
+    assert "SECTION -B" not in blocks[19]["text"]
+    assert "Answer all 38" not in blocks[0]["text"]
+
+
+def test_greek_lookalike_subpart_labels_are_preserved():
+    blocks = resolve_questions("Q21 (A). First\nOR\nQ21 (Β). Second", 2)
+    assert [row["question_label"] for row in blocks] == ["Q21 (A)", "Q21 (Β)"]
+
+
+def test_repeated_parent_with_explicit_or_is_one_question():
+    blocks = resolve_questions("Question 1: First\nOR\nQuestion 1: Alternative\nQuestion 2: Second", 2)
+    assert "Question 1: Alternative" in blocks[0]["text"]
+    assert "Question 2" not in blocks[0]["text"]
+
+
+@pytest.mark.parametrize("paper,count", [
+    ("Q1(a). First\nQ2. Second\nQ1(b). Out of order", 2),
+    ("Q1(a). First\nOR\nQ1(b). Second\nQ1(a). Accidental repeat", 1),
+    ("Q1. First\nQ1. Accidental repeat", 1),
+])
+def test_alternative_support_does_not_hide_ambiguous_duplicates(paper, count):
+    with pytest.raises(HTTPException) as exc:
+        resolve_questions(paper, count)
+    assert exc.value.detail["code"] == "QUESTION_MAPPING_REQUIRED"
+
+
 @pytest.mark.parametrize("paper,count", [
     ("Q1. First\nQ1. Again", 2),
     ("Q1. First\nQuestion 1: Again", 2),
