@@ -1,6 +1,6 @@
 # Answer-sheet grading model
 
-Answer checking uses `claude-sonnet-5-5` with `max_tokens=30000`, adaptive thinking and explicit `high` effort. Configuration is in `app/services/grading.py`. Phase 3 updates the grading prompt to `grading-evidence-v3`; the JSON contract remains unchanged.
+Answer checking uses `claude-sonnet-5-5` with `max_tokens=90000` (raised from 30000 after a 38-question, fully answered sheet exhausted the old cap), adaptive thinking and explicit `high` effort. Configuration is in `app/services/grading.py`. Phase 3 updates the grading prompt to `grading-evidence-v3`; the JSON contract remains unchanged.
 
 The v3 policy explicitly awards full allocated credit for concise, complete
 equivalent meaning. It requires academic reasons for deductions and component

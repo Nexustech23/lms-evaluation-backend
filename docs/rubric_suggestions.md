@@ -1,6 +1,6 @@
 # Faculty rubric preparation
 
-Rubric preparation uses Sonnet 5.5 (`claude-sonnet-5-5`). Answer grading now separately uses the same model with a 30,000-token output cap and explicit high effort. Transcript generation remains on Sonnet 4.5; MCQ-key generation and OCR retain their existing model choices.
+Rubric preparation uses Sonnet 5.5 (`claude-sonnet-5-5`). Answer grading now separately uses the same model with a 90,000-token output cap and explicit high effort. Transcript generation remains on Sonnet 4.5; MCQ-key generation and OCR retain their existing model choices.
 
 Both rubric editors offer **Generate suggestions (uses credits)**. Nothing is generated on page load: the initial GET only loads a cached draft. Faculty can preview source quotations and apply a draft to a single question, edit its fields, and confirm through the existing rubric save workflow. Applying a draft is a local form edit, not a database save. The six generic parameters remain available for manual selection but no longer automatically populate every question.
 

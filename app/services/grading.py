@@ -21,7 +21,11 @@ from app.services.claude import generate_text
 from app.services.gemini import generate_content_from_file_checked
 
 CLAUDE_GRADING_MODEL = "claude-sonnet-5-5"
-CLAUDE_GRADING_MAX_TOKENS = 30000
+# Output budget for one grading call. It is shared between adaptive thinking and the
+# JSON result. 30000 was exhausted on a 38-question, fully answered sheet (the call
+# ended at exactly 30000 output tokens and the truncated result was rejected), so the
+# cap is 90000. It is only an upper bound: short sheets still use a fraction of it.
+CLAUDE_GRADING_MAX_TOKENS = 90000
 CLAUDE_GRADING_EFFORT = "high"
 CLAUDE_TRANSCRIPT_MODEL = "claude-sonnet-4-5"
 GEMINI_OCR_MODEL = "gemini-3.1-flash-lite"
