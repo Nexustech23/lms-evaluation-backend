@@ -14,9 +14,11 @@ from app.services.claude import _get_client, _message_usage, _response_text
 from app.services.faculty_ai_usage import tracked_faculty_call
 
 MODEL = "claude-sonnet-5-5"
-PROMPT_VERSION = "rubric-preparation-v3-question-mapping"
+PROMPT_VERSION = "rubric-preparation-v4-batched-medium"
 COLLECTION = "rubricSuggestions"
 VALIDATION_VERSION = "rubric-validation-v2"
+BATCH_SIZE = 6
+MAX_OUTPUT_TOKENS = 30000
 
 # Short production version of the reviewed design; no student content is sent.
 SYSTEM_PROMPT = """You draft editable academic rubrics for faculty review, not student grades.
@@ -31,7 +33,8 @@ Extract min_marks only from an explicit minimum SCORE, quoting it in min_quote;
 otherwise set min_marks=0, min_source=default, min_quote="". Do not mistake a pass
 threshold or an attempt requirement for minimum credit.
 Extract explicit CO tags only. Return each code with an exact supporting quote.
-Do not infer missing COs or invent CO mark allocations.
+If extract_co_tags is false, return co_tags=[] immediately: there is no printed
+CO to extract. Do not search for, infer or invent missing COs or CO allocations.
 For a usable question, suggest distinct, observable academic parameters with
 positive percentages totaling 100 and isCustom=true. Design by task, not a fixed
 weight template: 1-2 marks usually need 1-2 criteria; longer questions only as many
@@ -67,9 +70,11 @@ Objective questions use one Answer-key correctness parameter at 100%; do not
 invent the key. Missing required figures/data or conflicting mark allocations:
 status=needs_clarification, parameters=[], guidelines="", and actionable notes.
 Do not choose first-N/best-N optional answers or change the paper total. Keep
-guidelines concise (normally under 150 words). Notes are short review issues,
+guidelines concise (normally 30-80 words; shorter for simple questions). Use
+only necessary criteria and no repeated descriptions. Notes contain at most
+three short, actionable review issues when information is missing or uncertain,
 not private reasoning. All results are unapproved drafts. Return JSON only.
-Think the problem through before you answer."""
+Do not reconstruct absent information or provide a reference solution."""
 
 
 class StrictModel(BaseModel):
@@ -107,6 +112,30 @@ class SuggestionResponse(StrictModel):
 
 def _normalized(text):
     return " ".join(text.split())
+
+
+def generation_batches(context):
+    """Keep question IDs global and send only each batch's relevant COs."""
+    questions = context["questions"]
+    paper = context["paper_text"]
+    first_start = questions[0].get("start", paper.find(questions[0]["text"]))
+    instructions = paper[:first_start] if isinstance(first_start, int) and first_start >= 0 else ""
+    for offset in range(0, len(questions), BATCH_SIZE):
+        selected = questions[offset:offset + BATCH_SIZE]
+        codes = set(re.findall(r"\bCO\d+\b", "\n".join(q["text"] for q in selected), re.I))
+        codes = {code.upper() for code in codes}
+        key = "-".join(str(q["question_no"]) for q in selected)
+        yield key, {**context, "questions": selected, "paper_instructions": instructions,
+                    "available_cos": [co for co in context["available_cos"] if co["co_code"].upper() in codes]}
+
+
+def has_saved_complete_response(row, context):
+    if not row:
+        return False
+    if row.get("raw_response") is not None:
+        return True
+    saved = row.get("batch_responses") or {}
+    return all(isinstance(saved.get(key), str) for key, _ in generation_batches(context))
 
 
 def question_blocks(text, count):
@@ -159,23 +188,32 @@ def generate_suggestions(context):
                     "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
                     "minLength", "maxLength", "minItems", "maxItems", "pattern", "title"}}
             return [shape(v) for v in value] if isinstance(value, list) else value
+        questions = [{**q, "extract_co_tags": bool(re.search(r"\bCO\d+\b", q["text"], re.I))}
+                     for q in context["questions"]]
+        first_start = context["paper_text"].find(context["questions"][0]["text"])
+        instructions = context.get("paper_instructions", context["paper_text"][:max(0, first_start)])
         message = _get_client().messages.create(
-            model=MODEL, max_tokens=min(24000, 3000 + len(context["questions"]) * 500),
+            model=MODEL, max_tokens=MAX_OUTPUT_TOKENS,
             timeout=240, system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": json.dumps({
-                "paper_instructions": context["paper_text"].split(context["questions"][0]["text"], 1)[0],
-                "questions": context["questions"], "available_cos": context["available_cos"],
+                "paper_instructions": instructions,
+                "questions": questions, "available_cos": context["available_cos"],
             })}],
             extra_body={"thinking": {"type": "adaptive"}, "output_config": {
-                "effort": "high", "format": {"type": "json_schema", "schema": shape(schema)}}},
+                "effort": "medium", "format": {"type": "json_schema", "schema": shape(schema)}}},
         )
         usage = {**_message_usage(message), "model": MODEL}
         if message.stop_reason in {"max_tokens", "refusal"}:
-            raise ValueError("Rubric suggestion output was incomplete or refused")
+            error = ValueError("Rubric batch reached its output limit" if message.stop_reason == "max_tokens" else "Rubric batch was refused by the provider")
+            error.stop_reason = message.stop_reason
+            error.partial_response = "\n".join(getattr(block, "text", "") for block in getattr(message, "content", []) if getattr(block, "type", None) == "text")
+            raise error
         return _response_text(message), usage
     except Exception as exc:
         error = RuntimeError("Rubric suggestion call failed. Existing parameters were preserved.")
         error.usage = usage
+        error.stop_reason = getattr(exc, "stop_reason", None)
+        error.partial_response = getattr(exc, "partial_response", None)
         raise error from exc
 
 
@@ -284,9 +322,53 @@ async def run_suggestion_job(job_id, attempt_id, context):
         saved = await db[COLLECTION].find_one(query)
         raw = (saved or {}).get("raw_response")
         if raw is None:
-            raw, _ = await tracked_faculty_call(db, generate_suggestions, context,
-                faculty_id=context["faculty_id"], user_id=context["owner_user_id"], provider=Provider.CLAUDE,
-                model=MODEL, feature=Feature.RUBRIC_SUGGESTION, job_id=job_id, prompt_version=PROMPT_VERSION)
+            batches = list(generation_batches(context))
+            combined = []
+            completed = 0
+            for batch_index, (batch_key, batch_context) in enumerate(batches):
+                # Check ownership, source and locks before every new provider
+                # call, not just at the start of a multi-batch job.
+                exam = await require_exam_access(identity, db, context["exam_id"])
+                await require_replaceable_paper(db, exam)
+                current_id, _ = await build_context(db, exam, identity)
+                if current_id != job_id:
+                    raise ValueError("Paper or course outcomes changed between batches")
+                active = await db[COLLECTION].find_one({**query, "status": "processing"})
+                if active is None:
+                    return
+                batch_raw = (active.get("batch_responses") or {}).get(batch_key)
+                if batch_raw is None:
+                    from app.utils.token_usage import check_institute_token_budget
+                    budget = await check_institute_token_budget(db, context["faculty_id"], ["claude"])
+                    if not budget["allowed"]:
+                        raise ValueError("AI budget exhausted before the next batch")
+                    try:
+                        batch_raw, _ = await tracked_faculty_call(db, generate_suggestions, batch_context,
+                            faculty_id=context["faculty_id"], user_id=context["owner_user_id"], provider=Provider.CLAUDE,
+                            model=MODEL, feature=Feature.RUBRIC_SUGGESTION, job_id=job_id, prompt_version=PROMPT_VERSION)
+                    except Exception as exc:
+                        if getattr(exc, "stop_reason", None):
+                            await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
+                                f"incomplete_responses.{batch_key}": {"stop_reason": exc.stop_reason,
+                                    "text": getattr(exc, "partial_response", "") or "", "attempt_id": attempt_id,
+                                    "saved_at": datetime.now(timezone.utc)}}})
+                        raise
+                    stored = await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
+                        f"batch_responses.{batch_key}": batch_raw,
+                        "response_saved_at": datetime.now(timezone.utc)}})
+                    if stored.matched_count != 1:
+                        raise ValueError("The attempt changed before its batch response could be saved")
+                # For a one-batch paper preserve the original raw response too,
+                # including malformed JSON, so revalidation remains free.
+                if len(batches) == 1:
+                    await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {"raw_response": batch_raw}})
+                validate_suggestions(batch_raw, batch_context)
+                combined.extend(json.loads(batch_raw)["questions"])
+                completed += len(batch_context["questions"])
+                await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
+                    "completed_questions": completed, "completed_batches": batch_index + 1,
+                    "total_batches": len(batches)}})
+            raw = json.dumps({"questions": combined})
             persisted = await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
                 "raw_response": raw, "response_saved_at": datetime.now(timezone.utc)}})
             if persisted.matched_count != 1:
@@ -302,12 +384,17 @@ async def run_suggestion_job(job_id, attempt_id, context):
     except Exception as exc:
         import logging
         logging.exception("Rubric suggestion failed: %s", job_id)
+        current = await db[COLLECTION].find_one(query)
+        completed = (current or {}).get("completed_questions", 0)
+        stop_reason = getattr(exc, "stop_reason", None)
+        reason = ("A batch reached the 30,000-token output limit. " if stop_reason == "max_tokens" else
+                  "The provider refused a batch. " if stop_reason == "refusal" else "")
         await db[COLLECTION].update_one({**query, "status": "processing"}, {"$set": {
             "status": "failed", "failure_type": type(exc).__name__,
-            "error": "Suggestions could not be completed or matched to this paper. Existing parameters were preserved. Saved AI responses are reused when available; otherwise an explicit retry uses credits."}})
+            "error": reason + f"Suggestions could not be completed or matched to this paper. {completed} question(s) completed. Existing parameters were preserved. Saved batches are reused; an explicit retry uses credits only for batches without a complete saved response."}})
 
 
 def public_job(row):
     if not row:
         return {"status": "not_started"}
-    return {k: row[k] for k in ("status", "result", "error", "attempt_id") if k in row}
+    return {k: row[k] for k in ("status", "result", "error", "attempt_id", "completed_questions", "completed_batches", "total_batches") if k in row}
