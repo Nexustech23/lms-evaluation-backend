@@ -112,6 +112,25 @@ def split_answer_pdf(pdf_bytes):
         raise RuntimeError("Answer script OCR failed: PDF page coverage could not be established") from exc
 
 
+_PAGE_MARKER = re.compile(r"(?is)^(?P<body>.*?)[\s*_`'\"\[\](){}<>|]*PAGE[_ ]?COMPLETE[\s*_`'\"\[\](){}<>.,;:!|\-]*$")
+
+
+def _strip_page_marker(page_text):
+    """The page text without its closing PAGE_COMPLETE marker, or None when the page does not end with one.
+
+    Small formatting differences are fine (case, `PAGE COMPLETE`, a trailing full stop, bold or code
+    marks). A marker in the middle of the text, or real words after it, still count as missing."""
+    match = _PAGE_MARKER.match((page_text or "").strip())
+    return match.group("body").strip() if match else None
+
+
+def _marker_diagnostics(page_text):
+    """Structure only, never the student's words, so a rejected page can be understood from the log."""
+    text = (page_text or "").strip()
+    return {"text_length": len(text), "marker_anywhere": bool(re.search(r"(?i)PAGE[_ ]?COMPLETE", text)),
+            "tail_shape": re.sub(r"[A-Za-z0-9]", "x", text[-30:])}
+
+
 def extract_answer_text_with_gemini(
     pdf_bytes: bytes, mcq_questions_with_options: Optional[Dict[int, Dict[str, str]]] = None
 ) -> Tuple[str, Dict[str, Any]]:
@@ -140,19 +159,30 @@ def extract_answer_text_with_gemini(
         for index, page in enumerate(reader.pages, 1):
             writer = PyPDF2.PdfWriter(); writer.add_page(page)
             buffer = io.BytesIO(); writer.write(buffer)
-            page_text, page_usage, truncated = generate_content_from_file_checked(
-                buffer.getvalue(), "application/pdf", prompt + f"\nThis is page {index} of {len(reader.pages)}. End with PAGE_COMPLETE.", model=GEMINI_OCR_MODEL,
-                media_resolution=settings.GEMINI_OCR_MEDIA_RESOLUTION)
-            calls.append(page_usage)
-            usage = {key: sum(u.get(key, 0) for u in calls) for key in ("prompt_tokens", "candidate_tokens", "total_tokens")}
-            usage.update(page_count=len(reader.pages), pages_processed=index,
-                usage_status="unknown" if any(u.get("usage_status") == "unknown" for u in calls) else "known")
-            if truncated or not page_text.strip().endswith("PAGE_COMPLETE"):
-                diagnostic_event("ocr.decision",reason_code="OUTPUT_TRUNCATED" if truncated else "PAGE_COMPLETE_MARKER_MISSING",page_number=index,page_count=len(reader.pages),outcome="rejected_incomplete")
-                error = RuntimeError(f"Answer extraction incomplete on page {index}")
-                error.usage = usage
-                raise error
-            pages.append(f"PAGE {index}\n" + page_text.rsplit("PAGE_COMPLETE", 1)[0].strip())
+            page_prompt = prompt + f"\nThis is page {index} of {len(reader.pages)}. End with PAGE_COMPLETE."
+            # A missing closing marker is retried once (the model sometimes leaves it off); a page that was
+            # cut off is rejected straight away. Every attempt's tokens are counted.
+            for attempt in (1, 2):
+                page_text, page_usage, truncated = generate_content_from_file_checked(
+                    buffer.getvalue(), "application/pdf", page_prompt, model=GEMINI_OCR_MODEL,
+                    media_resolution=settings.GEMINI_OCR_MEDIA_RESOLUTION)
+                calls.append(page_usage)
+                usage = {key: sum(u.get(key, 0) for u in calls) for key in ("prompt_tokens", "candidate_tokens", "total_tokens")}
+                usage.update(page_count=len(reader.pages), pages_processed=index,
+                    usage_status="unknown" if any(u.get("usage_status") == "unknown" for u in calls) else "known")
+                body = None if truncated else _strip_page_marker(page_text)
+                if body is not None:
+                    break
+                reason = "OUTPUT_TRUNCATED" if truncated else "PAGE_COMPLETE_MARKER_MISSING"
+                if truncated or attempt == 2:
+                    diagnostic_event("ocr.decision", reason_code=reason, page_number=index, page_count=len(reader.pages),
+                                     outcome="rejected_incomplete", attempt=attempt, **_marker_diagnostics(page_text))
+                    error = RuntimeError(f"Answer extraction incomplete on page {index}")
+                    error.usage = usage
+                    raise error
+                diagnostic_event("ocr.decision", reason_code=reason, page_number=index, page_count=len(reader.pages),
+                                 outcome="retrying", attempt=attempt, **_marker_diagnostics(page_text))
+            pages.append(f"PAGE {index}\n" + body)
         text = "\n\n".join(pages)
     except Exception as e:
         diagnostic_event("ocr.decision",reason_code="EXTRACTION_FAILED",outcome="failed",error_type=type(e).__name__)

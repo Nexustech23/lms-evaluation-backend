@@ -257,12 +257,12 @@ def test_extract_answer_text_with_gemini_omits_mcq_block_when_no_options(monkeyp
     assert "MCQ_ANSWER" not in captured["prompt"]
 
 
-@pytest.mark.parametrize("page_text,truncated", [("OCR text", False), ("OCR text\nPAGE_COMPLETE", True)])
-def test_extract_answer_text_rejects_incomplete_page(monkeypatch, page_text, truncated):
+@pytest.mark.parametrize("page_text,truncated,calls", [("OCR text", False, 2), ("OCR text\nPAGE_COMPLETE", True, 1)])
+def test_extract_answer_text_rejects_incomplete_page(monkeypatch, page_text, truncated, calls):
     import app.services.grading as grading_module
     def fake_checked(*args, **kwargs):
         return page_text, {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}, truncated
     monkeypatch.setattr(grading_module, "generate_content_from_file_checked", fake_checked)
     with pytest.raises(RuntimeError, match="incomplete") as error:
         grading_module.extract_answer_text_with_gemini(_single_page_pdf())
-    assert error.value.usage["total_tokens"] == 2
+    assert error.value.usage["total_tokens"] == 2 * calls      # a missing marker is retried once; a cut-off page is not

@@ -39,3 +39,7 @@ Question papers are typed PDFs, so `PAPER_EXTRACT_RENDER_DPI` (default `0`, off:
 ## Question-paper extraction model
 
 The model that reads a question paper into text is `GEMINI_PAPER_MODEL` (default `gemini-3.1-flash-lite`; it was `gemini-2.5-flash`). Set it in `.env` to try another Gemini model and restart the backend; use a model that has a price in `app/utils/ai_pricing.py` so its cost is recorded. Only paper extraction uses it: the tutor, roadmap, notes and mock-test features keep their own model. It was not compared against the previous model on real papers before becoming the default, so check a few extracted papers against their PDFs. `PAPER_EXTRACT_RENDER_DPI` is separate and still off by default.
+
+## Page-complete marker
+
+Each answer page is read by one Gemini call that must end with `PAGE_COMPLETE`, which proves the page was not cut off. A page whose answer lacks the marker used to fail the whole sheet ("Answer extraction is incomplete. No new official marks were saved"). Now small format differences are accepted (case, `PAGE COMPLETE`, a full stop, bold or code marks around the marker), a missing marker is retried once, and only a second miss rejects the sheet. A page reported as cut off (max tokens) is still rejected at once. Both attempts' tokens are recorded. The `ocr.decision` log events (`retrying` / `rejected_incomplete`) carry `attempt`, `text_length`, `marker_anywhere` and `tail_shape` (the punctuation pattern of the end of the answer, never the student's words) so the cause of a rejection can be read from the logs.
