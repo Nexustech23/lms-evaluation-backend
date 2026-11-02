@@ -199,6 +199,19 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
         if guidelines:
             lines.append(f"- Guidelines: {guidelines}")
 
+        parts = rule.get("parts")
+        if parts:
+            lines.append("- This question has parts. Mark each part separately and return one entry per part in "
+                         "\"parts\" (label, ai_awarded_marks, reasoning). The application sums the counted parts:")
+            for part in parts:
+                note = f" Guidelines: {part['guidelines']}" if part.get("guidelines") else ""
+                lines.append(f"  • Part {part['label']}: maximum {part['maxMarks']:g}.{note}")
+            labels = {i: p["label"] for i, p in enumerate(parts, 1)}
+            for group in rule.get("partGroups") or []:
+                names = ", ".join(labels[q] for q in group["questions"])
+                lines.append(f"- Choice among parts: the student answers {group['answerN']} of parts {names}. "
+                             "Mark every attempted part; the application counts the best answers.")
+
         parameters = rule.get("parameters")
         if parameters:
             lines.append("- Evaluation Parameters:")
@@ -219,7 +232,7 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-GRADING_PROMPT_VERSION = "grading-evidence-v5-choice-groups"
+GRADING_PROMPT_VERSION = "grading-evidence-v6-question-parts"
 GRADING_POLICY = """You are an academic examiner assessing one student's answer sheet against a
 faculty-approved rubric. Produce accurate, evidence-based draft judgments and
 concise feedback. Apply the same academic standard to every question.
@@ -305,6 +318,13 @@ counts the best ones after marking. Mark every attempted question in the group e
 if it were required, mark an unattempted one as unanswered with zero, and do not flag the
 choice or the totals for review on that account. Flag only genuine uncertainty about an
 answer's content, readability or matching.
+A rubric question that lists parts is marked part by part: return one entry in "parts" for every
+listed part, using its exact label, with that part's marks between zero and its maximum and a short
+reasoning naming what was credited or lost. Mark every attempted part as if it were required; an
+unattempted part scores zero. The application chooses which parts count and sums them, so do not
+flag a choice among parts for review. Such a question has no parameters; judge each part against
+its own guidelines. Question-level feedback and improvement still summarise the whole question.
+For a question that lists no parts, return "parts": [].
 For optional groups, include every rubric question and assess visible attempts.
 An unattempted option is unanswered, not incorrect. Do not select first-N or
 best-N attempts, or invent a rule for excess attempts. If selection or counting
@@ -432,6 +452,7 @@ types, not literal strings to return. Empty allocation arrays are allowed.
     "feedback": string,
     "improvement": string,
     "evidence": [string],
+    "parts": [{{"label": string, "ai_awarded_marks": number, "reasoning": string}}],
     "flags": {{
       "incomplete": boolean,
       "irrelevant": boolean,
@@ -665,6 +686,13 @@ def generate_evaluation_report_html(
             f"<td>{p.get('ai_score', 0)}</td><td>{_escape_html(p.get('remarks'))}</td></tr>"
             for p in (q.get("parameters") or [])
         )
+        part_rows = "".join(
+            f"<tr><td>{_escape_html(p.get('label'))}</td>"
+            f"<td>{p.get('ai_awarded_marks', 0)} / {p.get('max_marks', 0)}"
+            f"{' (not counted)' if p.get('counted', True) is False else ''}</td>"
+            f"<td>{_escape_html(p.get('reasoning'))}</td></tr>"
+            for p in (q.get("parts") or [])
+        )
         review_detail = ""
         if q.get("grace_marks") or q.get("review_confirmed"):
             review_detail = (
@@ -679,6 +707,7 @@ def generate_evaluation_report_html(
   <div class="q-badges">{flag_badges}</div>
   <div class="score-bar" style="background:{bar_color};">{q_marks} / {q_max} <span class="pct">({q_pct}%)</span></div>
   {review_detail}
+  {f'<div class="section-label">&#128221; Part-wise Marks</div><table class="param-table"><tr><th>Part</th><th>Marks</th><th>Reasoning</th></tr>{part_rows}</table>' if part_rows else ''}
   {f'<div class="section-label">&#128218; CO-wise Marks</div><table class="co-table"><tr><th>CO Code</th><th>Marks Awarded</th><th>Remarks</th></tr>{co_rows}</table>' if co_rows else ''}
   {f'<div class="section-label">&#128202; Parameter-wise Breakdown</div><table class="param-table"><tr><th>Parameter</th><th>Weight</th><th>Score</th><th>Remarks</th></tr>{param_rows}</table>' if param_rows else ''}
   <div class="callout callout-green"><div class="callout-label">&#128269; Reasoning</div>{_escape_html(q.get('reasoning'))}</div>

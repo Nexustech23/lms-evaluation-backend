@@ -41,3 +41,16 @@ locked once marking starts); use a new exam.
 
 Per-sheet manual override of which answers count, and suggesting groups from the paper text, are separate steps.
 `co_excel` CO attainment still reads every question's CO marks, including answers that do not count.
+
+## Parts inside a question
+
+A question can also carry **parts**, for example Q1 with ten parts of 2 marks. A rubric row gets
+`parts: [{label, maxMarks, guidelines}]` and optional `partGroups` (the same "answer N of these" groups, here
+between parts: "any 10 of 11 parts", or "one of the two (ii) alternatives"). The row's `maxMarks` must equal the
+counted maximum of its parts, and a row with parts has no evaluation parameters (each part has its own guidelines).
+
+The grader returns a mark and a short reasoning for every part (`grading-evidence-v6-question-parts`). The
+application picks the counted parts (best N of each part group, a tie to the earlier part) and sets the question's
+mark to their sum; the AI's own question total is ignored. Course-outcome marks for such a question are allocated
+from the part marks, not by the AI. Part marks are stored on the answer (`parts`) and shown in the report; faculty
+adjust the question total, not individual parts. Rows without parts behave exactly as before.

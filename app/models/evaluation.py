@@ -81,6 +81,14 @@ def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
         "parameters": validated_params,
         "cos": validated_cos,
     }
+    parts = q.get("parts")
+    if parts:
+        from app.services.question_parts import validate_parts
+        if validated_params:
+            raise ValueError("A question with parts cannot also have evaluation parameters; give each part its own guidelines")
+        result["parts"], result["partGroups"] = validate_parts(parts, q.get("partGroups"), max_marks)
+    elif q.get("partGroups"):
+        raise ValueError("partGroups need parts")
     # Optional source identity preserves legacy rubrics while retaining printed
     # labels and exact source blocks on new mapped rubrics used by AI grading.
     for key, limit in (("question_id", 64), ("question_label", 120), ("section", 200), ("question_text", 80000)):
