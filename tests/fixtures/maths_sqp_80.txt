@@ -1,0 +1,345 @@
+SUBJECT: MATHEMATICS (041)
+SAMPLE QUESTION PAPER
+CLASS- XII (2026 - 27)
+Maximum Marks:80
+Time Allowed: 3 Hours
+
+General Instructions:
+Read the following instructions very carefully and strictly follow them:
+1. This question paper contains 38 questions. All questions are compulsory.
+2. This question paper is divided into five Sections - A, B, C, D and E.
+3. In Section A, Question no. 1 to 18 are multiple choice questions (MCQs) and Questions
+no. 19 and 20 are Assertion-Reason based questions of 1 mark each.
+4. In Section B, Question no. 21 to 25 are Very Short Answer (VSA)-type questions, carrying
+2 marks each.
+5. In Section C, Question no. 26 to 31 are Short Answer (SA)-type questions, carrying 3
+marks each.
+6. In Section D, Question no. 32 to 35 are Long Answer (LA)-type questions, carrying 5
+marks each.
+7. In Section E, Question no. 36 to 38 are case study-based questions carrying 4 marks
+each.
+8. There is no overall choice. However, an internal choice has been provided in 2 questions
+in Section B, 3 questions in Section C, 2 questions in Section D and one sub-part each in
+2 questions of Section E.
+9. Draw neat and clean figures wherever required. Take π = 22/7 wherever required, if not
+stated.
+10. Use of calculators is not allowed.
+
+SECTION -A
+(20 x 1 = 20)
+This section comprises of 18 multiple choice questions and two assertion and reason
+type questions of 1 mark each.
+
+Q.No. Questions Marks
+Q1. Identify the function whose graph is given below: 1
+(Graph of a cosine wave shifted)
+(A) cos-1 (x-2)
+(C) π - cos-1 x
+(B) cos-1(2x)
+(D) π + cos-1 x
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 1 of 8
+
+For Visually Impaired:
+Find the range of π/2 + sec-1(x/2)
+(Α) [0, π]
+(Β) [0, π] – {π/2}
+(C) [π/2, 3π/2]
+(D) [π/2, 3π/2] – {π}
+Q2. Domain of the function: sec-1(2x) is 1
+(A) (-∞, ∞)
+(B) (-1, 1)
+(C) (-∞, -1/2] U [1/2, ∞)
+(D) (-∞, -1/2] U [1/2, ∞)
+Q3. Value of cot-1 (2 cos(1/2 sin-1(√3/2))) 1
+(A) π/6
+(B) π/4
+(C) π/3
+(D) π/2
+Q4. If A =
+[2  1 -2]
+[3a 0  4]
+[b  2c 1]
+is a symmetric matrix, then value of √6a + 2b + 3c is: 1
+(A) -2
+(B) 2
+(C) ±2
+(D) 4
+Q5. If P and Q are matrices of same order such that P = [1 2], |Q| = 3, then find |adj(PQ)| 1
+(A) -3
+(B) 1
+(C) 6
+(D) 36
+Q6. If [1 x]
+[1  0]
+[2 -1]
+= 0, then value of x is 1
+(A) -2
+(B) -1
+(C) 1
+(D) 2
+Q7. The derivative of cos-1(2x2 - 1) with respect to cos-1(x) is 1
+(A) 2
+(B) ±1
+(C) 1/2
+(D) -3
+Q8. If a, b, c are arbitrary constants such that the function defined by 1
+f(x) = {ax2 + b, b ≠ 0, x ≤ 1
+         {bx2 + ax + c, x > 1
+is differentiable at x = 1, then which of the
+following could be a triplet for (a, b, c)?
+(A) (3,2,0)
+(B) (0,0,3)
+(C) (3/2, 2,0)
+(D) (3, 3/2, 0)
+Q9. If y = a{x + 2a sin(x/a)}, a > 0, x ∈ [0, πa]; is a decreasing function, then the 1
+interval in which x lies is
+(Α) (5π/6, π]
+(Β) (2π/3, π]
+(C) (5πa/6, πa]
+(D) (2πa/3, πa]
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 2 of 8
+
+Q10. The values of x for which the derivative of the function y = x4 is greater 1
+than the value of the function are
+(A) 0 < x < 4
+(B) 0 < x ≤ 4
+(C) x < 0 or x > 4
+(D) x < 0 or x ≥ 4
+Q11. The degree and order of the differential equation y - x(dy/dx)3 = a(y + d2y/dx2)2 1
+are respectively
+(A) 3,1
+(B) 2,2
+(C) 3,2
+(D) 4,2
+Q12. If ∫dx/(1+e2x) = x − P log(1 + e2x) + C, then 'P' is equal to 1
+(A) 1/2
+(B) -1/2
+(C) 1/3
+(D) 1
+Q13. If vector 2î – uĵ + 3k has magnitude 4, then value of 'u' is 1
+(A) 1
+(B) √2
+(C) ±√3
+(D) ±2
+Q14. Angle made by the vector î + ĵ + √2k with positive direction of z-axis is 1
+(A) π/6
+(B) π/4
+(C) π/3
+(D) π/2
+Q15. A vector perpendicular to the vectors î + ĵ and î – ĵ is 1
+(A) -2ĵ
+(B) 3k
+(C) 2î
+(D) 2î + k
+Q16. The probability that it rains on a particular day is 1/5. Assuming weather 1
+conditions of any two days are independent, find the probability that it rains on
+three consecutive days.
+(A) 4/5
+(B) 1/5
+(C) 1/25
+(D) 1/125
+Q17. A die is thrown twice. What is the probability that at least one number is 4, 1
+given the sum of the numbers appearing is a multiple of 5?
+(A) 3/5
+(B) 4/5
+(C) 3/7
+(D) 4/7
+Q18. A and B are two independent events such that P(A) = 1/6, P(B) = k. If the 1
+probability of occurrence of exactly one of them is 1/3, then find the value of k.
+(A) 1/4
+(B) 2/3
+(C) 3/4
+(D) 5/6
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 3 of 8
+
+Assertion-Reason Based Questions
+Directions: Question numbers 19 and 20 are Assertion and Reason based
+questions carrying 1 mark each. Two statements are given, one labelled
+Assertion (A) and the other labelled Reason (R).
+Select the correct answer from the options (A), (B), (C) and (D) as given
+below:
+(A) Both Assertion (A) and Reason (R) are true and Reason (R) is the correct
+explanation of Assertion (A).
+(B) Both Assertion (A) and Reason (R) are true but Reason (R) is not the correct
+explanation of Assertion (A).
+(C) Assertion (A) is true but Reason (R) is false.
+(D) Assertion (A) is false but Reason (R) is true.
+Q19. Assertion: The value of the integral ∫1/2|x − 2| dx is 4 1
+Reason: If f(-x) = f(x) then ∫-a^a f(x)dx = 2 ∫0^a f(x)dx
+Q20. Assertion: The general solution of a differential equation represents a family 1
+of curves.
+Reason: The derivative of an arbitrary constant is zero.
+
+SECTION -B
+(5 x 2 = 10)
+This section comprises of 5 very short answer (VSA) type questions of 2 marks each
+Q21 (A). Evaluate ∫dx/(x√x6-1) 2
+OR
+Q21 (Β). Evaluate ∫(cos x - sin x)/√sin(2x) dx 2
+Q22. If y = sin(x + y) and dy/dx = 0, then prove that y = ± 1. 2
+Q23 (A). A line passing through the points (2,6,5), and (3, p, 7) is parallel to the line 2
+joining the points (-4,3,4) and (-1,0, q). Find the value of p/q.
+OR
+Q23 (B). A rectangle ABCD is such that AC = u, and BD = v, then find the vectors 2
+representing four sides of the rectangle (in a cyclic order starting from AB).
+Q24. For two non-zero vectors a and b, |a| = √6, a ⋅ b = 1 and b × a = 3î + 4ĵ – 2
+2k. Find |b|.
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 4 of 8
+
+Q25. The feasible region of a linear programming problem is shown in the given 2
+figure:
+(Graph showing feasible region bounded by lines x+2y=6 and 3x+2y=10 in the first quadrant)
+Write all the constraints on the decision variables involved
+For Visually Impaired:
+For a linear programming problem, the maximum value of an objective
+function Z = 3x + 4y exists at the points (p, q) and (2p, q/2). Find the relation
+between p and q.
+
+SECTION -C
+(6 x 3 = 18)
+This section comprises of 6 short answer (SA) type questions of 3 marks each.
+Q26. For two matrices, P =
+[2 0]
+[1 2]
+and Q =
+[1 0]
+[0 1]
+, find PQ and QP, whichever 3
+is defined. Also, find the inverse of the product matrix, if it exists.
+Q27. The circular area of vision on the ground by a surveillance 3
+drone fitted with camera increases at the rate of
+44 m² per metre as it gains vertical height. The radius of
+the circle on the ground increases at the rate of 6 m/s.
+Find the rate at which the height of the drone increases
+with time, at the instant when the radius of the circular
+area on the ground is 14 m. (Use π = 22/7)
+(Image of a drone above a circular area)
+Q28 (A). If x = sin3t, y = cos3t, Evaluate d2y/dx2 at (1/(2√2), 1/(2√2)). 3
+OR
+Q28 (B). If y = xlogx + (logx)x ; x > 1, then evaluate dy/dx. 3
+Q29 (A). Find the particular solution of the differential equation 3
+xdy + (y - x2ex)dx = 0, given that y (1) =0
+OR
+Q29 (B). Find the particular solution of the differential equation (x2 + y2)dy = xydx, 3
+given that y(0) = 1
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 5 of 8
+
+Q30 (A). Find the foot of the perpendicular drawn from the point (2,1,4) on the line 3
+x-2 = (2y+3)/4 = 2 – z. Also find the equation of the line passing through this
+point and the point (2,1,4).
+OR
+Q30 (Β). Find the angle between the lines: (x-1)/2 = (y-1)/2 = (z-2)/1 and (x-5)/2 = y-1 = (3-z)/2. 3
+Also find the cartesian equation of a line passing through the point (1,1,1)
+and perpendicular to both lines.
+Q31. Solve the linear programming problem graphically: 3
+Maximize Z = 40x + 30y
+Subject to constraints: x + y ≤ 6, 2x ≥ y, y ≥ 2
+For Visually Impaired:
+For a linear programming problem, vertices of the feasible region are
+(20,0), (40,0), (30,10), (0,20) and (0,10). Minimize and maximize the objective
+function Z = 50x – 20y
+
+SECTION -D
+(4 x 5 = 20)
+This section comprises of 4 long answer (LA) type questions of 5 marks each.
+Q32 (A). Let A = N × N, where N is the set of natural numbers and a relation R is 5
+defined on A such that (a, b)R(c,d) if and only if a2 + d2 = b2 + c2.
+Check whether R is an equivalence relation or not?
+OR
+Q32 (Β). A relation R: (-∞,∞) → [0,∞) is defined as R = {(x, y): y = x2 + 5} 5
+Draw its graph and check whether it is a function or not.
+If the given relation is a function, then examine whether the function is
+injective, and whether it is surjective or not.
+For Visually Impaired:
+A relation R: (−∞, ∞) → [0, ∞) is defined as R = {(x,y): y = x2 + 7}.
+Check whether it is a function or not. If the given relation is a function, then
+examine whether the function is injective, surjective, or both, and conclude
+whether it is bijective or not.
+Q33. Evaluate ∫-a^a √(a-x)/(a+x) dx 5
+Q34 (A). Using Integration, find the area of the region 5
+{(x, y): 0 ≤ y ≤ √4 – x2, x ≥ 2 – y}.
+OR
+Q34 (B). Using Integration, find the area of the region bounded by the curve 5
+y2 = 2x and the line x – 2y = 0.
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 6 of 8
+
+For Visually Impaired:
+Q34 (A). Using Integration, find the area of the region enclosed within 25x2 + 16y2 = 5
+400
+OR
+Q34 (Β). Using Integration find the area of the region in the first quadrant bounded by 5
+the curve y2 = 8x, and the lines x = 2, x = 5 and x-axis.
+Q35. A fitness app syncs with four types of smartwatches: Alpha, Beta, Gamma 5
+and Delta. 45% of the users use Alpha, 30% use Beta,15% use Gamma and
+10% use Delta.
+Due to device errors, the probabilities of getting a false heart-rate alert from
+the Alpha, Beta, Gamma and Delta smartwatches are respectively 0.01, 0.02,
+0.05, and 0.01.
+Based on the given information, answer the following questions:
+(i) Find the probability that a randomly selected user gets a false alert.
+(ii) If a false alert occurs, what is the probability that it came from a Beta
+smartwatch?
+
+SECTION-E
+(3 x 4 = 12)
+This section comprises of 3 case-study/passage-based questions of 4 marks each with
+sub parts. The first two case study questions have three sub parts (i), (ii), (iii) of marks 1,
+1, 2 respectively. The third case study question has two sub parts of 2 marks each.
+Q36. Two security sensors in a multi-storey mall emit laser beams for movement 4
+detection. Three of these beams travel along the following lines:
+l1: r = (λ + 1)î + (3λ + 2)ĵ + (3 – λ)k and
+l2: r = 2(μ + 1)î + (3μ − 1)ĵ + (μ + 1) k
+l3: r = (γ + 3)î + (3γ − 1)ĵ + (1 − γ) k
+(Image of a multi-storey mall with people)
+Based on the given information, answer the following questions:
+(i) Show that the lines l1 and l2 are not parallel to each other. 1
+(ii) Show that the lines l1 and l3 are parallel to each other. 1
+(iii) (a) Find the shortest distance between the lines l1 and l2. 2
+OR
+(b) Find the shortest distance between the lines l1 and l3. 2
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 7 of 8
+
+Q37. Water is essential for life, and rivers are vital water sources across the world. 4
+The Yamuna Action Plan (YAP), one of India's largest river restoration
+projects, was launched to clean the Yamuna, but its effectiveness (WQI) the
+Water Quality Index must be measured through cost-benefit, economic and
+environmental analysis. Therefore, comprehensive pollutant treatment,
+prevention of further contamination, and community awareness are crucial for
+sustainable river management.
+Implementing the same concept to the river Yamuna, if an initial base line
+WQI is 35, a quadratic expression is formed to measure the impact of
+investment of ₹x crore on the WQI i.e., W(x) as
+W(x) = 35 + 1.6x – 0.02x2, where x is in Rupees in crores
+(Image of a river and bridge)
+Use the given W(x) to answer the following questions:
+(i) Find the value of x at the stationary point for the function W(x). 1
+(ii) Find the maximum value of the WQI using the second derivative 1
+test?
+(iii) (a) If the investment is ₹ 35 crores, find by how much the WQI is 2
+short of its maximum achievable value.
+Or
+(b) Evaluate the WQI when the investment is ₹60 crore. Determine 2
+whether this indicates an enhancement or a diminishing return in
+our objective when compared with the optimum WQI.
+Q38. To celebrate their child's birthday, a family decided to distribute fruits among 4
+children in three orphanages. The fruit vendor packed three different types of
+baskets, according to the quantity required at each orphanage, details are
+given as follows:
+Basket A contains 5 kg Apples, 10 kg Oranges and 5 kg Pomegranate
+Basket B contains 10 kg Apples, 10 kg Oranges and 5kg Pomegranate
+Basket C contains 8 kg Apples, 15 kg Oranges and 7kg Pomegranate
+Cost of basket A, B and C are respectively ₹2750, ₹3500, and ₹4100.
+(Image of a fruit shop)
+Based on the given information, answer the following questions:
+(i) Write the matrix form of the equations involved in this situation and 2
+find the adjoint of the coefficient matrix involved.
+(ii) Using inverse of the matrix, calculate the price of each fruit per kg. 2
+*There is no change in the Question Paper Design and Assessment Pattern for Academic Session 2026-27
+Page 8 of 8

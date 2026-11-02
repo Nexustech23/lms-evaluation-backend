@@ -54,3 +54,19 @@ interrupted job; completed batch artifacts remain available even on failure.
 Responses from failures before this change cannot be recovered if they were not
 saved. This change does not automatically repeat those paid requests. Tests
 mock providers and storage; no paid generations are used for verification.
+
+## Marks printed in awkward layouts (validation v3)
+
+Some papers print marks as a bare digit, a sum (`2+1`), one digit after part I only, or on one
+option of an OR pair. A printed quote cannot prove those, but the paper usually states its marking
+scheme in words ("Section B contains five questions of two marks each", "Question no. 21 to 25
+carry 2 marks each", `SECTION A (16 x 1 = 16)`). `app/services/paper_marks.py` reads that scheme
+(no AI) and attaches `resolved_max_marks` to each question block **only when the whole scheme is
+consistent**: every question is covered, section counts match, the styles agree and the marks add
+up to the printed Maximum Marks. Otherwise nothing changes and the strict printed-quote check applies.
+
+When a block has `resolved_max_marks`, the AI is told to use it. A matching AI value is accepted
+without a printed quote and the row carries `max_source: "paper_scheme"`; a different value sends the
+row to review with the scheme's marks filled in; a missing value is filled from the scheme. An OR
+pair stays one row worth the question's marks. Existing completed drafts are not reused after the
+prompt/validation version change (one fresh generation per paper).
