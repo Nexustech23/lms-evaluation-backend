@@ -154,3 +154,12 @@ def test_installed_sdk_forwards_new_fields_and_streams_without_network(monkeypat
     assert requests[0]["output_config"] == {"effort": "high"}
     assert requests[0]["stream"] is True
     assert text == "{}" and usage["output_tokens"] == 70
+
+
+def test_grading_prompt_asks_for_detailed_reasoning_but_short_feedback():
+    policy = " ".join(grading.GRADING_POLICY.split())
+    assert grading.GRADING_PROMPT_VERSION == "grading-evidence-v4-detailed-reasoning"
+    assert "no sentence limit for reasoning" in policy
+    assert "marks lost" in policy and "marks awarded" in policy
+    assert "Keep feedback and improvement short" in policy
+    assert "briefly links credit" not in policy
