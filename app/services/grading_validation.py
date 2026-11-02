@@ -16,7 +16,7 @@ def equal(a, b):
 
 
 @trace_function('evaluation.validate')
-def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(), review_invalid_evidence=False):
+def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(), review_invalid_evidence=False, groups=()):
     result = deepcopy(result)
     rows = result.get("questionwise_marking")
     if not isinstance(rows, list) or len(rows) != len(rules):
@@ -96,10 +96,17 @@ def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(),
             flag_review(row, "Supporting evidence could not be verified against the extracted answer. Inspect the original answer sheet.")
         row.update(max_marks=maximum, ai_awarded_marks=awarded, final_marks=awarded, grace_marks=0)
     rows.sort(key=lambda q: q["question_no"])
-    rubric_total = sum(number(r["maxMarks"], "maximum") for r in rules)
+    if groups:
+        from app.services.choice_groups import attach_groups, counted_max, counted_sum, reselect_counted
+        attach_groups(rows, groups)
+        reselect_counted(rows)
+        rubric_total = counted_max(rules, groups)
+        total = counted_sum(rows, "ai_awarded_marks")
+    else:
+        rubric_total = sum(number(r["maxMarks"], "maximum") for r in rules)
+        total = sum(q["ai_awarded_marks"] for q in rows)
     if not equal(rubric_total, number(total_marks, "exam maximum")):
         raise validation_error('GRADE_RUBRIC_TOTAL_MISMATCH', "Rubric total does not match exam maximum", field="total_marks")
-    total = sum(q["ai_awarded_marks"] for q in rows)
     result["summary"] = {"total_ai_marks": round(total, 2), "total_max_marks": rubric_total,
         "questions_total": len(rows), "questions_attempted": sum(not q["flags"].get("unanswered", False) for q in rows)}
     return result

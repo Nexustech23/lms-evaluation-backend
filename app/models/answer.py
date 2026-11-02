@@ -79,7 +79,7 @@ def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
     if "cos" in q and q["cos"]:
         validated_cos = _validate_cos(q["cos"], max_marks)
 
-    return {
+    validated = {
         "question_no": question_no,
         "max_marks": max_marks,
         "ai_awarded_marks": ai_awarded,
@@ -92,6 +92,12 @@ def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
         "improvement": q.get("improvement"),
         "flags": q.get("flags", {}),
     }
+    group = q.get("choice_group")
+    if isinstance(group, dict) and isinstance(group.get("id"), str) and isinstance(group.get("answer_n"), int):
+        validated["choice_group"] = {"id": group["id"], "answer_n": group["answer_n"]}
+        if isinstance(q.get("counted"), bool):
+            validated["counted"] = q["counted"]
+    return validated
 
 
 def validate_questionwise(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -191,9 +197,10 @@ def update_answer_evaluation_document(data: Dict[str, Any]) -> Dict[str, Any]:
         questionwise = validate_questionwise(data["questionwise_marking"])
         update_fields["questionwise_marking"] = questionwise
 
-        update_fields["total_final_marks"] = sum(q["final_marks"] for q in questionwise)
-        update_fields["total_ai_marks"] = sum(q["ai_awarded_marks"] for q in questionwise)
-        update_fields["total_max_marks"] = sum(q["max_marks"] for q in questionwise)
+        from app.services.choice_groups import counted_sum
+        update_fields["total_final_marks"] = counted_sum(questionwise, "final_marks")
+        update_fields["total_ai_marks"] = counted_sum(questionwise, "ai_awarded_marks")
+        update_fields["total_max_marks"] = counted_sum(questionwise, "max_marks")
         update_fields["evaluated_at"] = datetime.now(timezone.utc)
 
     if "token_usage" in data:

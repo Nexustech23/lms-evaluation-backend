@@ -5,7 +5,7 @@ from pymongo.errors import PyMongoError
 from bson import ObjectId
 
 
-async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=None):
+async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=None, choice_groups=None):
     from app.services.paper_version import paper_snapshot_filter
     query = {"_id": exam["_id"], "faculty_id": exam["faculty_id"],
         "covered_cos": exam.get("covered_cos"), "paper_locked": {"$ne": True},
@@ -25,7 +25,8 @@ async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=Non
         now = datetime.now(timezone.utc)
         await db["evaluationDetails"].update_one(
             {"exam_id": exam["_id"], "faculty_id": ObjectId(str(exam["faculty_id"]))},
-            {"$set": {"questionEvaluationDetails": details, "totalMarks": total_marks, "updated_at": now,
+            {"$set": {"questionEvaluationDetails": details, "totalMarks": total_marks,
+                       "choiceGroups": choice_groups or [], "updated_at": now,
                        "suggestion_source_id": suggestion_source_id},
              "$setOnInsert": {"created_at": now}}, upsert=True, session=session)
     try:

@@ -158,7 +158,7 @@ def test_installed_sdk_forwards_new_fields_and_streams_without_network(monkeypat
 
 def test_grading_prompt_asks_for_detailed_reasoning_but_short_feedback():
     policy = " ".join(grading.GRADING_POLICY.split())
-    assert grading.GRADING_PROMPT_VERSION == "grading-evidence-v4-detailed-reasoning"
+    assert grading.GRADING_PROMPT_VERSION == "grading-evidence-v5-choice-groups"
     assert "no sentence limit for reasoning" in policy
     assert "marks lost" in policy and "marks awarded" in policy
     assert "Keep feedback and improvement short" in policy
