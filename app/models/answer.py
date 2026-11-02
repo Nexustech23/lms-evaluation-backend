@@ -51,6 +51,27 @@ def _validate_cos(cos_list: List[Dict[str, Any]], question_max_marks: float):
     return validated
 
 
+def _validate_part_marking(part: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(part, dict):
+        raise ValueError("Each part marking must be an object")
+    label = part.get("label")
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("Each part marking needs a label")
+    max_marks = float(part["max_marks"])
+    awarded = float(part.get("ai_awarded_marks", 0))
+    if max_marks <= 0 or awarded < 0 or awarded > max_marks + 1e-9:
+        raise ValueError("Part marks must be between zero and the part maximum")
+    result = {"part_no": int(part.get("part_no", 0)), "label": label.strip(), "max_marks": max_marks,
+              "ai_awarded_marks": awarded,
+              "reasoning": part["reasoning"] if isinstance(part.get("reasoning"), str) else ""}
+    group = part.get("choice_group")
+    if isinstance(group, dict) and isinstance(group.get("id"), str) and isinstance(group.get("answer_n"), int):
+        result["choice_group"] = {"id": group["id"], "answer_n": group["answer_n"]}
+        if isinstance(part.get("counted"), bool):
+            result["counted"] = part["counted"]
+    return result
+
+
 def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
     for field in ["question_no", "max_marks"]:
         if field not in q:
@@ -92,6 +113,8 @@ def _validate_question(q: Dict[str, Any]) -> Dict[str, Any]:
         "improvement": q.get("improvement"),
         "flags": q.get("flags", {}),
     }
+    if isinstance(q.get("parts"), list) and q["parts"]:
+        validated["parts"] = [_validate_part_marking(p) for p in q["parts"]]
     group = q.get("choice_group")
     if isinstance(group, dict) and isinstance(group.get("id"), str) and isinstance(group.get("answer_n"), int):
         validated["choice_group"] = {"id": group["id"], "answer_n": group["answer_n"]}

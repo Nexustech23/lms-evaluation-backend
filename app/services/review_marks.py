@@ -116,8 +116,10 @@ def validate_review_marks(submitted, answer):
         q["flags"] = {**original.get("flags", {}), "needs_review": bool(original.get("flags", {}).get("needs_review") and not q["review_confirmed"])}
         if q["final_marks"] > 0:
             q["flags"]["unanswered"] = False
-        if original.get("choice_group"):
-            q["choice_group"] = original["choice_group"]
+        if original.get("choice_group"):
+            q["choice_group"] = original["choice_group"]
+        if original.get("parts"):
+            q["parts"] = original["parts"]          # part marks are the AI's; faculty adjust the question total
     from app.services.choice_groups import counted_sum, reselect_counted
     reselect_counted(validated)
     total = counted_sum(validated, "final_marks")

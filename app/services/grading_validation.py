@@ -15,6 +15,29 @@ def equal(a, b):
     return math.isclose(a, b, rel_tol=0, abs_tol=1e-6)
 
 
+def _apply_parts(row, rule, n):
+    """A question with parts: its mark is the sum of the counted parts, computed here, not by the AI."""
+    from app.services.question_parts import mark_parts
+    try:
+        stored, awarded = mark_parts(rule["parts"], rule.get("partGroups") or [], row.get("parts"))
+    except ValueError as exc:
+        raise validation_error('GRADE_PARTS_INVALID', f"Question {n}: {exc}", question_no=n, field="parts")
+    row["parts"] = stored
+    row["ai_awarded_marks"] = awarded
+    flags = row.get("flags")
+    if isinstance(flags, dict) and awarded > 0:
+        flags["unanswered"] = False
+    row["parameters"] = []                      # a question with parts has no parameters (each part has guidelines)
+    cos = rule.get("cos") or []
+    if cos:
+        from app.services.manual_marks import allocate_co_marks
+        allocated = {c["co_code"]: c for c in allocate_co_marks(awarded, cos)}
+        row["cos"] = [{"co_code": c["co_code"], "ai_marks": allocated.get(c["co_code"], {}).get("ai_marks", 0.0),
+                       "max_marks": c["marks"], "remarks": "Allocated from the part marks"} for c in cos]
+    else:
+        row["cos"] = []
+
+
 @trace_function('evaluation.validate')
 def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(), review_invalid_evidence=False, groups=()):
     result = deepcopy(result)
@@ -29,6 +52,8 @@ def validate_grading(result, rules, total_marks, answer_text, *, trusted_mcq=(),
         seen.add(n); n = int(n); row["question_no"] = n
         rule = rules[n - 1]
         maximum = number(rule["maxMarks"], "rubric maximum", question_no=n)
+        if rule.get("parts"):
+            _apply_parts(row, rule, n)
         if not equal(number(row.get("max_marks"), "max_marks", question_no=n), maximum):
             raise validation_error('GRADE_MAXIMUM_MISMATCH', f"Question {n}: maximum does not match approved rubric", question_no=n, field="max_marks")
         awarded = number(row.get("ai_awarded_marks"), "awarded marks", question_no=n)
