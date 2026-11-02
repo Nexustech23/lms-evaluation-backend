@@ -198,8 +198,12 @@ async def save_evaluation_details(
                     raise HTTPException(409, "Question mapping changed. Reload the current suggestions.")
                 row[key] = block[key]
             row["question_text"] = block["text"]
-    await commit_rubric(db, exam, validated_details, total_marks, choice_groups=choice_groups,
-                       **({"suggestion_source_id": payload.suggestion_source_id} if payload.suggestion_source_id else {}))
+    extra = {}
+    if payload.suggestion_source_id:
+        extra["suggestion_source_id"] = payload.suggestion_source_id
+    if choice_groups:
+        extra["choice_groups"] = choice_groups      # omitted => commit_rubric stores no groups
+    await commit_rubric(db, exam, validated_details, total_marks, **extra)
 
     return {
         "success": True,

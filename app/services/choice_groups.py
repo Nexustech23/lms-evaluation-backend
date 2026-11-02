@@ -10,8 +10,6 @@ Rubric document field `choiceGroups`: [{"id": "g1", "questions": [4, 5], "answer
 where `questions` are 1-based rubric row numbers. Every row of a group must carry the same
 maximum, so a group's counted maximum is answerN x that maximum. Pure functions, no I/O.
 """
-import math
-
 RULE_BEST = "best"
 
 
@@ -120,6 +118,6 @@ def counted_sum(questions, field):
             value = q.get(field)
             if value is None and field == "final_marks":
                 value = q.get("ai_awarded_marks", 0)
-            if value is not None and math.isfinite(float(value)):
-                total += float(value)
+            if value is not None:
+                total += float(value)    # a non-finite value must still surface, as with a plain sum
     return total
