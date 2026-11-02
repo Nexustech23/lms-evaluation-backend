@@ -25,3 +25,13 @@ Transcript generation has its own model constant (`claude-sonnet-4-5`) and retai
 Migration reference: [Anthropic's Sonnet 5.5 migration guide](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide).
 
 Offline verification: `tests/test_grading_model_config.py` covers request configuration, transcript separation, SDK request serialization/stream parsing, thinking-block filtering, usage preservation and rejection of incomplete output. Network connections are blocked and provider responses are mocked. These checks do not measure grading accuracy or verify live API behavior.
+
+## Detailed reasoning (grading-evidence-v4-detailed-reasoning)
+
+The grading prompt now asks for a per-question breakdown in `reasoning`: for each part or criterion, what the student wrote, whether it is correct and why, the marks awarded and the marks lost. The sentence limits apply to `feedback` and `improvement` only, which stay short. The JSON contract, `max_tokens=90000` and the effort level are unchanged. Longer reasoning increases output tokens (estimated 30-50% more per sheet). Results saved earlier keep `grading-evidence-v3`; only new evaluations use the new prompt.
+
+## Image resolution for OCR
+
+Scanned answer pages are sent to Gemini as they were scanned (typically about 100 dpi). The application does not resample them, and code cannot add detail that is not in a scan. `GEMINI_OCR_MEDIA_RESOLUTION` (default `high`) asks Gemini to read each page at higher image detail, about 4x the tokens per page of the default. It read handwritten maths better in testing. Set it to `default` to restore the old behaviour.
+
+Question papers are typed PDFs, so `PAPER_EXTRACT_RENDER_DPI` (default `0`, off: the PDF is sent as before) can render each page to an image at that dpi, for example `300`, and read it at high resolution. It is off by default because rendering at the default resolution produced worse text in testing. Enable it on the server with `PAPER_EXTRACT_RENDER_DPI=300` and check a few papers against their PDFs. Rescanning answer sheets at 200-300 dpi remains the best way to improve handwriting accuracy.

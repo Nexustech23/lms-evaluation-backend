@@ -116,7 +116,11 @@ def validate_review_marks(submitted, answer):
         q["flags"] = {**original.get("flags", {}), "needs_review": bool(original.get("flags", {}).get("needs_review") and not q["review_confirmed"])}
         if q["final_marks"] > 0:
             q["flags"]["unanswered"] = False
-    total = sum(q["final_marks"] for q in validated)
+        if original.get("choice_group"):
+            q["choice_group"] = original["choice_group"]
+    from app.services.choice_groups import counted_sum, reselect_counted
+    reselect_counted(validated)
+    total = counted_sum(validated, "final_marks")
     if not math.isfinite(total):
         raise validation_error('REVIEW_TOTAL_NOT_FINITE', "Final total must be finite")
     maximum = answer.get("total_max_marks")

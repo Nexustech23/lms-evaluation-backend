@@ -26,8 +26,26 @@ def pending_review(answer):
         q.get("flags", {}).get("needs_review") for q in answer.get("questionwise_marking", []))
 
 
+UNREADABLE_REVIEW_REASON = "Some answer text is unreadable. Check this question against the original sheet."
+
+
+def answer_text_review_reason(answer_text, extraction_issue=False):
+    """Why every question needs review because of the sheet's OCR text, or None.
+
+    Only a genuine reading problem qualifies. A paper that merely offers a choice
+    ("answer any 2", "OR") does not: that says nothing about whether any single
+    question was graded wrongly, so it must not put a review flag on every question.
+    """
+    if extraction_issue or "[UNREADABLE" in (answer_text or "").upper():
+        return UNREADABLE_REVIEW_REASON
+    return None
+
+
 def choice_review_required(paper_text):
-    """No hidden selection policy: ambiguous optional groups require faculty review."""
+    """No hidden selection policy: ambiguous optional groups require faculty review.
+
+    No longer used to flag every question (see answer_text_review_reason). Kept for the
+    planned choice-group support, which will decide counting explicitly instead."""
     import re
     if re.search(r"(?i)\b(?:attempt|answer)\s+any\b|\beither\b", paper_text) or re.search(r"(?m)^\s*OR\s*$", paper_text):
         return True

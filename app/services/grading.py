@@ -17,6 +17,7 @@ import io
 import PyPDF2
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.config import settings
 from app.services.claude import generate_text
 from app.services.gemini import generate_content_from_file_checked
 
@@ -140,7 +141,8 @@ def extract_answer_text_with_gemini(
             writer = PyPDF2.PdfWriter(); writer.add_page(page)
             buffer = io.BytesIO(); writer.write(buffer)
             page_text, page_usage, truncated = generate_content_from_file_checked(
-                buffer.getvalue(), "application/pdf", prompt + f"\nThis is page {index} of {len(reader.pages)}. End with PAGE_COMPLETE.", model=GEMINI_OCR_MODEL)
+                buffer.getvalue(), "application/pdf", prompt + f"\nThis is page {index} of {len(reader.pages)}. End with PAGE_COMPLETE.", model=GEMINI_OCR_MODEL,
+                media_resolution=settings.GEMINI_OCR_MEDIA_RESOLUTION)
             calls.append(page_usage)
             usage = {key: sum(u.get(key, 0) for u in calls) for key in ("prompt_tokens", "candidate_tokens", "total_tokens")}
             usage.update(page_count=len(reader.pages), pages_processed=index,
@@ -188,6 +190,10 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
             lines.append(f"- Stable source ID: {rule.get('question_id', '')}")
             lines.append(f"- Mapped question text: {json.dumps(rule.get('question_text', ''), ensure_ascii=False)}")
         lines.append(f"- Maximum marks: {rule.get('maxMarks', 0)}. Zero is valid when no credit is demonstrated.")
+        group = rule.get("choice_group")
+        if group:
+            lines.append(f"- Choice group {group['id']}: the student answers {group['answer_n']} of this group's questions. "
+                         "Mark this question if it was attempted; the application counts the best answers.")
 
         guidelines = rule.get("guidelines")
         if guidelines:
@@ -213,7 +219,7 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-GRADING_PROMPT_VERSION = "grading-evidence-v3"
+GRADING_PROMPT_VERSION = "grading-evidence-v5-choice-groups"
 GRADING_POLICY = """You are an academic examiner assessing one student's answer sheet against a
 faculty-approved rubric. Produce accurate, evidence-based draft judgments and
 concise feedback. Apply the same academic standard to every question.
@@ -293,6 +299,12 @@ allocation is provisional, not a confirmed failure. If no credit is verifiable,
 use zero with review required; never describe that as a confirmed blank answer.
 This numeric contract cannot express an unknown score; publication is the
 application's responsibility, not something a review flag can enforce.
+A rubric question that states a Choice group has an explicit selection policy supplied
+by the faculty: the student answers only some of the group's questions and the application
+counts the best ones after marking. Mark every attempted question in the group exactly as
+if it were required, mark an unattempted one as unanswered with zero, and do not flag the
+choice or the totals for review on that account. Flag only genuine uncertainty about an
+answer's content, readability or matching.
 For optional groups, include every rubric question and assess visible attempts.
 An unattempted option is unanswered, not incorrect. Do not select first-N or
 best-N attempts, or invent a rule for excess attempts. If selection or counting
@@ -324,13 +336,18 @@ OUTPUT
 Return only the requested JSON object. Include every rubric question exactly
 once in rubric order, using its integer rubric index as question_no. Populate
 every required field and all five boolean flags. Do not add fields or markdown.
-Reasoning briefly links credit and important lost credit to approved criteria;
-give no private chain-of-thought. Feedback describes performance; improvement
-gives a specific next step, or an empty string when none is needed. For up to
-2 marks use one short sentence per field; for more than 2 and up to 5 use up to
-two; above 5 use up to three only if needed. Parameter and CO remarks are short
-phrases. For review cases state uncertainty clearly, even if this needs a longer
-sentence. Never let brevity hide a material problem.
+Reasoning is a detailed, auditable breakdown of how the question's marks were
+decided; give no private chain-of-thought. Go through each part, sub-question,
+item or criterion in order and state: what the student wrote (short quotation
+or description), whether it is correct and why, the marks awarded, and the marks
+lost with the specific missing or incorrect content. End with the total for the
+question and any uncertainty, unreadable content or matching assumption. Use as
+much length as the question needs; there is no sentence limit for reasoning.
+Do not pad with generalities or repeat the question. Feedback describes
+performance; improvement gives a specific next step, or an empty string when none
+is needed. Keep feedback and improvement short: one or two sentences each.
+Parameter and CO remarks are short phrases. For review cases state uncertainty
+clearly. Never let brevity hide a material problem.
 Before returning, check question coverage, matching, evidence, caps, allocation
 sums, flags and summary arithmetic. Correct mistakes without changing the rubric.
 """
@@ -589,7 +606,7 @@ def generate_evaluation_report_html(
         value = item.get(final_field)
         return item.get(ai_field, 0) if value is None else value
 
-    total_ai_marks = round(sum(final_score(q) for q in questions), 2)
+    total_ai_marks = round(sum(final_score(q) for q in questions if q.get("counted", True) is not False), 2)
     max_marks = total_max_marks if total_max_marks is not None else summary.get("total_max_marks", 0)
     percentage = round((total_ai_marks / max_marks) * 100, 2) if max_marks else 0
     grade = _grade_letter(percentage)
@@ -607,6 +624,8 @@ def generate_evaluation_report_html(
         status_text, status_fg, status_bg = _status_label(flags)
         if legacy_pending and flags.get("needs_review"):
             status_text, status_fg, status_bg = "Faculty review required", "#92400e", "#fef3c7"
+        if q.get("counted", True) is False:
+            status_text, status_fg, status_bg = "Not counted (choice)", "#6b7280", "#f3f4f6"
         summary_rows.append(f"""
 <tr>
   <td>{q.get('question_no', '')}</td>
@@ -626,6 +645,7 @@ def generate_evaluation_report_html(
                 ("Incomplete", "&#9888;", flags.get("incomplete")),
                 ("Irrelevant", "&#8960;", flags.get("irrelevant")),
                 ("Repetitive", "&#8635;", flags.get("repetitive")),
+                ("Not counted (choice)", "&#9711;", q.get("counted", True) is False),
             ]
             if on
         )

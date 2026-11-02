@@ -99,7 +99,7 @@ def validate_evaluation_details(details: List[Dict[str, Any]]) -> List[Dict[str,
     return [_validate_question(q) for q in details]
 
 
-def _validate_total_marks(total_marks: Any, questions: List[Dict[str, Any]]) -> float:
+def _validate_total_marks(total_marks: Any, questions: List[Dict[str, Any]], groups: List[Dict[str, Any]] | None = None) -> float:
     if total_marks is None:
         raise ValueError("totalMarks is required")
 
@@ -107,9 +107,15 @@ def _validate_total_marks(total_marks: Any, questions: List[Dict[str, Any]]) -> 
     if total_marks <= 0:
         raise ValueError("totalMarks must be greater than 0")
 
-    sum_of_questions = sum(q["maxMarks"] for q in questions)
+    if groups:
+        from app.services.choice_groups import counted_max
+        sum_of_questions = counted_max(questions, groups)
+        message = "Required questions plus the counted marks of each choice group must equal totalMarks"
+    else:
+        sum_of_questions = sum(q["maxMarks"] for q in questions)
+        message = "Sum of question maxMarks must equal totalMarks"
     if not math.isclose(sum_of_questions, total_marks, rel_tol=0, abs_tol=1e-7):
-        raise ValueError("Sum of question maxMarks must equal totalMarks")
+        raise ValueError(message)
 
     return total_marks
 
@@ -125,7 +131,9 @@ def create_evaluation_detail_document(data: Dict[str, Any]) -> Dict[str, Any]:
     if not exam_id or not ObjectId.is_valid(exam_id):
         raise ValueError("Valid exam_id is required")
 
-    total_marks = _validate_total_marks(data.get("totalMarks"), evaluation_details)
+    from app.services.choice_groups import validate_groups
+    groups = validate_groups(data.get("choiceGroups"), evaluation_details)
+    total_marks = _validate_total_marks(data.get("totalMarks"), evaluation_details, groups)
     now = datetime.now(timezone.utc)
 
     return {
@@ -133,6 +141,7 @@ def create_evaluation_detail_document(data: Dict[str, Any]) -> Dict[str, Any]:
         "exam_id": ObjectId(exam_id),
         "totalMarks": total_marks,
         "questionEvaluationDetails": evaluation_details,
+        "choiceGroups": groups,
         "created_at": now,
         "updated_at": now,
     }
@@ -150,7 +159,10 @@ def update_evaluation_detail_document(data: Dict[str, Any]) -> Dict[str, Any]:
         questions_for_validation = (
             evaluation_details if evaluation_details is not None else data.get("questionEvaluationDetails", [])
         )
-        update_fields["totalMarks"] = _validate_total_marks(data["totalMarks"], questions_for_validation)
+        from app.services.choice_groups import validate_groups
+        groups = validate_groups(data.get("choiceGroups"), questions_for_validation)
+        update_fields["totalMarks"] = _validate_total_marks(data["totalMarks"], questions_for_validation, groups)
+        update_fields["choiceGroups"] = groups
 
     if "faculty_id" in data:
         if not ObjectId.is_valid(data["faculty_id"]):
@@ -175,6 +187,7 @@ def serialize_evaluation_detail(doc: Dict[str, Any]) -> Dict[str, Any] | None:
         "exam_id": str(doc.get("exam_id")) if doc.get("exam_id") else None,
         "totalMarks": doc.get("totalMarks"),
         "questionEvaluationDetails": doc.get("questionEvaluationDetails"),
+        "choiceGroups": doc.get("choiceGroups") or [],
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }

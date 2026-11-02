@@ -29,6 +29,22 @@ from app.utils.net import safe_get
 _client: genai.Client | None = None
 
 
+def _media_resolution_config(level):
+    """GenerateContentConfig for Gemini's image-detail setting; None keeps the model default."""
+    if not level or level == "default":
+        return None
+    return genai_types.GenerateContentConfig(
+        media_resolution=getattr(genai_types.MediaResolution, f"MEDIA_RESOLUTION_{level.upper()}"))
+
+
+def _render_pdf_pages(file_bytes: bytes, dpi: int) -> list:
+    """Render every PDF page to a PNG image part (typed papers are vector, so this adds real detail)."""
+    import pymupdf
+    document = pymupdf.open(stream=file_bytes, filetype="pdf")
+    return [genai_types.Part.from_bytes(data=page.get_pixmap(dpi=dpi).tobytes("png"), mime_type="image/png")
+            for page in document]
+
+
 def _get_client() -> genai.Client:
     """Lazy singleton — avoids failing app startup when GEMINI_API_KEY isn't set yet."""
     global _client
@@ -233,8 +249,14 @@ def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "
     client = _get_client()
 
     if ext == "pdf":
-        pdf_part = genai_types.Part.from_bytes(data=file_bytes, mime_type="application/pdf")
-        response = client.models.generate_content(model="gemini-2.5-flash", contents=[pdf_part, _GEMINI_PDF_PROMPT])
+        dpi = settings.PAPER_EXTRACT_RENDER_DPI
+        if dpi > 0:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=_render_pdf_pages(file_bytes, dpi) + [_GEMINI_PDF_PROMPT],
+                config=_media_resolution_config("high"))
+        else:
+            pdf_part = genai_types.Part.from_bytes(data=file_bytes, mime_type="application/pdf")
+            response = client.models.generate_content(model="gemini-2.5-flash", contents=[pdf_part, _GEMINI_PDF_PROMPT])
         text = ""
         try:
             text = response.text.strip()
@@ -395,7 +417,8 @@ def _response_hit_token_cap(response) -> bool:
 
 
 def generate_content_from_file_checked(
-    file_bytes: bytes, mime_type: str, prompt: str, model: str = "gemini-2.5-flash"
+    file_bytes: bytes, mime_type: str, prompt: str, model: str = "gemini-2.5-flash",
+    media_resolution: str | None = None,
 ) -> Tuple[str, dict, bool]:
     """
     Same as generate_content_from_file, plus a third return value reporting
@@ -409,7 +432,8 @@ def generate_content_from_file_checked(
     """
     client = _get_client()
     file_part = genai_types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-    response = _call_generate_content_with_retry(client, model, [file_part, prompt])
+    response = _call_generate_content_with_retry(client, model, [file_part, prompt],
+                                                 config=_media_resolution_config(media_resolution))
 
     text = ""
     try:
