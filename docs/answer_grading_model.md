@@ -25,3 +25,7 @@ Transcript generation has its own model constant (`claude-sonnet-4-5`) and retai
 Migration reference: [Anthropic's Sonnet 5.5 migration guide](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide).
 
 Offline verification: `tests/test_grading_model_config.py` covers request configuration, transcript separation, SDK request serialization/stream parsing, thinking-block filtering, usage preservation and rejection of incomplete output. Network connections are blocked and provider responses are mocked. These checks do not measure grading accuracy or verify live API behavior.
+
+## Detailed reasoning (grading-evidence-v4-detailed-reasoning)
+
+The grading prompt now asks for a per-question breakdown in `reasoning`: for each part or criterion, what the student wrote, whether it is correct and why, the marks awarded and the marks lost. The sentence limits apply to `feedback` and `improvement` only, which stay short. The JSON contract, `max_tokens=90000` and the effort level are unchanged. Longer reasoning increases output tokens (estimated 30-50% more per sheet). Results saved earlier keep `grading-evidence-v3`; only new evaluations use the new prompt.

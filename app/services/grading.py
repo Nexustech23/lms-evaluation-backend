@@ -213,7 +213,7 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-GRADING_PROMPT_VERSION = "grading-evidence-v3"
+GRADING_PROMPT_VERSION = "grading-evidence-v4-detailed-reasoning"
 GRADING_POLICY = """You are an academic examiner assessing one student's answer sheet against a
 faculty-approved rubric. Produce accurate, evidence-based draft judgments and
 concise feedback. Apply the same academic standard to every question.
@@ -324,13 +324,18 @@ OUTPUT
 Return only the requested JSON object. Include every rubric question exactly
 once in rubric order, using its integer rubric index as question_no. Populate
 every required field and all five boolean flags. Do not add fields or markdown.
-Reasoning briefly links credit and important lost credit to approved criteria;
-give no private chain-of-thought. Feedback describes performance; improvement
-gives a specific next step, or an empty string when none is needed. For up to
-2 marks use one short sentence per field; for more than 2 and up to 5 use up to
-two; above 5 use up to three only if needed. Parameter and CO remarks are short
-phrases. For review cases state uncertainty clearly, even if this needs a longer
-sentence. Never let brevity hide a material problem.
+Reasoning is a detailed, auditable breakdown of how the question's marks were
+decided; give no private chain-of-thought. Go through each part, sub-question,
+item or criterion in order and state: what the student wrote (short quotation
+or description), whether it is correct and why, the marks awarded, and the marks
+lost with the specific missing or incorrect content. End with the total for the
+question and any uncertainty, unreadable content or matching assumption. Use as
+much length as the question needs; there is no sentence limit for reasoning.
+Do not pad with generalities or repeat the question. Feedback describes
+performance; improvement gives a specific next step, or an empty string when none
+is needed. Keep feedback and improvement short: one or two sentences each.
+Parameter and CO remarks are short phrases. For review cases state uncertainty
+clearly. Never let brevity hide a material problem.
 Before returning, check question coverage, matching, evidence, caps, allocation
 sums, flags and summary arithmetic. Correct mistakes without changing the rubric.
 """
