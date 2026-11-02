@@ -224,7 +224,7 @@ def test_extract_answer_text_with_gemini_prompt_includes_option_wording(monkeypa
 
     captured = {}
 
-    def fake_generate_content_from_file(pdf_bytes, mime_type, prompt, model=None):
+    def fake_generate_content_from_file(pdf_bytes, mime_type, prompt, model=None, media_resolution=None):
         captured["prompt"] = prompt
         return "OCR text\nPAGE_COMPLETE", {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}, False
 
@@ -246,7 +246,7 @@ def test_extract_answer_text_with_gemini_omits_mcq_block_when_no_options(monkeyp
 
     captured = {}
 
-    def fake_generate_content_from_file(pdf_bytes, mime_type, prompt, model=None):
+    def fake_generate_content_from_file(pdf_bytes, mime_type, prompt, model=None, media_resolution=None):
         captured["prompt"] = prompt
         return "OCR text\nPAGE_COMPLETE", {"prompt_tokens": 1, "candidate_tokens": 1, "total_tokens": 2}, False
 

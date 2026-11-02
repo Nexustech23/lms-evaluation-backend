@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     USD_TO_INR_RATE: float = 88.0
 
     GEMINI_API_KEY: str = ""
+    # Image detail Gemini uses when reading scanned pages. "high" uses roughly 4x the tokens per
+    # page of the default and read small handwriting and maths symbols better in testing.
+    GEMINI_OCR_MEDIA_RESOLUTION: Literal["default", "low", "medium", "high"] = "high"
+    # Question-paper extraction. 0 = send the PDF as is (the original behaviour). A value above 0
+    # renders each page to an image at that dpi (typed papers are vector, so more dpi = more detail)
+    # and sends the images at high resolution. Off until verified against real papers.
+    PAPER_EXTRACT_RENDER_DPI: int = 0
     IMAGEKIT_PUBLIC_KEY: str = ""
     IMAGEKIT_PRIVATE_KEY: str = ""
     IMAGEKIT_URL_ENDPOINT: str = ""
