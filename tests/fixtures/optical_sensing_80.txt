@@ -1,0 +1,57 @@
+Ex/TIU/ESA/Sem-1//2025-26
+M. Sc. Geospatial Science, 1st Year END SEMESTER (AUTUMN) EXAMINATIONS, 2025-2026
+Subject Name: Optical Remote Sensing and Ground Truthing
+Subject Code: TIU-PGS-T105
+Full Marks:80 Time Allotted: 3 hours
+The figures in the right margin indicate full marks.
+Candidates are required to give their answer in their own words as far as applicable.
+Unless otherwise specified, the notations / symbols have their usual meanings.
+Use of non-programmable calculator is allowed.
+Group-A
+1.Answer any 10 questions.  Each question carries 2 marks.
+i)Write the bandwidths of photographic infrared and green bands. K2CO1
+ii)Which elements are responsible for atmospheric scattering? K1CO1
+iii)Explain specular reflector. K2CO1
+iv)What do you understand by orbital time and geosynchronous orbit. K2CO2
+v)Write two types of aerial camera. K1CO3
+vi)Define temporal resolution. K4CO2
+vii)Write the spatial resolutions of Landsat TM optical and thermal bands. K1CO5
+viii)Explain the function of magenta filter. K3CO3
+ix)
+OR
+x)What is pixel?
+What do you understand by photograph?K2
+K2CO4
+CO4
+xi)What is NIR? K1CO3
+Group- B
+Answer any 6 questions. Each question carries 5 marks.
+2)
+OR
+3)Explain radiometric resolution in the context of discriminating power.
+OR
+Explain spectral resolution in detail.K4
+K4CO2
+CO2
+Page 1 of 2
+Ex/TIU/ESA/Sem-1//2025-26
+4)Briefly discuss along track scanning with proper illustration. K4CO4
+5)Explain the basic concept of aerial panoramic camera.  K2CO3
+6)Explain the relationship between focal length, ground coverage, and level  
+of detail.K4CO3
+7)Compare panchromatic, multispectral, and hyperspectral imaging in the  
+light of spectral and spatial details.K5CO2
+8)Give the sensor specifications of Landsat 8. K1CO5
+Group C
+Answer any 3 questions. Each question carries 10 marks.  
+9)Explain the entire process of optical remote sensing from Aerial platform  
+with proper illustration.K4CO3
+10)
+OR
+11)Derive the relationship between energy and wavelength mathematically.
+OR
+Derive the relationship between frequency and wavelength.K2
+K2CO1
+CO1
+12)Explain image acquisition using detector strips. K4CO4
+Page 2 of 2

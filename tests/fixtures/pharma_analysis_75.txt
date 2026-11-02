@@ -1,0 +1,171 @@
+Ex/TIU/ESA/Sem-E//2025
+Page 1 of 4 B. PHARM, 1st YR. 1st SEM END SEMESTER EXAMINATIONS ( ATUMN), 2025-26
+ Subject Name: -  Pharmaceutical Analysis-I - Theory
+ Subject Code: TIU-UBP-102T
+Full Marks:75 Time Allotted: 3 hours
+The figures in the right margin indicate full marks.
+Candidates are required to give their answer in their own words as far as applicable.
+Unless otherwise specified, the notations / symbols have their usual meanings.
+Use of non-programmable calculator is allowed.
+KCO1CO2CO3CO4CO5Total Marks
+K139356  26
+K2511900  25
+K365830 22
+K4100300  13
+K570000  7
+K634000  7
+Group-A
+1.Answer all questions.  Each question carries 1 mark. MarksCO   K
+i)Which one of the following can be used as both reference and indicator  
+electrode?
+       A   Hydrogen
+       B   Glass
+       C   Platinum
+       D Calomel1CO2   K1
+ii)What is the advantage of Volhard method?
+a)Very clear colour change
+b)Sample method
+c)Capability for different pH
+d)Must be 1M nitric acid solution1CO2   K1
+iii)Acid-base titration indicator-
+A. Methyl orange
+B.  Phenolphthalein
+C.  Both a) & b)
+D.  None1CO2   K1
+iv)Error that can be identified is known as-
+A.  Determinate error
+B.  Instrumental error
+C.  Both a) & b)
+D.  None of these1CO1   K1
+v).  Limit test for chloride experiment precipitate obtained
+A.  Sodium nitrate
+B.  Silver sulphate
+C.  Silver chloride
+D.  Sodium sulphate1CO1   K1
+Ex/TIU/ESA/Sem-E//2025
+Page 2 of 4vi)Lewis acids are
+A.   Proton donor
+B.   Electron donor
+C.   Proton acceptor
+D.   Electron acceptor1CO1   K1
+vii)Which of the following is a common oxidizing agent in redox 
+titrations?
+a) Sodium thiosulfate
+b) Potassium permanganate
+c) Sodium hydroxide
+d) Hydrochloric acid1CO4   K3
+viii)Example of Redox titration
+A. Potassium permanganate against arsenic trioxide
+B.  Potassium permanganate against sodium thiosulphate
+C.  Iodine against trioxide
+D.  All of them1CO4   K1
+ix)  In the electrochemical cell reduction takes place at
+A    Anode
+B   Cathode
+C    Salt bridge
+D    Depending upon potential applying1CO4   K1
+x)Ilkovic equation is related to
+A.Limiting current
+B.Half wave potential
+C.Diffusion potential
+D.Migration current1CO5   K1
+xi)Potassium permanganate acts as a
+a) Reducing agent
+b) Complexing agent
+c) Oxidizing agent
+d) Buffer1CO4   K1
+xii)25 mL of ferrous ammonium sulphate requires 20 mL of 0.1 N KMnO₄,  
+the normality of ferrous ammonium sulphate solution is
+a) 0.05 N
+b) 0.08 N
+c) 0.10 N
+d) 0.125 N1CO4   K3
+xiii)The general formula of disodium EDTA is
+a) Na₂EDTA
+b) Na₂H₂EDTA·2H₂O
+c) H₄EDTA
+d) CaEDTA1CO3   K1
+Ex/TIU/ESA/Sem-E//2025
+Page 3 of 4xiv)In iodometric titration, starch is added near the end point because
+a) It oxidizes iodine
+b) The iodine–starch complex is unstable at high iodine concentration
+c) It acts as a reducing agent
+d) It increases reaction rate1CO4   K3
+xv)How many grams of NaCl are required to prepare 250 mL of 0.2 M 
+NaCl solution?
+a) 1.17 g
+b) 2.34 g
+c) 2.93 g
+d) 5.85 g1CO1   K3
+xvi)The main purpose of using non-aqueous titration is to
+a) Increase solubility of salts
+b) Titrate weak acids or bases that are not titratable in water
+c) Reduce titration time
+d) Avoid indicators1CO2   K1
+xvii)Oxidation is defined as
+a) Gain of electrons
+b) Loss of electrons
+c) Gain of protons
+d) Loss of protons1CO4   K1
+xviii
+)Potassium permanganate is considered a self-indicator because
+a) It changes pH
+b) It forms a precipitate
+c) Its colour indicates the end point
+d) It requires starch1CO4   K1
+xix)In gravimetric analysis, the analyte is generally converted into a
+a) Gas
+b) Colloidal solution
+c) Stable precipitate
+d) Complex ion1CO3   K1
+xx)The precipitating agent in sulphate estimation by gravimetry is
+a) Silver nitrate
+b) Barium chloride
+c) Sodium hydroxide
+d) Hydrochloric acid1CO3   K1
+Group- B (Long Answer Questions )
+(Answer any two of the following questions)                      2 × 10 = 20 CO   K
+2)What are the basic requirements of a precipitation titration? What is 
+levelling effect? Explain in detail about the titration curves of i) Strong 
+acid vs strong base, ii) Weak acid vs strong base. Mention the indicators 
+used for the both titration.2+2+
+3+3CO3K2K
+3K4
+3)What is Lewis base and acid? Give example. What is Henderson–
+Hasselbalch equation?  Explain about amphiprotic solvent with example.1+5+
+4CO2K2
+K1
+Ex/TIU/ESA/Sem-E//2025
+Page 4 of 4K6
+4)Discuss about primary and secondary standard. Write a note on Indian  
+Pharmacopoeia.5+5CO1K2K
+3K4
+Group C
+Answer any seven questions. Each question carries 5 marks. CO   K
+5)Illustrate the iikovic equation. 5CO2K3
+6)Describe  the  construction  and  working  of  Dropping  mercury  
+electrode.5CO3K2
+7)Describe  the  principle  of  conductometric  titration.  Write  the  
+applications and types of graphs used in conductometric titrations.1+2+2CO5K1
+8)A  solution  of  sulphuric  acid  contains  9.8  g  of  H₂SO₄  per  litre.
+Calculate:
+1.Normality of the solution
+2.Molarity of the solution
+3.Volume of this solution required to neutralize 25 mL of 0.5 N  
+sodium hydroxide1.5+1.5
++2CO1K5
+9) Define accuracy and precision and distinguish between them 5CO1K4
+10)Explain the steps involved in the estimation of calcium ions in a  
+given sample using EDTA titration.5CO3K3
+11)Explain  the  principle  of  gravimetric  analysis.
+Describe the steps involved in gravimetric estimation, including:
+Precipitation
+Digestion
+Filtration
+Washing
+Drying and ignition2+3CO3K2
+12)Explain the different types of gravimetric methods. 5CO3K2
+13)Critically evaluate the different types of errors encountered in 
+pharmaceutical analysis.
+Assess the sources and methods of minimization of errors.2+3CO1K5
+K6
