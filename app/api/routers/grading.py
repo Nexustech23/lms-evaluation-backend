@@ -48,7 +48,7 @@ from app.services.paper_version import paper_snapshot_filter
 from app.services.exam_paper_lock import lock_exam_for_marks
 from app.services.result_revision import update_answer_result
 from app.services.grading_validation import validate_grading
-from app.services.evaluation_review import OPTIONAL_REVIEW_POLICY, flag_review, review_count, choice_review_required
+from app.services.evaluation_review import OPTIONAL_REVIEW_POLICY, flag_review, review_count, answer_text_review_reason
 from app.services.grading import GRADING_PROMPT_VERSION, split_answer_pdf
 from app.services.pdf_render import render_html_to_pdf
 from app.models.ai_usage_event import Feature, Provider
@@ -296,12 +296,13 @@ async def _run_evaluation_job(
         )
         grading_json = validate_grading(grading_json, evaluation_rules, eval_total_marks, answer_text,
             trusted_mcq={int(n) for n in mcq_answer_key}, review_invalid_evidence=True)
-        if extraction_issue or "[UNREADABLE" in answer_text.upper() or choice_review_required(question_text):
+        reading_review_reason = answer_text_review_reason(answer_text, extraction_issue)
+        if reading_review_reason:
             log_event("evaluation.path",job_id=job_id,
-                      reason_code="OCR_EXTRACTION_ISSUE" if extraction_issue else "UNREADABLE_TEXT_MARKER" if "[UNREADABLE" in answer_text.upper() else "OPTIONAL_CHOICE_POLICY",
+                      reason_code="OCR_EXTRACTION_ISSUE" if extraction_issue else "UNREADABLE_TEXT_MARKER",
                       outcome="optional_review_flagged")
             for q in grading_json["questionwise_marking"]:
-                flag_review(q, "Check unreadable content or the paper's optional-question selection policy.")
+                flag_review(q, reading_review_reason)
         grading_json["review_policy"] = OPTIONAL_REVIEW_POLICY
         pending_questions = review_count(grading_json["questionwise_marking"])
         if mcq_override_count:
