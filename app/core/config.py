@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     USD_TO_INR_RATE: float = 88.0
 
     GEMINI_API_KEY: str = ""
+    # Model that reads a question paper into text (one call per upload). Change it in .env to try
+    # another Gemini model; it must have a price in app/utils/ai_pricing.py to be costed.
+    GEMINI_PAPER_MODEL: str = "gemini-3.1-flash-lite"
     # Image detail Gemini uses when reading scanned pages. "high" uses roughly 4x the tokens per
     # page of the default and read small handwriting and maths symbols better in testing.
     GEMINI_OCR_MEDIA_RESOLUTION: Literal["default", "low", "medium", "high"] = "high"

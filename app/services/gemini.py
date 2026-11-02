@@ -252,11 +252,11 @@ def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "
         dpi = settings.PAPER_EXTRACT_RENDER_DPI
         if dpi > 0:
             response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=_render_pdf_pages(file_bytes, dpi) + [_GEMINI_PDF_PROMPT],
+                model=settings.GEMINI_PAPER_MODEL, contents=_render_pdf_pages(file_bytes, dpi) + [_GEMINI_PDF_PROMPT],
                 config=_media_resolution_config("high"))
         else:
             pdf_part = genai_types.Part.from_bytes(data=file_bytes, mime_type="application/pdf")
-            response = client.models.generate_content(model="gemini-2.5-flash", contents=[pdf_part, _GEMINI_PDF_PROMPT])
+            response = client.models.generate_content(model=settings.GEMINI_PAPER_MODEL, contents=[pdf_part, _GEMINI_PDF_PROMPT])
         text = ""
         try:
             text = response.text.strip()
@@ -270,7 +270,7 @@ def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "
         return "", {"prompt_tokens": 0, "candidate_tokens": 0, "total_tokens": 0, "call_status": "skipped"}
 
     user_content = f"{_GEMINI_TEXT_PROMPT}\n\n---\n\n{raw_text}"
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=[user_content])
+    response = client.models.generate_content(model=settings.GEMINI_PAPER_MODEL, contents=[user_content])
     text = ""
     try:
         text = response.text.strip()
@@ -491,7 +491,7 @@ async def extract_and_patch_question_paper_text(
 
         extracted_text, token_usage = await tracked_faculty_call(
             db, extract_question_paper_text_with_gemini, file_bytes, filename,
-            faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+            faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model=settings.GEMINI_PAPER_MODEL,
             feature=Feature.EXAM_QUESTION_PAPER_EXTRACTION,
         )
 
