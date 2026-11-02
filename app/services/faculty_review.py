@@ -36,8 +36,10 @@ async def publish_faculty_review(db, exam, answer, questions, identity, revision
     log_event("report.refresh_started",answer_id=str(answer["_id"]),exam_id=str(exam["_id"]),
               target_revision=current_revision+1,source="faculty_review")
     now = datetime.now(timezone.utc)
-    total = round(sum(q["final_marks"] for q in questions), 2)
-    maximum = answer.get("total_max_marks") or sum(q["max_marks"] for q in questions)
+    from app.services.choice_groups import counted_sum, reselect_counted
+    reselect_counted(questions)
+    total = round(counted_sum(questions, "final_marks"), 2)
+    maximum = answer.get("total_max_marks") or counted_sum(questions, "max_marks")
     html = generate_evaluation_report_html({"questionwise_marking": questions,
         "review_policy": OPTIONAL_REVIEW_POLICY, "faculty_reviewed": True,
         "summary": {"total_max_marks": maximum}}, answer.get("student_name") or "Student", maximum)

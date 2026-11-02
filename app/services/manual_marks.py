@@ -5,6 +5,7 @@ from fractions import Fraction
 from app.models.answer import validate_questionwise
 from app.models.evaluation import validate_evaluation_details, _validate_total_marks
 from app.models.exam_validation import finite_number
+from app.services.choice_groups import attach_groups, counted_sum, reselect_counted, validate_groups
 
 
 def allocate_co_marks(awarded, cos):
@@ -36,8 +37,10 @@ def prepare_manual_marks(payload, evaluation):
     questions = evaluation.get("questionEvaluationDetails") if evaluation else None
     if questions:
         questions = validate_evaluation_details(questions)
-        maximum = _validate_total_marks(evaluation.get("totalMarks"), questions)
+        groups = validate_groups(evaluation.get("choiceGroups"), questions)
+        maximum = _validate_total_marks(evaluation.get("totalMarks"), questions, groups)
     else:
+        groups = []
         maximum = finite_number(payload.max_marks, "max_marks")
         if maximum <= 0:
             raise ValueError("max_marks must be greater than zero")
@@ -71,7 +74,9 @@ def prepare_manual_marks(payload, evaluation):
                     "ai_awarded_marks": awarded, "grace_marks": 0,
                     "cos": allocate_co_marks(awarded, question["cos"])})
             marking = validate_questionwise(marking)
-            total = sum(q["final_marks"] for q in marking)
+            attach_groups(marking, groups)
+            reselect_counted(marking)
+            total = counted_sum(marking, "final_marks")
         else:
             total = finite_number(entry.get("marks"), "marks")
             if not 0 <= total <= maximum:

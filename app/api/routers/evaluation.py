@@ -167,7 +167,9 @@ async def save_evaluation_details(
 
     try:
         validated_details = validate_evaluation_details(payload.questionEvaluationDetails)
-        total_marks = _validate_total_marks(total_marks, validated_details)
+        from app.services.choice_groups import validate_groups
+        choice_groups = validate_groups(payload.choiceGroups, validated_details)
+        total_marks = _validate_total_marks(total_marks, validated_details, choice_groups)
         covered_cos = set(covered_co_list(exam.get("covered_cos")))
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e) or "questionEvaluationDetails is invalid")
@@ -196,7 +198,7 @@ async def save_evaluation_details(
                     raise HTTPException(409, "Question mapping changed. Reload the current suggestions.")
                 row[key] = block[key]
             row["question_text"] = block["text"]
-    await commit_rubric(db, exam, validated_details, total_marks,
+    await commit_rubric(db, exam, validated_details, total_marks, choice_groups=choice_groups,
                        **({"suggestion_source_id": payload.suggestion_source_id} if payload.suggestion_source_id else {}))
 
     return {
@@ -204,4 +206,5 @@ async def save_evaluation_details(
         "message": "Evaluation details saved successfully",
         "totalMarks": total_marks,
         "questionEvaluationDetails": validated_details,
+        "choiceGroups": choice_groups,
     }
