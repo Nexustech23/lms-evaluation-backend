@@ -17,6 +17,7 @@ import io
 import PyPDF2
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.config import settings
 from app.services.claude import generate_text
 from app.services.gemini import generate_content_from_file_checked
 
@@ -140,7 +141,8 @@ def extract_answer_text_with_gemini(
             writer = PyPDF2.PdfWriter(); writer.add_page(page)
             buffer = io.BytesIO(); writer.write(buffer)
             page_text, page_usage, truncated = generate_content_from_file_checked(
-                buffer.getvalue(), "application/pdf", prompt + f"\nThis is page {index} of {len(reader.pages)}. End with PAGE_COMPLETE.", model=GEMINI_OCR_MODEL)
+                buffer.getvalue(), "application/pdf", prompt + f"\nThis is page {index} of {len(reader.pages)}. End with PAGE_COMPLETE.", model=GEMINI_OCR_MODEL,
+                media_resolution=settings.GEMINI_OCR_MEDIA_RESOLUTION)
             calls.append(page_usage)
             usage = {key: sum(u.get(key, 0) for u in calls) for key in ("prompt_tokens", "candidate_tokens", "total_tokens")}
             usage.update(page_count=len(reader.pages), pages_processed=index,
