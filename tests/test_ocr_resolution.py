@@ -89,3 +89,23 @@ def test_answer_ocr_requests_the_configured_resolution(monkeypatch):
     monkeypatch.setattr(settings, "GEMINI_OCR_MEDIA_RESOLUTION", "high")
     grading_module.extract_answer_text_with_gemini(buffer.getvalue())
     assert seen["resolution"] == "high"
+
+
+def test_paper_extraction_uses_the_configured_model_for_every_input_type(monkeypatch):
+    monkeypatch.setattr(settings, "GEMINI_PAPER_MODEL", "model-under-test")
+    monkeypatch.setattr(settings, "PAPER_EXTRACT_RENDER_DPI", 0)
+    client = MagicMock(); client.models.generate_content.return_value = _response("paper")
+    monkeypatch.setattr(gemini, "_get_client", lambda: client)
+    gemini.extract_question_paper_text_with_gemini(b"%PDF", "paper.pdf")
+    monkeypatch.setattr(settings, "PAPER_EXTRACT_RENDER_DPI", 300)
+    monkeypatch.setattr(gemini, "_render_pdf_pages", MagicMock(return_value=["page"]))
+    gemini.extract_question_paper_text_with_gemini(b"%PDF", "paper.pdf")
+    monkeypatch.setattr(gemini, "extract_text_from_file", lambda data, name: "typed text")
+    gemini.extract_question_paper_text_with_gemini(b"x", "paper.docx")
+    assert [c.kwargs["model"] for c in client.models.generate_content.call_args_list] == ["model-under-test"] * 3
+
+
+def test_paper_model_defaults_to_flash_lite_and_has_a_price():
+    from app.utils.ai_pricing import _PRICES
+    assert settings.GEMINI_PAPER_MODEL == "gemini-3.1-flash-lite"
+    assert settings.GEMINI_PAPER_MODEL in _PRICES
