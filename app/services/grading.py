@@ -262,7 +262,7 @@ def build_grading_rubric(evaluation_rules: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-GRADING_PROMPT_VERSION = "grading-evidence-v6-question-parts"
+GRADING_PROMPT_VERSION = "grading-evidence-v7-feedback-length"
 GRADING_POLICY = """You are an academic examiner assessing one student's answer sheet against a
 faculty-approved rubric. Produce accurate, evidence-based draft judgments and
 concise feedback. Apply the same academic standard to every question.
@@ -393,10 +393,14 @@ or description), whether it is correct and why, the marks awarded, and the marks
 lost with the specific missing or incorrect content. End with the total for the
 question and any uncertainty, unreadable content or matching assumption. Use as
 much length as the question needs; there is no sentence limit for reasoning.
-Do not pad with generalities or repeat the question. Feedback describes
-performance; improvement gives a specific next step, or an empty string when none
-is needed. Keep feedback and improvement short: one or two sentences each.
-Parameter and CO remarks are short phrases. For review cases state uncertainty
+Do not pad with generalities or repeat the question. Feedback describes how the
+student performed on this question and improvement tells them what to do next. Give
+each as much as this question needs to be useful and no more: no fixed number of
+sentences. Feedback names what was right and what was missing or wrong; improvement
+names the specific topics, steps or points to revise or practise, not generic advice.
+A simple question may need one sentence, a longer or multi-part question several, and
+a question with parts may name the weakest parts. A fully correct answer needs only
+brief praise and an empty improvement. Parameter and CO remarks are short phrases. For review cases state uncertainty
 clearly. Never let brevity hide a material problem.
 Before returning, check question coverage, matching, evidence, caps, allocation
 sums, flags and summary arithmetic. Correct mistakes without changing the rubric.
