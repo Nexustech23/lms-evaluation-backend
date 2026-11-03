@@ -43,3 +43,7 @@ The model that reads a question paper into text is `GEMINI_PAPER_MODEL` (default
 ## Page-complete marker
 
 Each answer page is read by one Gemini call that must end with `PAGE_COMPLETE`, which proves the page was not cut off. A page whose answer lacks the marker used to fail the whole sheet ("Answer extraction is incomplete. No new official marks were saved"). Now small format differences are accepted (case, `PAGE COMPLETE`, a full stop, bold or code marks around the marker), a missing marker is retried once, and only a second miss rejects the sheet. A page reported as cut off (max tokens) is still rejected at once. Both attempts' tokens are recorded. The `ocr.decision` log events (`retrying` / `rejected_incomplete`) carry `attempt`, `text_length`, `marker_anywhere` and `tail_shape` (the punctuation pattern of the end of the answer, never the student's words) so the cause of a rejection can be read from the logs.
+
+## Feedback and improvement length (`grading-evidence-v7-feedback-length`)
+
+`feedback` and `improvement` no longer have a fixed one-or-two-sentence limit. Each is as long as the question needs to be useful and no longer: feedback names what was right and what was missing or wrong, improvement names the specific topics or steps to revise (a question with parts may name its weakest parts), and a fully correct answer gets brief praise with an empty improvement. `reasoning` is unchanged. Longer text means somewhat more output tokens per sheet. Sheets evaluated earlier keep their old text; re-evaluate to get the new wording.
