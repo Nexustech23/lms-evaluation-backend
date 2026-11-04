@@ -473,6 +473,22 @@ async def test_suggestion_save_attaches_verified_source_labels_and_text(isolated
     assert (await s.client.post(s.url.replace("/suggestions", ""), json=payload)).status_code == 409
 
 
+@pytest.mark.parametrize("sent,stored", [("step_marking", "step_marking"), ("standard", "standard"), (None, None)])
+async def test_rubric_save_passes_the_marking_technique_to_the_commit(isolated, monkeypatch, sent, stored):
+    s = isolated
+    seen = {}
+    async def capture(db, exam, details, total_marks, **kwargs): seen.update(kwargs)
+    monkeypatch.setattr(evaluation, "commit_rubric", capture)
+    payload = {"totalMarks": 5, "questionEvaluationDetails": [
+        {"minMarks": 0, "maxMarks": n, "parameters": [], "cos": []} for n in (2, 3)]}
+    if sent: payload["markingTechnique"] = sent
+    response = await s.client.post(s.url.replace("/suggestions", ""), json=payload)
+    assert response.status_code == 200 and response.json()["markingTechnique"] == stored
+    assert seen.get("marking_technique") == stored
+    payload["markingTechnique"] = "generous"
+    assert (await s.client.post(s.url.replace("/suggestions", ""), json=payload)).status_code == 422
+
+
 async def test_mapping_from_old_paper_is_not_reused_after_text_change(isolated):
     from app.services.question_mapping import source_key
     s = isolated

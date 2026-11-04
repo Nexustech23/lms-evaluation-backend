@@ -196,6 +196,7 @@ def serialize_evaluation_detail(doc: Dict[str, Any]) -> Dict[str, Any] | None:
         "totalMarks": doc.get("totalMarks"),
         "questionEvaluationDetails": doc.get("questionEvaluationDetails"),
         "choiceGroups": doc.get("choiceGroups") or [],
+        "markingTechnique": doc.get("markingTechnique") or "standard",
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }

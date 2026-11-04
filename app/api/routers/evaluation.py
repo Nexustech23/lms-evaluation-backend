@@ -216,6 +216,8 @@ async def save_evaluation_details(
         extra["suggestion_source_id"] = payload.suggestion_source_id
     if choice_groups:
         extra["choice_groups"] = choice_groups      # omitted => commit_rubric stores no groups
+    if payload.markingTechnique:
+        extra["marking_technique"] = payload.markingTechnique   # omitted => the exam keeps its current technique
     await commit_rubric(db, exam, validated_details, total_marks, **extra)
 
     return {
@@ -224,4 +226,5 @@ async def save_evaluation_details(
         "totalMarks": total_marks,
         "questionEvaluationDetails": validated_details,
         "choiceGroups": choice_groups,
+        "markingTechnique": payload.markingTechnique,
     }
