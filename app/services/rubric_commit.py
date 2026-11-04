@@ -5,7 +5,8 @@ from pymongo.errors import PyMongoError
 from bson import ObjectId
 
 
-async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=None, choice_groups=None):
+async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=None, choice_groups=None,
+                        marking_technique=None):
     from app.services.paper_version import paper_snapshot_filter
     query = {"_id": exam["_id"], "faculty_id": exam["faculty_id"],
         "covered_cos": exam.get("covered_cos"), "paper_locked": {"$ne": True},
@@ -23,12 +24,17 @@ async def commit_rubric(db, exam, details, total_marks, suggestion_source_id=Non
         if result.matched_count != 1:
             raise HTTPException(409, "Rubric is locked or the exam changed. Refresh before editing.")
         now = datetime.now(timezone.utc)
+        changes = {"questionEvaluationDetails": details, "totalMarks": total_marks,
+                   "choiceGroups": choice_groups or [], "updated_at": now,
+                   "suggestion_source_id": suggestion_source_id}
+        on_insert = {"created_at": now}
+        if marking_technique:
+            changes["markingTechnique"] = marking_technique
+        else:
+            on_insert["markingTechnique"] = "standard"      # an existing exam keeps what it has
         await db["evaluationDetails"].update_one(
             {"exam_id": exam["_id"], "faculty_id": ObjectId(str(exam["faculty_id"]))},
-            {"$set": {"questionEvaluationDetails": details, "totalMarks": total_marks,
-                       "choiceGroups": choice_groups or [], "updated_at": now,
-                       "suggestion_source_id": suggestion_source_id},
-             "$setOnInsert": {"created_at": now}}, upsert=True, session=session)
+            {"$set": changes, "$setOnInsert": on_insert}, upsert=True, session=session)
     try:
         async with await db.client.start_session() as session:
             await session.with_transaction(save)

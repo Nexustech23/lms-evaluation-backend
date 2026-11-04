@@ -159,6 +159,7 @@ async def _run_evaluation_job(
         evaluation_doc = await db["evaluationDetails"].find_one({"exam_id": exam_object_id})
         evaluation_rules = (evaluation_doc or {}).get("questionEvaluationDetails", [])
         choice_groups = (evaluation_doc or {}).get("choiceGroups") or []
+        marking_technique = (evaluation_doc or {}).get("markingTechnique") or "standard"
         if not evaluation_rules:
             await _fail(job_id, "No evaluation rules found for this exam")
             return
@@ -260,7 +261,7 @@ async def _run_evaluation_job(
             raise RuntimeError("Answer extraction is incomplete. No new official marks were saved; upload a readable answer sheet before retrying.")
         elif generate_transcript_pdf:
             (grading_result_raw, grade_claude_tokens), (transcript_html, transcript_claude_tokens) = await asyncio.gather(
-                claude_step(grade_with_claude, question_text, answer_text, evaluation_rules,
+                claude_step(grade_with_claude, question_text, answer_text, evaluation_rules, marking_technique,
                             feature=Feature.GRADING_ANSWER_EVALUATION),
                 claude_step(generate_transcript_html_with_claude, answer_text, student_name,
                             feature=Feature.GRADING_TRANSCRIPT_GENERATION),
@@ -268,7 +269,7 @@ async def _run_evaluation_job(
             claude_calls = [grade_claude_tokens, transcript_claude_tokens]
         else:
             grading_result_raw, grade_claude_tokens = await claude_step(
-                grade_with_claude, question_text, answer_text, evaluation_rules,
+                grade_with_claude, question_text, answer_text, evaluation_rules, marking_technique,
                 feature=Feature.GRADING_ANSWER_EVALUATION,
             )
             transcript_html = None
@@ -412,6 +413,7 @@ async def _run_evaluation_job(
                 "report_is_draft": False,
                 "co": co_results_per_question,
                 "prompt_version": GRADING_PROMPT_VERSION,
+                "marking_technique": marking_technique,
                 "rubric_revision": exam.get("rubric_revision"),
                 "paper_version": (exam.get("question_paper") or {}).get("version"),
                 "ocr_page_count": ans_gemini_tokens.get("page_count"),

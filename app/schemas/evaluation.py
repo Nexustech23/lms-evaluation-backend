@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -12,6 +12,8 @@ class SaveEvaluationDetailsRequest(BaseModel):
     questionEvaluationDetails: List[Dict[str, Any]] = Field(min_length=1)
     totalMarks: float = Field(gt=0, allow_inf_nan=False)
     choiceGroups: List[Dict[str, Any]] | None = None
+    # "standard" (default) or "step_marking"; left out => keep what the exam already has.
+    markingTechnique: Literal["standard", "step_marking"] | None = None
     suggestion_source_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @field_validator("totalMarks", mode="before")

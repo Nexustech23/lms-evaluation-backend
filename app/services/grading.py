@@ -406,6 +406,46 @@ Before returning, check question coverage, matching, evidence, caps, allocation
 sums, flags and summary arithmetic. Correct mistakes without changing the rubric.
 """
 
+MARKING_TECHNIQUES = ("standard", "step_marking")
+
+# Appended to the system policy only when the faculty chose this technique for the exam. Choosing it
+# is the explicit approved rule that the base policy asks for before awarding attempt or carried credit.
+STEP_MARKING_POLICY = """
+MARKING TECHNIQUE: BALANCED UNIVERSITY-STYLE STEP MARKING
+The faculty chose this technique for this exam. It is the approved marking rule that
+authorizes the step, method, carried-forward and attempt credit below, and it replaces
+the base instruction not to award attempt credit or carried-forward credit. Everything
+else in this policy still applies.
+1. Mark by steps. Split each question, or each part, into the steps its rubric guidelines
+   and criteria imply (for example method, working, result). Credit each correct step on
+   its own. A wrong final answer does not remove the marks of correct earlier steps.
+2. Method marks. Valid method or working earns its share of the marks even when the final
+   answer, a calculation or a diagram is wrong.
+3. Error carried forward. If an earlier step is wrong but a later step is correct from the
+   student's own earlier result, credit the later step. Say in the reasoning that it was
+   credited as carried forward.
+4. Relevant attempt. A relevant attempt that shows the right topic or some correct idea earns
+   credit in proportion to how much is correct, and never more than half of the marks of
+   that part or question when its main content is wrong. A relevant but wrong attempt may
+   therefore earn a small mark; a blank, copied or irrelevant answer earns zero.
+5. Do not deduct for spelling, grammar or handwriting, or for wording that differs from the
+   textbook when the meaning is right.
+6. Never exceed the maximum of a question, part or parameter, follow any marking increment
+   the rubric states, and do not credit work that cannot be read or matched: flag it for
+   review instead. Positive scores still need quoted student evidence.
+7. A rubric guideline for a specific question or part is more specific than this technique.
+   Where it states a score level for a case, follow the guideline.
+"""
+
+
+def grading_system_policy(marking_technique: str | None = None) -> str:
+    """The system policy for an exam; the standard technique is the unchanged base policy."""
+    technique = marking_technique or "standard"
+    if technique not in MARKING_TECHNIQUES:
+        raise ValueError(f"marking technique must be one of {', '.join(MARKING_TECHNIQUES)}")
+    return GRADING_POLICY + STEP_MARKING_POLICY if technique == "step_marking" else GRADING_POLICY
+
+
 _GRADING_PROMPT_TEMPLATE = """DOCUMENT EVIDENCE
 QUESTION PAPER (JSON string):
 {question_text}
@@ -499,7 +539,8 @@ types, not literal strings to return. Empty allocation arrays are allowed.
 """
 
 
-def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: List[Dict[str, Any]],
+                      marking_technique: str | None = None) -> Tuple[str, Dict[str, Any]]:
     """
     Blocking — run via asyncio.to_thread().
     Never raises — matches Flask's behavior of returning an error string + empty
@@ -510,12 +551,13 @@ def grade_with_claude(question_text: str, answer_text: str, evaluation_rules: Li
         answer_text=json.dumps(answer_text), rubric=json.dumps(rubric))
 
     try:
+        policy = grading_system_policy(marking_technique)
         # Sonnet 5.5 shares this output budget between adaptive thinking and JSON.
         # Explicit effort avoids relying on provider defaults; the wrapper streams
         # the response and rejects truncation before returning a grading result.
         text, usage = generate_text(
             prompt, model=CLAUDE_GRADING_MODEL, max_tokens=CLAUDE_GRADING_MAX_TOKENS,
-            system=GRADING_POLICY, effort=CLAUDE_GRADING_EFFORT,
+            system=policy, effort=CLAUDE_GRADING_EFFORT,
         )
         return text, {
             **usage,
