@@ -60,7 +60,7 @@ def test_the_log_records_the_shape_of_an_unreadable_reply_not_its_words(monkeypa
 
 
 def test_the_paper_cap_is_raised_and_used_for_the_paper_call():
-    assert question_paper.PAPER_MAX_OUTPUT_TOKENS == 30000
+    assert question_paper.PAPER_MAX_OUTPUT_TOKENS == 50000
     assert "PAPER_MAX_OUTPUT_TOKENS" in inspect.getsource(question_paper._run_generation_job)
 
 
@@ -141,3 +141,50 @@ def test_the_paper_is_written_by_sonnet_5_5_and_billed_at_its_price():
     source = inspect.getsource(question_paper._run_generation_job)
     assert source.count("PAPER_MODEL") >= 4 and "claude-sonnet-4-6" not in source  # the paper and its check both use it
     assert "claude-sonnet-5-5" in PRICES
+
+
+def stream_client(monkeypatch):
+    """Fake client that records whether the reply was streamed or requested in one piece."""
+    calls = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_final_message(self):
+            return OK
+
+    def stream(**request):
+        calls.append(("stream", request))
+        return Stream()
+
+    def create(**request):
+        calls.append(("create", request))
+        return OK
+
+    monkeypatch.setattr(claude, "_get_client", lambda: SimpleNamespace(messages=SimpleNamespace(stream=stream, create=create)))
+    return calls
+
+
+@pytest.mark.parametrize("max_tokens,expected", [(8000, "create"), (16000, "create"), (20000, "create"), (20001, "stream"), (50000, "stream")])
+def test_a_very_large_reply_is_streamed_and_a_normal_one_is_not(monkeypatch, max_tokens, expected):
+    calls = stream_client(monkeypatch)
+    text, _ = claude.generate_text("prompt", max_tokens=max_tokens)
+    assert text == "hello" and [kind for kind, _ in calls] == [expected]
+    assert calls[0][1]["max_tokens"] == max_tokens and "extra_body" not in calls[0][1]  # no thinking option is added
+
+
+def test_the_paper_cap_is_streamed(monkeypatch):
+    calls = stream_client(monkeypatch)
+    claude.generate_text("prompt", question_paper.PAPER_MODEL, question_paper.PAPER_MAX_OUTPUT_TOKENS)
+    assert calls[0][0] == "stream" and question_paper.PAPER_MAX_OUTPUT_TOKENS == 50000
+
+
+def test_a_requested_thinking_effort_still_streams_with_its_options(monkeypatch):
+    calls = stream_client(monkeypatch)
+    claude.generate_text("prompt", max_tokens=8000, effort="medium")
+    kind, request = calls[0]
+    assert kind == "stream" and request["extra_body"]["output_config"] == {"effort": "medium"}
