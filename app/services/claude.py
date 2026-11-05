@@ -14,6 +14,8 @@ _client: anthropic.Anthropic | None = None
 # A request that never reached the provider (no connection could be made) costs nothing and is safe
 # to repeat. Timeouts and dropped responses are not retried: the provider may already have billed them.
 CONNECT_RETRIES = 2
+# A reply this long takes minutes; stream it so the connection never sits silent and idle.
+STREAM_ABOVE_TOKENS = 20000
 CONNECT_RETRY_DELAY_SECONDS = 2
 
 
@@ -148,8 +150,9 @@ def generate_text(
                 "output_config": {"effort": effort},
             }
 
+        if effort is not None or max_tokens > STREAM_ABOVE_TOKENS:
             def send():
-                # Avoid a long non-streaming request for thinking + large JSON output.
+                # Avoid a long non-streaming request for thinking or a very large reply.
                 with _get_client().messages.stream(**request) as stream:
                     return stream.get_final_message()
         else:

@@ -64,7 +64,7 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["question
 
 QP_JOB_PREFIX = "qp_job:"
 # The structured paper needs more room than plain text did; a paper cut off at the cap is rejected.
-PAPER_MAX_OUTPUT_TOKENS = 30000
+PAPER_MAX_OUTPUT_TOKENS = 50000
 # The model that writes the paper (the same generation as the answer-sheet grader).
 PAPER_MODEL = "claude-sonnet-5-5"
 # The answer check thinks before it answers; its budget covers the thinking and the short reply.
