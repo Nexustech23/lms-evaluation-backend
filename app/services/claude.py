@@ -1,13 +1,42 @@
 from app.core.diagnostics import trace_function
 import logging
 import re
+import time
 from typing import Dict, Tuple
 
 import anthropic
+import httpx
 
 from app.core.config import settings
 
 _client: anthropic.Anthropic | None = None
+
+# A request that never reached the provider (no connection could be made) costs nothing and is safe
+# to repeat. Timeouts and dropped responses are not retried: the provider may already have billed them.
+CONNECT_RETRIES = 2
+CONNECT_RETRY_DELAY_SECONDS = 2
+
+
+def _is_connect_failure(error) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, httpx.ConnectError):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _send_with_connect_retry(send):
+    for attempt in range(CONNECT_RETRIES + 1):
+        try:
+            return send()
+        except anthropic.APIConnectionError as error:
+            if attempt == CONNECT_RETRIES or not _is_connect_failure(error):
+                raise
+            logging.warning("Claude connection failed before sending (attempt %d of %d); retrying",
+                            attempt + 1, CONNECT_RETRIES + 1)
+            time.sleep(CONNECT_RETRY_DELAY_SECONDS * (attempt + 1))
 
 
 def _response_text(message):
@@ -118,11 +147,16 @@ def generate_text(
                 "thinking": {"type": "adaptive"},
                 "output_config": {"effort": effort},
             }
-            # Avoid a long non-streaming request for thinking + large JSON output.
-            with _get_client().messages.stream(**request) as stream:
-                message = stream.get_final_message()
+
+            def send():
+                # Avoid a long non-streaming request for thinking + large JSON output.
+                with _get_client().messages.stream(**request) as stream:
+                    return stream.get_final_message()
         else:
-            message = _get_client().messages.create(**request)
+            def send():
+                return _get_client().messages.create(**request)
+
+        message = _send_with_connect_retry(send)
 
         token_usage = _message_usage(message)
         if getattr(message, "stop_reason", None) in {"max_tokens", "refusal"}:
