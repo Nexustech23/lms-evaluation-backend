@@ -1,7 +1,8 @@
 """Allocate exact marks and validate an AI paper before DOCX rendering."""
-from app.core.diagnostics import trace_function
+from app.core.diagnostics import event, trace_function
 from app.core.diagnostic_details import validation_error
 import json
+import logging
 import math
 import re
 
@@ -21,10 +22,48 @@ def allocate_sections(sections, total):
     return marks
 
 
+def _reply_shape(text):
+    """Describe a reply that could not be read without recording any of its words."""
+    text = text if isinstance(text, str) else ""
+    stripped = text.lstrip()
+    if not stripped:
+        first = "empty"
+    elif stripped.startswith("```"):
+        first = "fence"
+    elif stripped.startswith("{"):
+        first = "brace"
+    else:
+        first = "letter" if stripped[0].isalpha() else "other"
+    return {"reply_length": len(text), "first_char_kind": first, "first_brace_index": text.find("{"),
+            "ends_with_brace": stripped.endswith("}")}
+
+
+def parse_paper_json(text):
+    """The model is asked for bare JSON; also accept it inside a code fence or with a sentence around it."""
+    text = text if isinstance(text, str) else ""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as first_error:
+        cleaned = re.sub(r"^\s*```[A-Za-z0-9_-]*[ \t]*\n?", "", text)
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned).strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        for candidate in (cleaned, cleaned[start:end + 1] if 0 <= start < end else None):
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+            except ValueError:
+                continue
+            event("paper.reply_cleaned", level=logging.WARNING, **_reply_shape(text))
+            return data
+        event("paper.reply_unreadable", level=logging.WARNING, **_reply_shape(text))
+        raise first_error
+
+
 @trace_function('paper.validate')
 def validate_paper(text, sections, total, co_list, *, allow_choices=False):
     """Choice sections offer equal-mark alternatives; count only required attempts."""
-    data = json.loads(text)
+    data = parse_paper_json(text)
     if not isinstance(data, dict) or set(data) != {'sections'} or not isinstance(data['sections'],list) or len(data['sections']) != len(sections):
         raise validation_error('PAPER_SECTIONS_MISMATCH', "Generated paper sections do not match the blueprint")
     allocations = allocate_sections(sections,total)
