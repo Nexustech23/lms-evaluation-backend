@@ -5,6 +5,7 @@
 # header vs _build_exam_header_docx) — consolidated here into one.
 # ============================================================
 
+from datetime import date
 from typing import Any, Dict, Optional
 
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -18,6 +19,13 @@ C_BLUE_DEEP = RGBColor(30, 58, 138)
 C_TEXT = RGBColor(17, 24, 39)
 C_FOOTER = RGBColor(120, 120, 120)
 C_LABEL = RGBColor(100, 116, 139)
+
+
+def current_academic_year(today: Optional[date] = None) -> str:
+    """The academic year running now (June to May), for a header whose year field was left blank: 2026 - 2027."""
+    today = today or date.today()
+    start = today.year if today.month >= 6 else today.year - 1
+    return f"{start} - {start + 1}"
 
 
 def set_cell_bg(cell, hex_color: str) -> None:
@@ -124,14 +132,6 @@ def build_exam_header(doc, header_data: Optional[Dict[str, Any]] = None) -> None
     set_cell_bg(accent_cell, "1d4ed8")
     accent_cell.paragraphs[0].paragraph_format.space_after = Pt(0)
 
-    crest_p = doc.add_paragraph()
-    crest_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    crest_p.paragraph_format.space_before = Pt(6)
-    crest_p.paragraph_format.space_after = Pt(2)
-    crest_r = crest_p.add_run("- * -")
-    crest_r.font.size = Pt(9)
-    crest_r.font.color.rgb = C_BLUE_MID
-
     uni_p = doc.add_paragraph()
     uni_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     uni_p.paragraph_format.space_before = Pt(2)
@@ -165,7 +165,7 @@ def build_exam_header(doc, header_data: Optional[Dict[str, Any]] = None) -> None
     ay_p.paragraph_format.space_before = Pt(6)
     ay_p.paragraph_format.space_after = Pt(6)
     ay_p.add_run("Academic Year: ").font.size = Pt(10)
-    ay_bold = ay_p.add_run(h_acad_year or "2024 - 2025")
+    ay_bold = ay_p.add_run(h_acad_year or current_academic_year())
     ay_bold.bold = True
     ay_bold.font.size = Pt(10)
     ay_bold.font.color.rgb = C_BLUE_DARK

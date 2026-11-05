@@ -28,9 +28,11 @@ from app.services.docx_common import (
     set_table_width_100pct,
 )
 
-_SECTION_RE = re.compile(r"^(SECTION\s+[A-Z]|PART\s+[IVX]+|PART\s+[A-Z]|UNIT\s+\d+)", re.IGNORECASE)
+_SECTION_RE = re.compile(r"^(SECTION\s+[A-Z0-9]|PART\s+[IVX]+|PART\s+[A-Z]|UNIT\s+\d+)", re.IGNORECASE)
 _QUESTION_RE = re.compile(r"^(Q\d+[\.\)])\s+(.*)")
 _SUBPART_RE = re.compile(r"^\s*(\([a-z]\)|\([ivxIVX]+\))\s+(.*)")
+_OPTION_RE = re.compile(r"^\s*(\(?[A-Ea-e][\).])\s+(.*)")
+_NUMBERED_RE = re.compile(r"^\d+[.)]\s")
 _MARKS_RE = re.compile(r"(\[\d+\s*Marks?\])", re.IGNORECASE)
 _CO_TAG_RE = re.compile(r"(\[CO\d+(?:\s*,\s*CO\d+)*\])", re.IGNORECASE)
 _NOTE_RE = re.compile(r"^(attempt|answer|note|all questions|each carries|students must)", re.IGNORECASE)
@@ -41,11 +43,9 @@ def _strip_markdown(text: str) -> str:
     """Mirrors question_controller.py's _strip_markdown."""
     text = re.sub(r"\*{3}(.*?)\*{3}", r"\1", text)
     text = re.sub(r"\*{2}(.*?)\*{2}", r"\1", text)
-    text = re.sub(r"\*(.*?)\*", r"\1", text)
     text = re.sub(r"_{3}(.*?)_{3}", r"\1", text)
     text = re.sub(r"_{2}(.*?)_{2}", r"\1", text)
     text = re.sub(r"(?<!\w)_(.*?)_(?!\w)", r"\1", text)
-    text = re.sub(r"(?<!\w)\*+(?!\w)", "", text)
     text = re.sub(r"^>\s*", "", text)
     return text.strip()
 
@@ -249,7 +249,7 @@ def build_docx(
             add_question(question_match.group(1), question_match.group(2))
             continue
 
-        subpart_match = _SUBPART_RE.match(line)
+        subpart_match = _SUBPART_RE.match(line) or _OPTION_RE.match(line)
         if subpart_match:
             add_subpart(subpart_match.group(1), subpart_match.group(2))
             continue
@@ -257,7 +257,8 @@ def build_docx(
         if in_instructions:
             p = doc.add_paragraph()
             p.paragraph_format.space_after = Pt(3)
-            r = p.add_run(f"{instr_num}. {line.strip()}")
+            text = line.strip()
+            r = p.add_run(text if _NUMBERED_RE.match(text) else f"{instr_num}. {text}")
             r.italic = True
             r.font.size = Pt(10)
             instr_num += 1
