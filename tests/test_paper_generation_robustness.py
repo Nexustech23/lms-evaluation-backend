@@ -133,3 +133,11 @@ def test_an_answer_cut_off_at_the_cap_is_still_rejected_without_a_retry(monkeypa
     with pytest.raises(RuntimeError, match="incomplete"):
         claude.generate_text("prompt")
     assert len(calls) == 1
+
+
+def test_the_paper_is_written_by_sonnet_5_5_and_billed_at_its_price():
+    from app.utils.ai_pricing import _PRICES as PRICES
+    assert question_paper.PAPER_MODEL == "claude-sonnet-5-5"
+    source = inspect.getsource(question_paper._run_generation_job)
+    assert source.count("PAPER_MODEL") == 2 and "claude-sonnet-4-6" not in source  # the call and the usage record agree
+    assert "claude-sonnet-5-5" in PRICES

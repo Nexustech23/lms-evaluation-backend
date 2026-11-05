@@ -62,6 +62,8 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["question
 QP_JOB_PREFIX = "qp_job:"
 # The structured paper needs more room than plain text did; a paper cut off at the cap is rejected.
 PAPER_MAX_OUTPUT_TOKENS = 16000
+# The model that writes the paper (the same generation as the answer-sheet grader).
+PAPER_MODEL = "claude-sonnet-5-5"
 
 _ACCEPTED_EXTENSIONS = {"pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "csv", "md", "odt"}
 
@@ -389,8 +391,8 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             params["total_marks"], params["duration"], params["sections"], params.get("co_list") or [],
         )
         paper_text_raw, c_usage = await tracked_faculty_call(
-            db, generate_text, full_prompt, "claude-sonnet-4-6", PAPER_MAX_OUTPUT_TOKENS,
-            faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
+            db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
+            faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
             feature=Feature.QP_GENERATION, job_id=job_id,
             prompt_version=PAPER_PROMPT_VERSION,
         )
