@@ -60,7 +60,7 @@ def test_the_log_records_the_shape_of_an_unreadable_reply_not_its_words(monkeypa
 
 
 def test_the_paper_cap_is_raised_and_used_for_the_paper_call():
-    assert question_paper.PAPER_MAX_OUTPUT_TOKENS == 16000
+    assert question_paper.PAPER_MAX_OUTPUT_TOKENS == 30000
     assert "PAPER_MAX_OUTPUT_TOKENS" in inspect.getsource(question_paper._run_generation_job)
 
 
