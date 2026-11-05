@@ -17,6 +17,13 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Inches, Pt, RGBColor
 
+from app.services.docx_equation import (
+    add_equation,
+    allow_tall_lines,
+    contains_equation,
+    is_equation,
+    only_display_equations,
+)
 from app.services.docx_common import (
     C_BLUE_DARK,
     C_BLUE_DEEP,
@@ -46,7 +53,15 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
         sec.left_margin = Cm(1.8)
         sec.right_margin = Cm(1.8)
 
-    def _add_inline_content(para, node, base_size=11, base_color=None):
+    def _apply_format(run, fmt):
+        if "strong" in fmt or "b" in fmt:
+            run.bold = True
+        if "em" in fmt or "i" in fmt:
+            run.italic = True
+        if "u" in fmt:
+            run.underline = True
+
+    def _add_inline_content(para, node, base_size=11, base_color=None, fmt=()):
         for child in node.children:
             if isinstance(child, NavigableString):
                 txt = str(child)
@@ -55,6 +70,13 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
                     r.font.size = Pt(base_size)
                     if base_color:
                         r.font.color.rgb = base_color
+                    _apply_format(r, fmt)
+            elif is_equation(child):
+                add_equation(para, child, base_size)
+            elif contains_equation(child):
+                # A styled span or bold text that wraps an equation: keep the style and place the picture inline.
+                tag = child.name.lower() if child.name else ""
+                _add_inline_content(para, child, base_size, base_color, fmt + (tag,))
             else:
                 r = para.add_run(child.get_text())
                 r.font.size = Pt(base_size)
@@ -67,6 +89,7 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
                     r.italic = True
                 if tag == "u":
                     r.underline = True
+                _apply_format(r, fmt)
 
     build_exam_header(doc, header_data)
 
@@ -156,6 +179,10 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
             p.paragraph_format.space_after = Pt(7)
             p.paragraph_format.line_spacing = Pt(20)
             _add_inline_content(p, el, base_size=11, base_color=C_TEXT)
+            if contains_equation(el):
+                allow_tall_lines(p)
+                if only_display_equations(el):
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         elif tag == "ul":
             for li in el.find_all("li", recursive=False):
@@ -164,6 +191,8 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
                 p.paragraph_format.space_after = Pt(4)
                 p.paragraph_format.line_spacing = Pt(20)
                 _add_inline_content(p, li, base_size=11, base_color=C_TEXT)
+                if contains_equation(li):
+                    allow_tall_lines(p)
 
         elif tag == "ol":
             for i, li in enumerate(el.find_all("li", recursive=False), 1):
@@ -175,6 +204,8 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
                 r.bold = True
                 r.font.size = Pt(11)
                 _add_inline_content(p, li, base_size=11, base_color=C_TEXT)
+                if contains_equation(li):
+                    allow_tall_lines(p)
 
         elif tag == "table":
             rows_els = el.find_all("tr")
@@ -197,17 +228,23 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
                     if is_header:
                         set_cell_bg(cell, "eff6ff")
                         set_cell_border_all(cell, color="bfdbfe")
-                        cr = cp.add_run(cell_el.get_text(strip=True))
-                        cr.bold = True
-                        cr.font.size = Pt(10)
-                        cr.font.color.rgb = C_BLUE_DARK
+                        if contains_equation(cell_el):
+                            _add_inline_content(cp, cell_el, base_size=10, base_color=C_BLUE_DARK, fmt=("b",))
+                        else:
+                            cr = cp.add_run(cell_el.get_text(strip=True))
+                            cr.bold = True
+                            cr.font.size = Pt(10)
+                            cr.font.color.rgb = C_BLUE_DARK
                     else:
                         fill = "f8fafc" if ri % 2 == 0 else "ffffff"
                         set_cell_bg(cell, fill)
                         set_cell_border_all(cell, color="e2e8f0")
-                        cr = cp.add_run(cell_el.get_text(strip=True))
-                        cr.font.size = Pt(10)
-                        cr.font.color.rgb = C_TEXT
+                        if contains_equation(cell_el):
+                            _add_inline_content(cp, cell_el, base_size=10, base_color=C_TEXT)
+                        else:
+                            cr = cp.add_run(cell_el.get_text(strip=True))
+                            cr.font.size = Pt(10)
+                            cr.font.color.rgb = C_TEXT
             doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
         elif tag == "blockquote":
@@ -220,7 +257,12 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
             r.font.color.rgb = RGBColor(71, 85, 105)
 
         elif tag == "img":
-            render_image(el)
+            if is_equation(el):
+                p = doc.add_paragraph()
+                p.paragraph_format.space_after = Pt(7)
+                add_equation(p, el, 11)
+            else:
+                render_image(el)
 
         else:
             txt = el.get_text(strip=True)
@@ -248,7 +290,8 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
             render_block(node)
             if tag != "img":
                 for nested_img in node.find_all("img"):
-                    render_image(nested_img)
+                    if not is_equation(nested_img):  # equations were placed inline in their paragraph
+                        render_image(nested_img)
             return
 
         if tag in ("li", "tr", "td", "th", "strong", "b", "em", "i", "u", "span", "br", "head", "style", "script"):
@@ -281,6 +324,8 @@ def process_and_upload_base64_images(html_content: str, faculty_id: str) -> str:
     changed = False
 
     for img in soup.find_all("img"):
+        if is_equation(img):
+            continue  # an equation picture stays inside the paper; one ImageKit file per formula is not wanted
         src = img.get("src", "")
         if not (src.startswith("data:image/") and ";base64," in src):
             continue
