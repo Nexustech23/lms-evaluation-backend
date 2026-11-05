@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +28,13 @@ class QuestionPaperExportRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     editorContent: str = Field(default="", max_length=8_000_000)
+
+
+class EquationFromTextRequest(BaseModel):
+    """A description in words, and (for the one automatic retry) the attempt that did not draw."""
+    description: str = Field(min_length=3, max_length=500)
+    previousLatex: Optional[str] = Field(default=None, max_length=2000)
+    previousError: Optional[str] = Field(default=None, max_length=300)
 
 
 class QuestionPaperUpdateRequest(BaseModel):

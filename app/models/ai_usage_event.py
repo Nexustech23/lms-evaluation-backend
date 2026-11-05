@@ -60,6 +60,7 @@ class Feature:
     QP_COURSE_PLANNER_EXTRACTION = "qp_course_planner_extraction"
     QP_GENERATION = "qp_generation"
     QP_ANSWER_CHECK = "qp_answer_check"
+    EQUATION_ASSIST = "equation_assist"
 
     # Faculty — answer-script grading (app/api/routers/grading.py)
     GRADING_ANSWER_OCR = "grading_answer_ocr"
@@ -105,6 +106,7 @@ FEATURE_LABELS: Dict[str, str] = {
     Feature.QP_COURSE_PLANNER_EXTRACTION: "Extracted course planner",
     Feature.QP_GENERATION: "Generated question paper",
     Feature.QP_ANSWER_CHECK: "Checked question paper answers",
+    Feature.EQUATION_ASSIST: "Wrote an equation from a description",
     Feature.GRADING_ANSWER_OCR: "Extracted answer script text",
     Feature.GRADING_ANSWER_EVALUATION: "Graded answer script",
     Feature.GRADING_TRANSCRIPT_GENERATION: "Generated answer transcript",
@@ -128,6 +130,7 @@ FACULTY_FEATURES = frozenset({
     Feature.QP_COURSE_PLANNER_EXTRACTION,
     Feature.QP_GENERATION,
     Feature.QP_ANSWER_CHECK,
+    Feature.EQUATION_ASSIST,
     Feature.GRADING_ANSWER_OCR,
     Feature.GRADING_ANSWER_EVALUATION,
     Feature.GRADING_TRANSCRIPT_GENERATION,

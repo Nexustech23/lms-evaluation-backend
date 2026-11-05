@@ -38,6 +38,7 @@ from app.db.mongodb import get_database
 from app.utils.uploads import read_upload_capped
 from app.models.question_paper import build_create_document, build_update_fields, serialize_question_paper
 from app.schemas.question_paper import (
+    EquationFromTextRequest,
     QuestionPaperExportRequest,
     QuestionPaperSaveRequest,
     QuestionPaperUpdateRequest,
@@ -47,6 +48,7 @@ from app.services.claude import generate_text
 from app.services.paper_blueprint import allocate_sections, validate_paper, PAPER_PROMPT_VERSION
 from app.services.paper_check import check_paper, compare_answers, parse_checks
 from app.services.math_text import tidy_math
+from app.services.equation_writer import EQUATION_MAX_TOKENS, EQUATION_MODEL, parse_equation_reply, write_equation
 from app.services.diagram_render import draw_diagram
 from app.services.docx_from_html import generate_docx_from_html, process_and_upload_base64_images
 from app.services.docx_from_text import build_docx
@@ -719,6 +721,30 @@ async def export_question_paper_docx(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return Response(content=docx_bytes, media_type=DOCX_MIME,
                     headers={"Content-Disposition": f'attachment; filename="question_paper_{ts}.docx"'})
+
+
+@router.post("/question-paper/equation/from-text", dependencies=[Depends(ai_rate_limit)])
+async def equation_from_text(
+    payload: EquationFromTextRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Words -> LaTeX for the equation box. The browser draws the result and asks once more if it does not draw."""
+    user, faculty_id = await _require_faculty(identity, db)
+    budget = await check_institute_token_budget(db, str(faculty_id), ["claude"])
+    if not budget["allowed"]:
+        return JSONResponse(status_code=402, content={"error": budget["message"]})
+    try:
+        reply, _ = await tracked_faculty_call(
+            db, write_equation, payload.description.strip(), payload.previousLatex, payload.previousError,
+            EQUATION_MODEL, EQUATION_MAX_TOKENS,
+            faculty_id=str(faculty_id), user_id=str(user["_id"]), provider=Provider.CLAUDE, model=EQUATION_MODEL,
+            feature=Feature.EQUATION_ASSIST,
+        )
+        return parse_equation_reply(reply)
+    except Exception as error:
+        logging.warning("Equation writer failed: %s", error)
+        return JSONResponse(status_code=502, content={"error": "The AI could not write that equation right now. Try again or type it."})
 
 
 @router.post("/question-paper/save")
