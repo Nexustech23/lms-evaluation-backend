@@ -1,12 +1,40 @@
 """Allocate exact marks and validate an AI paper before DOCX rendering."""
 from app.core.diagnostics import event, trace_function
 from app.core.diagnostic_details import validation_error
+from app.services.math_text import tidy_math
 import json
 import logging
 import math
 import re
 
-PAPER_PROMPT_VERSION = "paper-blueprint-v1"
+PAPER_PROMPT_VERSION = "paper-blueprint-v2"
+
+_OPTION_LINE = re.compile(r"^\s*\(?[A-Ea-e][\).]\s+\S")
+
+
+def place_marks_tag(content: str, tag: str) -> str:
+    """Put the marks tag at the end of the question stem, before options a) to d); else at the end."""
+    lines = content.split("\n")
+    first_option = next((i for i, line in enumerate(lines) if _OPTION_LINE.match(line)), None)
+    if first_option:
+        j = first_option - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        if j >= 0:
+            lines[j] = lines[j].rstrip() + " " + tag
+            return "\n".join(lines)
+    return content.rstrip() + " " + tag
+
+
+def _clean_answer(value):
+    if isinstance(value, str):
+        return value.strip()[:200] or None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, list):
+        items = [str(v).strip()[:60] for v in value if isinstance(v, (str, int, float)) and not isinstance(v, bool)]
+        return ", ".join(i for i in items if i)[:200] or None
+    return None
 
 def allocate_sections(sections, total):
     if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
@@ -70,6 +98,7 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
     allowed_cos = {c['co_code'] for c in co_list}
     lines, seen, normalized_texts = ['INSTRUCTIONS:', '1. Follow the attempt rule printed under each section.'], set(), set()
     required_total = offered_total = 0
+    answer_key, dropped_formulas = [], 0
     for section_index, (configured, generated, allocated) in enumerate(zip(sections,data['sections'],allocations), 1):
         if generated.get('label') != configured['label']:
             raise validation_error('PAPER_SECTION_LABEL_MISMATCH', "Section labels or order changed", section_index=section_index)
@@ -88,6 +117,7 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
             content = q.get('text')
             if not isinstance(content,str) or not content.strip():
                 raise validation_error('PAPER_QUESTION_TEXT_MISSING', "Question text is required", question_no=n, section_index=section_index)
+            content = tidy_math(content)
             if '<<<' in content or re.search(r'(?im)^\s*(?:Q\d+[.)]|SECTION\s+[A-Z])|\[\d+\s*Marks?\]', content):
                 raise validation_error('PAPER_QUESTION_STRUCTURE_INJECTION', "Question text cannot inject numbering, sections or marks", question_no=n, section_index=section_index)
             key=' '.join(content.casefold().split())
@@ -100,10 +130,17 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
             cos=q.get('co_codes')
             if not isinstance(cos,list) or any(not isinstance(c,str) for c in cos) or len(cos)!=len(set(cos)) or not set(cos)<=allowed_cos or (allowed_cos and not cos):
                 raise validation_error('PAPER_CO_TAGS_INVALID', "Question CO tags do not match approved outcomes", question_no=n, section_index=section_index)
-            section_lines.append(f"Q{n}. {content.strip()} [{score} Marks]" + (f" [{', '.join(cos)}]" if cos else ''))
+            tags = f"[{score} Marks]" + (f" [{', '.join(cos)}]" if cos else '')
+            section_lines.append(f"Q{n}. " + place_marks_tag(content.strip(), tags))
+            answer, working = _clean_answer(q.get('answer')), _clean_answer(q.get('working'))
+            if answer or working:
+                answer_key.append({"number": n, "answer": answer, "working": working})
             diagrams=q.get('diagrams',[])
             if not isinstance(diagrams,list): raise validation_error('PAPER_DIAGRAMS_INVALID', "Invalid diagrams", question_no=n, section_index=section_index)
             for spec in diagrams:
+                if isinstance(spec, dict) and spec.get('type') == 'math_expression':
+                    dropped_formulas += 1  # a formula picture under a question gives the solution away
+                    continue
                 fields={'data_table':['headers','rows'],'math_expression':['expressions'],
                     'chemical_equation':['equations'],'electrical_circuit':['elements'],
                     'graph':['xlabel','ylabel','xrange','curves'],'binary_tree':['nodes'],
@@ -121,4 +158,9 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
         required_total+=required;offered_total+=sum(marks)
         lines += ['',configured['label'],f'Attempt {attempt} of {len(questions)} questions. Section total: {required} marks.']+section_lines
     if required_total != total: raise validation_error('PAPER_TOTAL_MISMATCH', "Paper required marks do not match total")
-    return '\n'.join(lines), {'required_marks':required_total,'offered_marks':offered_total,'sections':data['sections']}
+    if dropped_formulas:
+        event('paper.formula_diagrams_dropped', level=logging.WARNING, count=dropped_formulas)
+    public_sections = [{**sec, 'questions': [{k: v for k, v in q.items() if k not in ('answer', 'working')}
+                                             for q in sec['questions']]} for sec in data['sections']]
+    return '\n'.join(lines), {'required_marks':required_total,'offered_marks':offered_total,'sections':public_sections,
+                              'answer_key':answer_key}

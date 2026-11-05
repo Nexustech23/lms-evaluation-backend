@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RenderDiagramRequest(BaseModel):
@@ -21,6 +21,13 @@ class QuestionPaperSaveRequest(BaseModel):
 
     subjectId: str
     editorContent: str = ""
+
+
+class QuestionPaperExportRequest(BaseModel):
+    """Editor HTML plus the header fields, to be turned into a Word file without saving."""
+    model_config = ConfigDict(extra="allow")
+
+    editorContent: str = Field(default="", max_length=8_000_000)
 
 
 class QuestionPaperUpdateRequest(BaseModel):

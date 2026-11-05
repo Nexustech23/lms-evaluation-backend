@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user_and_faculty_details
@@ -38,12 +38,15 @@ from app.db.mongodb import get_database
 from app.utils.uploads import read_upload_capped
 from app.models.question_paper import build_create_document, build_update_fields, serialize_question_paper
 from app.schemas.question_paper import (
+    QuestionPaperExportRequest,
     QuestionPaperSaveRequest,
     QuestionPaperUpdateRequest,
     RenderDiagramRequest,
 )
 from app.services.claude import generate_text
 from app.services.paper_blueprint import allocate_sections, validate_paper, PAPER_PROMPT_VERSION
+from app.services.paper_check import check_paper, compare_answers, parse_checks
+from app.services.math_text import tidy_math
 from app.services.diagram_render import draw_diagram
 from app.services.docx_from_html import generate_docx_from_html, process_and_upload_base64_images
 from app.services.docx_from_text import build_docx
@@ -62,6 +65,12 @@ router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["question
 QP_JOB_PREFIX = "qp_job:"
 # The structured paper needs more room than plain text did; a paper cut off at the cap is rejected.
 PAPER_MAX_OUTPUT_TOKENS = 16000
+# The model that writes the paper (the same generation as the answer-sheet grader).
+PAPER_MODEL = "claude-sonnet-5-5"
+# The answer check thinks before it answers; its budget covers the thinking and the short reply.
+ANSWER_CHECK_MAX_TOKENS = 16000
+ANSWER_CHECK_EFFORT = "medium"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 _ACCEPTED_EXTENSIONS = {"pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "csv", "md", "odt"}
 
@@ -177,8 +186,11 @@ _DIAGRAM_SPEC_BLOCK = """══════════════════�
 DIAGRAM / VISUAL ELEMENT RULES — READ CAREFULLY
 ═══════════════════════════════════════════════════════
 
-Whenever a question requires a table, diagram, graph, formula, chemical equation,
-or circuit, emit a JSON object in that question's diagrams array.
+Use the diagrams array only for a table of data, graph, circuit, chemical equation or figure
+that the question itself needs in order to be asked. Never put a formula, law, derivation or
+any step of the solution in a diagram: that gives the answer away. Write the numbers and
+expressions a question needs inline in its text.
+Emit one JSON object per visual element in that question's diagrams array.
 The renderer adds document marker blocks; do not include markers in your JSON.
 Use one object per visual element. Do not use ASCII art or plain-text tables.
 Every object needs a "type" field and a "title" field describing the visual AND
@@ -325,18 +337,25 @@ QUESTION PAPER GENERATION GUIDELINES
 {section_heading_list}
 5. Create questions appropriate to the subject, semester level, exam type, and marks.
 6. Include a mix of question types where appropriate.
-7. If numerical data, formulas, graphs, circuits, or tables are needed, use diagrams JSON objects.
+7. Use a diagrams JSON object only for a table of data, graph, circuit or figure that the question needs.
+   Never show a formula or a solution step in a diagram.
 8. Ensure total marks exactly equal: {total_marks}
 9. This blueprint contains questions only. Do not include solutions or answer keys.
 10. IMPORTANT: Do NOT use markdown formatting (**bold**, *italic*, etc.) anywhere in the output.
 11. IMPORTANT: Do NOT use bullet points (•, *, -, etc.) for instructions. Write instructions as plain numbered lines.
+12. Write multiplication as ×, squares as m/s², roots as √(x) and angles as 30°. Never use * for multiplication.
 
 OUTPUT FORMAT: Return only valid JSON, without markdown or BEGIN/END markers.
 {{"sections":[{{"label":"exact configured label","attempt_count":1,"questions":[
 {{"number":1,"text":"Complete question with original option labels if MCQ",
-"marks":5,"bloom_level":2,"co_codes":["CO1"],"diagrams":[]}}]}}]}}
+"marks":5,"bloom_level":2,"co_codes":["CO1"],"diagrams":[],
+"answer":"b","working":"one line showing how the answer was checked"}}]}}]}}
 Question numbering is global, consecutive and starts at 1. Every question needs
 a supported bloom_level and only approved CO codes (empty when no COs are supplied).
+"answer" is the correct option letter(s) for a multiple-choice question, the value with its unit for a
+numerical question, otherwise a short key point. "working" is one line showing how you checked it.
+Work every answer out before you write the question, and make sure the options contain it and that exactly
+the stated number of options is correct. These two fields are for the faculty only; they are never printed.
 Put diagram JSON objects in the diagrams array, not raw marker blocks in text.
 The renderer adds marks, CO tags, section instructions and diagram markers.
 By default attempt_count equals the number of questions. Only include optional
@@ -389,14 +408,33 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             params["total_marks"], params["duration"], params["sections"], params.get("co_list") or [],
         )
         paper_text_raw, c_usage = await tracked_faculty_call(
-            db, generate_text, full_prompt, "claude-sonnet-4-6", PAPER_MAX_OUTPUT_TOKENS,
-            faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model="claude-sonnet-4-6",
+            db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
+            faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
             feature=Feature.QP_GENERATION, job_id=job_id,
             prompt_version=PAPER_PROMPT_VERSION,
         )
         paper_text, blueprint = validate_paper(paper_text_raw, params["sections"],
             params["total_marks"], params.get("co_list") or [],
             allow_choices=bool(re.search(r'(?i)\b(optional|choice|attempt\s+any|answer\s+any)\b', params["prompt"])))
+
+        review_flags, answer_check = [], "skipped"
+        if params.get("check_answers"):
+            await update_job(QP_JOB_PREFIX, job_id, {"step": "checking_answers"})
+            try:
+                questions = [{"number": q["number"], "marks": q["marks"], "text": tidy_math(q["text"])}
+                             for sec in blueprint["sections"] for q in sec["questions"]]
+                reply, _ = await tracked_faculty_call(
+                    db, check_paper, questions, PAPER_MODEL, ANSWER_CHECK_MAX_TOKENS, ANSWER_CHECK_EFFORT,
+                    faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
+                    feature=Feature.QP_ANSWER_CHECK, job_id=job_id, prompt_version=PAPER_PROMPT_VERSION,
+                )
+                review_flags = compare_answers(blueprint.get("answer_key") or [], parse_checks(reply))
+                answer_check = "done"
+            except asyncio.CancelledError:
+                raise
+            except Exception as check_error:  # the paper is still good; only the second opinion is missing
+                logging.warning("[qp:%s] Answer check could not run: %s", job_id, check_error)
+                answer_check = "failed"
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "building_docx"})
         docx_bytes = await asyncio.to_thread(
@@ -418,6 +456,9 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             "step": "done",
             "paperText": paper_text,
             "blueprint": blueprint,
+            "answerKey": blueprint.get("answer_key") or [],
+            "reviewFlags": review_flags,
+            "answerCheck": answer_check,
             "prompt_version": PAPER_PROMPT_VERSION,
             "docxBase64": base64.b64encode(docx_bytes).decode("utf-8"),
             "filename": filename,
@@ -479,6 +520,8 @@ async def generate_question_paper_ai(
     # are pulled in and passed to the AI so generated questions can be
     # tagged with the CO(s) they assess.
     subjectId: Optional[str] = Form(None),
+    # A second AI call that solves every question and flags any that look wrong (adds one call to the cost).
+    checkAnswers: bool = Form(True),
     questionBank: Optional[UploadFile] = File(None),
     coursePlanner: Optional[UploadFile] = File(None),
     identity: dict = Depends(get_current_identity),
@@ -545,6 +588,7 @@ async def generate_question_paper_ai(
             "faculty_id": str(faculty_id),
             "user_id": str(user["_id"]),
             "co_list": co_list,
+            "check_answers": checkAnswers,
         }
         job_file_bytes = {
             "questionBank": qb_bytes, "questionBankFilename": qb_filename,
@@ -616,6 +660,9 @@ async def generate_question_paper_status(
             "generationSource": job.get("generationSource"),
             "promptVersion": job.get("prompt_version"),
             "blueprint": job.get("blueprint"),
+            "answerKey": job.get("answerKey") or [],
+            "reviewFlags": job.get("reviewFlags") or [],
+            "answerCheck": job.get("answerCheck") or "skipped",
             "tokenUsage": job.get("tokenUsage"),
         }
 
@@ -646,6 +693,33 @@ async def render_diagram(payload: RenderDiagramRequest):
 # ============================================================
 # ROUTES — CRUD / EDITOR SAVE FLOW
 # ============================================================
+
+@router.post("/question-paper/export-docx")
+async def export_question_paper_docx(
+    payload: QuestionPaperExportRequest,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """The Word file for what is in the editor right now (edits and equations included). Nothing is saved."""
+    await _require_faculty(identity, db)
+    if not payload.editorContent.strip():
+        raise HTTPException(status_code=400, detail="The paper is empty")
+    data = payload.model_dump()
+    header_data = {
+        "institute": data.get("instituteName", ""),
+        "department": data.get("departmentName", ""),
+        "examType": data.get("examType", ""),
+        "subjectName": data.get("subjectName", ""),
+        "semester": data.get("semester", ""),
+        "academicYear": data.get("academicYear", ""),
+        "duration": data.get("duration", ""),
+        "totalMarks": data.get("totalMarks", ""),
+    }
+    docx_bytes = await asyncio.to_thread(generate_docx_from_html, payload.editorContent, header_data)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(content=docx_bytes, media_type=DOCX_MIME,
+                    headers={"Content-Disposition": f'attachment; filename="question_paper_{ts}.docx"'})
+
 
 @router.post("/question-paper/save")
 async def save_question_paper(
