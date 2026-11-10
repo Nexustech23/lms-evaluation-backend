@@ -292,6 +292,7 @@ async def change_password(
         {"_id": ObjectId(user_id)},
         {"$set": {
             "password_hash": new_hash,
+            "tokens_revoked_before": datetime.now(timezone.utc).timestamp(),
             "must_change_password": False,
             "updated_at": datetime.now(timezone.utc),
         }},
@@ -768,10 +769,11 @@ async def update_faculty(
         user_fields["email"] = data["email"]
     if "password" in data and data["password"]:
         user_fields["password_hash"] = hash_password(data["password"])
-
-    if user_fields:
-        user_fields["updated_at"] = datetime.now(timezone.utc)
-        await db["users"].update_one({"_id": user_id}, {"$set": user_fields})
+        user_fields["tokens_revoked_before"] = datetime.now(timezone.utc).timestamp()
+    if "is_active" in data:
+        user_fields["is_active"] = data["is_active"]
+        if not data["is_active"]:
+            user_fields["tokens_revoked_before"] = datetime.now(timezone.utc).timestamp()
 
     faculty_fields: Dict[str, Any] = {}
     for field in ["designation", "qualification", "experience_years", "specialization",
@@ -781,9 +783,22 @@ async def update_faculty(
     if "school_id" in data and ObjectId.is_valid(data["school_id"]):
         faculty_fields["school_id"] = ObjectId(data["school_id"])
 
-    if faculty_fields:
-        faculty_fields["updated_at"] = datetime.now(timezone.utc)
-        await db["facultyDetails"].update_one({"_id": ObjectId(faculty_id)}, {"$set": faculty_fields})
+    from app.services.result_revision import transaction
+    async def save_account(session):
+        if user_fields:
+            user_fields["updated_at"] = datetime.now(timezone.utc)
+            changed = await db["users"].update_one({"_id": user_id}, {"$set": user_fields}, session=session)
+            if changed.matched_count != 1:
+                raise HTTPException(404, "Faculty user not found")
+        if faculty_fields:
+            faculty_fields["updated_at"] = datetime.now(timezone.utc)
+            changed = await db["facultyDetails"].update_one({"_id": ObjectId(faculty_id)}, {"$set": faculty_fields}, session=session)
+            if changed.matched_count != 1:
+                raise HTTPException(404, "Faculty not found")
+    await transaction(db, save_account)
+    if "tokens_revoked_before" in user_fields:
+        await revoke_user_tokens(str(user_id), settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
+    await bust_account_state(str(user_id))
 
     updated_doc = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id)}) or {}
     updated_user = await db["users"].find_one({"_id": user_id}, {"fullName": 1, "email": 1, "phone": 1}) or {}

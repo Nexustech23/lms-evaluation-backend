@@ -51,8 +51,8 @@ def test_estimate_cost_usd_known_model():
     assert cost == 18.0
 
 
-def test_estimate_cost_usd_unknown_model_returns_zero():
-    assert estimate_cost_usd("some-future-model-nobody-has-priced-yet", 1000, 1000) == 0.0
+def test_estimate_cost_usd_unknown_model_returns_unknown():
+    assert estimate_cost_usd("some-future-model-nobody-has-priced-yet", 1000, 1000) is None
 
 
 def test_estimate_cost_usd_zero_tokens_is_zero():

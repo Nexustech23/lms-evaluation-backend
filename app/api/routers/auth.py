@@ -7,6 +7,7 @@
 
 import re
 import secrets
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from bson import ObjectId
@@ -577,11 +578,14 @@ async def get_me(
 # ============================================================
 
 @router.post("/logout")
-async def logout(response: Response, identity: dict = Depends(get_current_identity)):
+async def logout(response: Response, identity: dict = Depends(get_current_identity),
+                 db: AsyncIOMotorDatabase = Depends(get_database)):
     # Clearing the cookie only stops THIS client from sending the token; the
     # token itself stays valid until it expires. Record a revocation cutoff
     # so a copy of the token (stolen, or kept in another client) is rejected
     # by get_current_identity from now on.
+    await db["users"].update_one({"_id": ObjectId(identity["user_id"])},
+        {"$max": {"tokens_revoked_before": datetime.now(timezone.utc).timestamp()}})
     await revoke_user_tokens(identity["user_id"], settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
     unset_access_cookie(response)
     return {"message": "Logged out successfully"}

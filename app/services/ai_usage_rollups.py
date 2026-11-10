@@ -1,13 +1,14 @@
 """Recoverable projections of the immutable v2 usage ledger.
 
-Keep a one-time baseline for pre-v2 counters. Recompute v2 contributions instead
-of replaying increments; monotonic writes prevent stale concurrent snapshots
-from rolling counters back. No transaction or per-event array on users needed.
+Keep the pre-v2 baseline and initialize target receipts once. Subsequent counter
+increments and event receipts share a Mongo transaction, making replay safe
+without rescanning historical events on every completed provider call.
 """
 import asyncio
 import logging
 from copy import deepcopy
 from app.core.diagnostics import event as diagnostic_event, scope
+from app.services.result_revision import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +19,9 @@ def _get(doc, dotted):
     return doc if isinstance(doc, (int, float)) else 0
 
 
-async def _project(db, collection, owner_id, institute=False):
+async def _bootstrap_projection(db, collection, owner_id, institute, session):
     target = db[collection]
-    owner = await target.find_one({"_id": owner_id})
+    owner = await target.find_one({"_id": owner_id}, session=session)
     if owner is None:
         diagnostic_event('ai.rollup.target',collection=collection,owner_id=str(owner_id),outcome='pending',reason='owner_missing')
         return False
@@ -28,15 +29,16 @@ async def _project(db, collection, owner_id, institute=False):
     await target.update_one(
         {"_id": owner_id, "ai_usage_v2_baseline": {"$exists": False}},
         {"$set": {"ai_usage_v2_baseline": deepcopy(owner.get("token_usage") or {})}},
+        session=session,
     )
-    owner = await target.find_one({"_id": owner_id})
+    owner = await target.find_one({"_id": owner_id}, session=session)
     baseline = owner["ai_usage_v2_baseline"]
     query = {"accounting_version": 2, "usage_status": "known",
              "institute_id" if institute else "user_id": owner_id}
     if institute:
         query["record_institute"] = True
     totals = {}
-    async for event in db["aiUsageEvents"].find(query):
+    async for event in db["aiUsageEvents"].find(query, session=session):
         if event.get("call_status") == "skipped":
             continue
         values = totals.setdefault(event["provider"], [0, 0, 0])
@@ -58,7 +60,7 @@ async def _project(db, collection, owner_id, institute=False):
     if institute:
         fields["token_usage.grand_total_tokens"] = _get(baseline, "grand_total_tokens") + sum(v[0] + v[1] for v in totals.values())
     if fields:
-        result = await target.update_one({"_id": owner_id}, {"$max": fields})
+        result = await target.update_one({"_id": owner_id}, {"$max": fields}, session=session)
         diagnostic_event('ai.rollup.target',collection=collection,owner_id=str(owner_id),
                          outcome='projected' if result.matched_count==1 else 'pending',
                          matched_count=result.matched_count,modified_count=getattr(result,'modified_count',None),
@@ -66,6 +68,56 @@ async def _project(db, collection, owner_id, institute=False):
         return result.matched_count == 1
     diagnostic_event('ai.rollup.target',collection=collection,owner_id=str(owner_id),outcome='no_v2_totals')
     return True
+
+
+async def _project(db, collection, owner_id, institute=False, event_id=None):
+    """One history scan per owner at migration; O(1) atomic receipts thereafter.
+
+    Counter increments and the immutable event's target receipt commit together.
+    Retrying after an uncertain commit cannot charge the event twice.
+    """
+    receipt = "rollup_institute_applied" if institute else "rollup_user_applied"
+    scope_query = {"accounting_version": 2, "usage_status": "known",
+                   "institute_id" if institute else "user_id": owner_id}
+    if institute:
+        scope_query["record_institute"] = True
+
+    async def apply(session):
+        owner = await db[collection].find_one({"_id": owner_id}, session=session)
+        if owner is None:
+            diagnostic_event('ai.rollup.target',collection=collection,owner_id=str(owner_id),outcome='pending',reason='owner_missing')
+            return False
+        if not owner.get("ai_usage_incremental_v1"):
+            if not await _bootstrap_projection(db, collection, owner_id, institute, session):
+                return False
+            await db["aiUsageEvents"].update_many(scope_query, {"$set": {receipt: True}}, session=session)
+            await db[collection].update_one({"_id": owner_id}, {"$set": {"ai_usage_incremental_v1": True}}, session=session)
+            return True
+        event = await db["aiUsageEvents"].find_one({**scope_query, "_id": event_id}, session=session)
+        if not event:
+            return False
+        if event.get(receipt):
+            return True
+        fields = {}
+        if event.get("call_status") != "skipped":
+            provider = event["provider"]
+            inputs, outputs = event["input_tokens"], event["output_tokens"]
+            prefix = f"token_usage.{provider}"
+            if institute:
+                input_name, output_name = (("total_prompt_tokens", "total_candidate_tokens") if provider == "gemini"
+                                          else ("total_input_tokens", "total_output_tokens"))
+                fields = {f"{prefix}.{input_name}": inputs, f"{prefix}.{output_name}": outputs,
+                          f"{prefix}.total_tokens": inputs+outputs, f"{prefix}.call_count": 1,
+                          "token_usage.grand_total_tokens": inputs+outputs}
+            else:
+                fields = {f"{prefix}.input_tokens": inputs, f"{prefix}.output_tokens": outputs}
+        # Touch the owner even for skipped events to serialize with bootstrap.
+        await db[collection].update_one({"_id": owner_id},
+            {"$inc": {**fields, "ai_usage_projection_revision": 1}}, session=session)
+        await db["aiUsageEvents"].update_one({"_id": event_id}, {"$set": {receipt: True}}, session=session)
+        diagnostic_event('ai.rollup.target',collection=collection,owner_id=str(owner_id),outcome='projected',projection='incremental')
+        return True
+    return await transaction(db, apply)
 
 
 async def project_usage_event(db, event):
@@ -77,7 +129,7 @@ async def project_usage_event(db, event):
     for collection, owner_id, institute in targets:
         try:
             with scope(ai_event_id=str(event['_id'])):
-                if not await _project(db, collection, owner_id, institute):
+                if not await _project(db, collection, owner_id, institute, event["_id"]):
                     success = False
         except Exception as exc:
             success = False

@@ -99,9 +99,18 @@ async def isolated(monkeypatch):
             "_id": answer, "exam_id": exam, "faculty_id": owner_faculty,
             "filename": "student.pdf", "fileId": "answer-file", "evaluated_report_fileId": "report-file",
             "total_final_marks": 5,
+            "total_max_marks": 10,
+            "questionwise_marking": [{"question_no": 1, "max_marks": 10, "ai_awarded_marks": 3, "grace_marks": 0}],
         }]),
         "evaluationDetails": Collection(),
     }
+    # Local-only fixture: edits now require an existing assigned hierarchy.
+    programme, subject = ObjectId(), ObjectId()
+    db["programmeDetails"] = Collection([{"_id": programme, "institute_id": institute, "school_id": school}])
+    db["subjectDetails"] = Collection([{"_id": subject, "institute_id": institute,
+        "school_id": school, "programme_id": programme, "department_id": None,
+        "batch_id": None, "semester": 5, "faculty_id": owner_faculty}])
+    db["newsavedDocs"].documents[0].update(programme_id=programme, subject_id=subject, semester=5)
     deletion = Mock()
     enqueue = AsyncMock()
     monkeypatch.setattr(answers, "delete_imagekit_file", deletion)
@@ -141,7 +150,7 @@ async def request_operation(s, operation, user):
         return await s.client.request("DELETE", "/delete-file", json={"answer_id": s.answer}, **kwargs)
     if operation == "review":
         return await s.client.post("/save-self-evaluation", json={
-            "answer_id": s.answer, "questionwise_marking": [{"ai_awarded_marks": 3, "grace_marks": 1}],
+            "answer_id": s.answer, "questionwise_marking": [{"question_no": 1, "max_marks": 10, "ai_awarded_marks": 3, "grace_marks": 1}],
         }, **kwargs)
     return await s.client.post(f"/manual-marks-entry/{s.exam}", json={
         "max_marks": 10, "entries": [{"student_id": "S001", "marks": 7}],

@@ -55,6 +55,8 @@ from app.schemas.institute_hierarchy import (
 )
 from app.utils.batch import load_by_ids
 from app.utils.query import search_regex
+from app.services.result_revision import transaction
+from app.services.academic_configuration import validate_subject_links, invalidate_subject
 
 # Router-level gate: this whole surface is institute-admin / faculty only.
 # Previously it was just Depends(get_current_identity) (any authenticated user
@@ -808,9 +810,8 @@ async def create_batch(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    result = await db["batchDetails"].insert_one(batch_doc)
-    batch_id = result.inserted_id
-
+    batch_id = batch_doc["_id"] = ObjectId()
+    subject_docs = []
     for semester in data.get("semesters", []):
         semester_number = semester.get("semester_number")
         for subject in semester.get("subjects", []):
@@ -828,8 +829,21 @@ async def create_batch(
             if department_id:
                 subject_payload["department_id"] = department_id
 
-            subject_doc = create_subject_document(subject_payload, str(user["_id"]))
-            await db["subjectDetails"].insert_one(subject_doc)
+            try:
+                subject_doc = create_subject_document(subject_payload, str(user["_id"]))
+            except (ValueError, TypeError, KeyError) as exc:
+                raise HTTPException(400, str(exc)) from exc
+            subject_docs.append(subject_doc)
+
+    async def save_batch(session):
+        await validate_subject_links(db, {**batch_doc, "batch_id": batch_id, "semester": 1, "co": [], "co_po_matrix": {}},
+                                     session, pending_batch=batch_doc)
+        for subject in subject_docs:
+            await validate_subject_links(db, subject, session, pending_batch=batch_doc)
+        await db["batchDetails"].insert_one(dict(batch_doc), session=session)
+        for subject in subject_docs:
+            await db["subjectDetails"].insert_one(dict(subject), session=session)
+    await transaction(db, save_batch)
 
     await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "batch_id": str(batch_id)}
@@ -855,61 +869,73 @@ async def update_batch(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found or unauthorized")
 
-    now = datetime.now(timezone.utc)
-    update_fields: Dict[str, Any] = {"updated_at": now}
-    if "batch_name" in data:
-        update_fields["batch_name"] = data["batch_name"]
-    if "total_semesters" in data:
-        update_fields["total_semesters"] = int(data["total_semesters"])
-
-    await db["batchDetails"].update_one({"_id": ObjectId(batch_id)}, {"$set": update_fields})
-
-    for subject_id in data.get("subjectsToBeDeleted", []):
-        if ObjectId.is_valid(subject_id):
-            await db["subjectDetails"].update_one(
-                {"_id": ObjectId(subject_id), "institute_id": institute_id},
-                {"$set": {"is_deleted": True, "is_active": False, "updated_by": ObjectId(user["_id"]), "updated_at": now}},
-            )
-
-    for semester in data.get("semesters", []):
-        semester_number = semester.get("semester_number")
-        for subject in semester.get("subjects", []):
-            subject_id = subject.get("id")
-
-            if subject_id and ObjectId.is_valid(subject_id):
-                await db["subjectDetails"].update_one(
-                    {"_id": ObjectId(subject_id), "institute_id": institute_id},
-                    {"$set": {
-                        "subject_name": subject.get("subject_name"),
-                        "subject_code": subject.get("subject_code"),
-                        "credits": int(subject.get("credits", 0)),
-                        "semester": semester_number,
-                        "faculty_id": (
-                            ObjectId(subject["faculty_id"])
-                            if subject.get("faculty_id") and ObjectId.is_valid(subject["faculty_id"])
-                            else None
-                        ),
-                        "updated_by": ObjectId(user["_id"]),
-                        "updated_at": now,
-                    }},
-                )
-            else:
-                subject_payload = {
-                    "institute_id": str(institute_id),
-                    "school_id": str(batch["school_id"]),
-                    "programme_id": str(batch["programme_id"]),
-                    "batch_id": str(batch_id),
-                    "subject_name": subject.get("subject_name"),
-                    "subject_code": subject.get("subject_code"),
-                    "faculty_id": subject.get("faculty_id"),
-                    "semester": semester_number,
-                    "credits": subject.get("credits", 0),
-                }
-                if batch.get("department_id"):
-                    subject_payload["department_id"] = str(batch["department_id"])
-
-                subject_doc = create_subject_document(subject_payload, str(user["_id"]))
-                await db["subjectDetails"].insert_one(subject_doc)
+    async def save_batch(session):
+        query = {"_id": ObjectId(batch_id), "institute_id": institute_id, "is_deleted": {"$ne": True}}
+        current = await db["batchDetails"].find_one(query, session=session)
+        if current is None:
+            raise HTTPException(404, "Batch not found")
+        now = datetime.now(timezone.utc)
+        fields = {key: data[key] for key in ("batch_name", "total_semesters", "semesters") if key in data}
+        if "semesters" in fields:
+            fields["semesters"] = [int(row["semester_number"]) for row in data["semesters"]]
+        if "total_semesters" in fields:
+            from app.models.subject import nonnegative_number
+            fields["total_semesters"] = nonnegative_number(fields["total_semesters"], "total_semesters", integer=True)
+            if fields["total_semesters"] < 1:
+                raise HTTPException(400, "total_semesters must be at least 1")
+        candidate_batch = {**current, **fields}
+        await validate_subject_links(db, {**candidate_batch, "batch_id": current["_id"], "semester": 1,
+                                         "co": [], "co_po_matrix": {}}, session, pending_batch=candidate_batch)
+        seen = set()
+        for sid in data.get("subjectsToBeDeleted", []):
+            if not ObjectId.is_valid(sid):
+                raise HTTPException(400, "Invalid deleted subject ID")
+            subject = await db["subjectDetails"].find_one({"_id": ObjectId(sid),
+                "institute_id": institute_id, "batch_id": current["_id"], "is_deleted": {"$ne": True}}, session=session)
+            if subject is None:
+                raise HTTPException(400, "Deleted subject does not belong to this batch")
+            seen.add(ObjectId(sid))
+            await db["subjectDetails"].update_one({"_id": subject["_id"]}, {"$set": {
+                "is_deleted": True, "is_active": False, "updated_by": user["_id"], "updated_at": now}}, session=session)
+            await invalidate_subject(db, subject, session)
+        for semester in data.get("semesters", []):
+            for supplied in semester.get("subjects", []):
+                sid = supplied.get("id")
+                old = None
+                if sid:
+                    if not ObjectId.is_valid(sid) or ObjectId(sid) in seen:
+                        raise HTTPException(400, "Invalid or repeated subject ID")
+                    seen.add(ObjectId(sid))
+                    old = await db["subjectDetails"].find_one({"_id": ObjectId(sid), "institute_id": institute_id,
+                        "batch_id": current["_id"], "is_deleted": {"$ne": True}}, session=session)
+                    if old is None:
+                        raise HTTPException(400, "Subject does not belong to this batch")
+                payload = {**(old or {}), "co_list": (old or {}).get("co", []), **supplied,
+                    "institute_id": institute_id, "school_id": current["school_id"],
+                    "programme_id": current["programme_id"], "department_id": current.get("department_id"),
+                    "batch_id": current["_id"], "semester": semester.get("semester_number")}
+                subject = create_subject_document(payload, str(user["_id"]))
+                await validate_subject_links(db, subject, session, pending_batch=candidate_batch)
+                if old:
+                    changes = {key: subject[key] for key in ("subject_name", "subject_code", "credits", "semester",
+                        "faculty_id", "co", "co_po_matrix", "teaching_periods")}
+                    changes.update(updated_by=user["_id"], updated_at=now)
+                    await db["subjectDetails"].update_one({"_id": old["_id"]}, {"$set": changes}, session=session)
+                    await invalidate_subject(db, old, session)
+                else:
+                    await db["subjectDetails"].insert_one(subject, session=session)
+                await invalidate_subject(db, subject, session)
+        if "total_semesters" in fields:
+            too_late = await db["subjectDetails"].find_one({"batch_id": current["_id"],
+                "is_deleted": {"$ne": True}, "semester": {"$gt": fields["total_semesters"]}}, session=session)
+            if too_late:
+                raise HTTPException(400, "Existing subject semester exceeds the new batch duration")
+        fields["updated_at"] = now
+        await db["batchDetails"].update_one(query, {"$set": fields}, session=session)
+    try:
+        await transaction(db, save_batch)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(400, "Invalid batch or nested subject data") from exc
 
     await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Batch and subjects updated successfully"}
@@ -1070,7 +1096,12 @@ async def create_subject(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    result = await db["subjectDetails"].insert_one(subject_doc)
+    async def save_subject(session):
+        await validate_subject_links(db, subject_doc, session)
+        result = await db["subjectDetails"].insert_one(dict(subject_doc), session=session)
+        await invalidate_subject(db, subject_doc, session)
+        return result
+    result = await transaction(db, save_subject)
 
     await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "subject_id": str(result.inserted_id)}
@@ -1494,24 +1525,29 @@ async def update_subject(
         message, code = error
         raise HTTPException(status_code=code, detail=message)
 
-    update_fields: Dict[str, Any] = {}
-    for field in ["subject_name", "subject_code", "teaching_periods", "credits"]:
-        if field in data:
-            update_fields[field] = data[field]
-    if "co_list" in data:
-        update_fields["co"] = data["co_list"]
-    if "co_po_matrix" in data:
-        update_fields["co_po_matrix"] = data["co_po_matrix"]
-
-    update_fields["updated_at"] = datetime.now(timezone.utc)
-    update_fields["updated_by"] = identity["user_id"]
-
-    result = await db["subjectDetails"].update_one(
-        {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False},
-        {"$set": update_fields},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    query = {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False}
+    async def save_subject(session):
+        current = await db["subjectDetails"].find_one(query, session=session)
+        if current is None:
+            raise HTTPException(404, "Subject not found")
+        candidate = {**current, "co_list": current.get("co", []), **data, "institute_id": str(institute_id)}
+        try:
+            validated = create_subject_document(candidate, str(identity["user_id"]))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await validate_subject_links(db, validated, session)
+        mutable = ("subject_name", "subject_code", "teaching_periods", "credits", "semester",
+                   "faculty_id", "department_id", "programme_id", "school_id", "batch_id", "co_po_matrix")
+        fields = {key: validated[key] for key in mutable if key in data}
+        if "co_list" in data:
+            fields["co"] = validated["co"]
+        fields.update(updated_at=datetime.now(timezone.utc), updated_by=identity["user_id"])
+        await db["subjectDetails"].update_one(query, {"$set": fields}, session=session)
+        if any(current.get(key) != validated.get(key) for key in ("credits", "semester", "batch_id", "co", "co_po_matrix")):
+            await invalidate_subject(db, current, session)
+            if (current.get("batch_id"), current.get("semester")) != (validated.get("batch_id"), validated.get("semester")):
+                await invalidate_subject(db, validated, session)
+    await transaction(db, save_subject)
 
     await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Subject updated successfully"}
@@ -1531,17 +1567,16 @@ async def delete_subject(
         message, code = error
         raise HTTPException(status_code=code, detail=message)
 
-    result = await db["subjectDetails"].update_one(
-        {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False},
-        {"$set": {
-            "is_deleted": True,
-            "is_active": False,
-            "updated_by": ObjectId(identity["user_id"]),
-            "updated_at": datetime.now(timezone.utc),
-        }},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    async def remove_subject(session):
+        query = {"_id": ObjectId(subject_id), "institute_id": ObjectId(institute_id), "is_deleted": False}
+        subject = await db["subjectDetails"].find_one(query, session=session)
+        if subject is None:
+            raise HTTPException(404, "Subject not found")
+        await invalidate_subject(db, subject, session)
+        await db["subjectDetails"].update_one(query, {"$set": {
+            "is_deleted": True, "is_active": False, "updated_by": ObjectId(identity["user_id"]),
+            "updated_at": datetime.now(timezone.utc)}}, session=session)
+    await transaction(db, remove_subject)
 
     await bust_institute_hierarchy(str(institute_id))
     return {"success": True, "message": "Subject deleted successfully"}

@@ -11,6 +11,7 @@ from app.api.routers import exams, grading
 from app.schemas.exams import UploadQuestionPaperRequest
 from app.services import gemini, mcq_grading as mcq
 from app.services.paper_version import paper_key_version
+from tests.test_failed_ai_cost import Collection as AccountingCollection
 
 
 def value(doc, dotted):
@@ -26,7 +27,9 @@ class Papers:
         self.doc = doc
 
     def matches(self, query):
-        return self.doc is not None and all(value(self.doc, key) == val for key, val in query.items())
+        return self.doc is not None and all(
+            value(self.doc, key) != val["$ne"] if isinstance(val, dict) and "$ne" in val
+            else value(self.doc, key) == val for key, val in query.items())
 
     async def find_one(self, query):
         return deepcopy(self.doc) if self.matches(query) else None
@@ -50,15 +53,18 @@ def paper(monkeypatch):
     exam_id, faculty, user = [ObjectId() for _ in range(3)]
     collection = Papers({'_id': exam_id, 'faculty_id': faculty, 'question_paper': {
         'version': 'A', 'url': 'https://cdn.test/A.pdf', 'fileId': 'A', 'text': 'Paper A'},
-        'mcq_answer_key': {'1': {'answer': 'A', 'confident': True}}, 'mcq_answer_key_version': 'A'})
-    db = {'newsavedDocs': collection}
+        'mcq_answer_key': {'1': {'answer': 'A', 'confident': True}}, 'mcq_answer_key_version': 'A', 'mcq_answer_key_context_version':1})
+    db = {'newsavedDocs': collection, 'answerDetails': AccountingCollection(),
+          'facultyDetails': AccountingCollection([{'_id': faculty, 'user_id': user}]),
+          'users': AccountingCollection([{'_id': user}]),
+          'aiUsageEvents': AccountingCollection()}
     monkeypatch.setattr(exams, '_require_faculty', AsyncMock(return_value=({'_id': user}, faculty)))
     monkeypatch.setattr(exams, 'enqueue', AsyncMock())
     monkeypatch.setattr(gemini, 'safe_get', Mock(return_value=b'paper'))
     monkeypatch.setattr(gemini, 'extract_question_paper_text_with_gemini', Mock(return_value=(
         'Extracted A', {'prompt_tokens': 1, 'candidate_tokens': 1})))
-    monkeypatch.setattr(gemini, 'increment_institute_gemini_tokens', AsyncMock())
     monkeypatch.setattr(mcq, 'detect_mcq_questions', Mock(return_value={1: ['a', 'b', 'c', 'd']}))
+    monkeypatch.setattr(mcq, 'mcq_contexts', Mock(return_value={1: {'stem':'Question','options':{'A':'a','B':'b'},'complete':True}}))
     monkeypatch.setattr(mcq, 'determine_mcq_answer_keys', Mock(return_value=(
         {'1': {'answer': 'B', 'confident': True}}, {})))
     return SimpleNamespace(db=db, collection=collection, exam=exam_id, faculty=str(faculty), user=str(user))
@@ -142,11 +148,11 @@ async def test_current_key_is_cached_and_tagged(paper, legacy):
     snapshot = deepcopy(paper.collection.doc)
     result = await mcq.ensure_mcq_answer_key(paper.db, snapshot, paper.faculty)
     assert result
-    assert paper.collection.doc['mcq_answer_key_version'] == paper_key_version(snapshot['question_paper'])
-    # Legacy untagged keys are rebuilt once; a correctly tagged key is reused.
-    assert mcq.determine_mcq_answer_keys.call_count == int(legacy)
+    assert result['1']['confident'] is (not legacy)
+    # Untagged legacy keys are held for review without overwriting historical data.
+    assert mcq.determine_mcq_answer_keys.call_count == 0
     await mcq.ensure_mcq_answer_key(paper.db, deepcopy(paper.collection.doc), paper.faculty)
-    assert mcq.determine_mcq_answer_keys.call_count == int(legacy)
+    assert mcq.determine_mcq_answer_keys.call_count == 0
 
 
 @pytest.mark.parametrize('failure', [False, True])
@@ -162,7 +168,7 @@ async def test_mismatched_key_is_never_returned(paper, failure):
 async def test_late_key_generation_cannot_save_or_return_old_key(paper, monkeypatch, legacy):
     if legacy:
         paper.collection.doc['question_paper'].pop('version')
-        paper.collection.doc.pop('mcq_answer_key_version')
+        paper.collection.doc['mcq_answer_key_version'] = 'OLD'
     else:
         paper.collection.doc['mcq_answer_key_version'] = 'OLD'
     snapshot = deepcopy(paper.collection.doc)
@@ -183,7 +189,8 @@ async def test_stale_exam_snapshot_does_not_return_cached_key(paper):
 
 
 async def test_subjective_only_paper_does_not_call_key_provider(paper):
-    mcq.detect_mcq_questions.return_value = {}
+    mcq.mcq_contexts.return_value = {}
+    paper.collection.doc.pop('mcq_answer_key')
     paper.collection.doc.pop('mcq_answer_key_version')
     assert await mcq.ensure_mcq_answer_key(paper.db, deepcopy(paper.collection.doc), paper.faculty) == {}
     mcq.determine_mcq_answer_keys.assert_not_called()
@@ -215,9 +222,10 @@ async def test_deleted_exam_does_not_receive_late_text_or_key(paper, monkeypatch
 
 
 async def test_grading_stops_if_paper_changes_before_ocr(paper, monkeypatch):
+    monkeypatch.setattr(grading, 'claim_job_execution', AsyncMock(return_value=True))
     answer_id = ObjectId()
     db = {**paper.db,
-          'answerDetails': SimpleNamespace(find_one=AsyncMock(return_value={
+          'answerDetails': SimpleNamespace(update_one=AsyncMock(), find_one=AsyncMock(return_value={
               '_id': answer_id, 'exam_id': paper.exam, 'answer_script_url': 'https://cdn.test/student.pdf'})),
           'evaluationDetails': SimpleNamespace(find_one=AsyncMock(return_value={
               'questionEvaluationDetails': [{'maxMarks': 10}]}))}
@@ -226,6 +234,7 @@ async def test_grading_stops_if_paper_changes_before_ocr(paper, monkeypatch):
     monkeypatch.setattr(grading, 'update_job', updates)
     monkeypatch.setattr(grading, '_resolve_institute_id', AsyncMock(return_value=ObjectId()))
     monkeypatch.setattr(grading, '_download_pdf', Mock(return_value=b'pdf'))
+    monkeypatch.setattr(grading, 'split_answer_pdf', Mock(return_value=[b'pdf']))
     async def change_paper(*args):
         replace_paper(paper)
         return {}

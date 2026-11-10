@@ -1,6 +1,17 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from bson import ObjectId
+import math
+
+
+def nonnegative_number(value, name, integer=False):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a finite nonnegative number")
+    if isinstance(value, bool) or not math.isfinite(number) or number < 0 or (integer and not number.is_integer()):
+        raise ValueError(f"{name} must be a finite nonnegative {'integer' if integer else 'number'}")
+    return int(number) if integer else number
 
 
 def to_object_id(value):
@@ -20,15 +31,25 @@ def validate_co_list(co_list: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         raise ValueError("co_list must be a list")
 
     validated_cos = []
+    seen = set()
     for co in co_list:
+        if not isinstance(co, dict):
+            raise ValueError("Each CO must be an object")
         co_code = co.get("co_code")
         description = co.get("description")
         threshold = co.get("threshold")
 
-        if not co_code or not isinstance(co_code, str):
+        if not isinstance(co_code, str) or not co_code.strip():
             raise ValueError("Each CO must have co_code")
-        if not description or not isinstance(description, str):
+        if not isinstance(description, str) or not description.strip():
             raise ValueError("Each CO must have description")
+        if co_code.strip() in seen:
+            raise ValueError("CO codes must be unique")
+        seen.add(co_code.strip())
+        if threshold is not None:
+            threshold = nonnegative_number(threshold, "CO threshold")
+            if threshold > 100:
+                raise ValueError("CO threshold must be between 0 and 100")
 
         validated_cos.append({
             "co_code": co_code.strip(),
@@ -52,7 +73,7 @@ def validate_co_po_matrix(matrix: Dict[str, Any]):
 
         validated_matrix[co_code] = {}
         for po_code, level in po_map.items():
-            if not isinstance(level, int):
+            if isinstance(level, bool) or not isinstance(level, int):
                 raise ValueError(f"Invalid level for {co_code}-{po_code}")
             if level < 0 or level > 3:
                 raise ValueError("Mapping level must be between 0 and 3")
@@ -63,10 +84,15 @@ def validate_co_po_matrix(matrix: Dict[str, Any]):
 
 def create_subject_document(data: Dict[str, Any], created_by: str) -> Dict[str, Any]:
     co_list = data.get("co_list", [])
-    validated_cos = validate_co_list(co_list) if co_list else []
+    validated_cos = validate_co_list(co_list)
 
     co_po_matrix = data.get("co_po_matrix")
-    validated_matrix = validate_co_po_matrix(co_po_matrix) if co_po_matrix else {}
+    validated_matrix = validate_co_po_matrix(co_po_matrix) if co_po_matrix is not None else {}
+    if not isinstance(data.get("subject_name"), str) or not data["subject_name"].strip():
+        raise ValueError("subject_name is required")
+    semester = nonnegative_number(data.get("semester", 0), "semester", integer=True)
+    if semester < 1:
+        raise ValueError("semester must be at least 1")
 
     return {
         "institute_id": to_object_id(data["institute_id"]),
@@ -79,9 +105,9 @@ def create_subject_document(data: Dict[str, Any], created_by: str) -> Dict[str, 
         "subject_name": data.get("subject_name"),
         "subject_code": data.get("subject_code"),
 
-        "semester": int(data.get("semester", 0)),
-        "credits": int(data.get("credits", 0)),
-        "teaching_periods": int(data.get("teaching_periods", 0)),
+        "semester": semester,
+        "credits": nonnegative_number(data.get("credits", 0), "credits"),
+        "teaching_periods": nonnegative_number(data.get("teaching_periods", 0), "teaching_periods", integer=True),
 
         "co": validated_cos,
         "co_po_matrix": validated_matrix,

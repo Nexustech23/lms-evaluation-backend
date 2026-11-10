@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from bson import ObjectId
+import math
 
 PERCENTAGE_FIELDS = [
     "a_plus_percentage", "a_percentage", "a_minus_percentage",
@@ -12,7 +13,10 @@ PERCENTAGE_FIELDS = [
 
 def validate_percentage_total(data: Dict[str, Any]) -> Optional[str]:
     try:
-        total = sum(float(data.get(field, 0)) for field in PERCENTAGE_FIELDS)
+        values = [float(data.get(field, 0)) for field in PERCENTAGE_FIELDS]
+        if any(not math.isfinite(v) or v < 0 or v > 100 for v in values):
+            return "Each percentage must be finite and between 0 and 100"
+        total = sum(values)
     except (TypeError, ValueError):
         return "All percentage fields must be valid numbers"
 

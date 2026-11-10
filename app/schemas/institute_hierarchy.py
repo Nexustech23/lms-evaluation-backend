@@ -1,6 +1,22 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def validate_semesters(rows):
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Each semester must be an object")
+        value = row.get("semester_number")
+        from app.models.subject import nonnegative_number
+        number = nonnegative_number(value, "semester_number", integer=True)
+        if number < 1 or number in seen:
+            raise ValueError("Semester numbers must be positive and unique")
+        seen.add(number)
+        if not isinstance(row.get("subjects", []), list) or any(not isinstance(s, dict) for s in row.get("subjects", [])):
+            raise ValueError("Semester subjects must be a list of objects")
+    return rows
 
 # Every create/update pair below delegates real field-level validation to
 # app.models.{school,programme,department,batch,subject}'s existing
@@ -85,10 +101,21 @@ class CreateBatchRequest(BaseModel):
     # and, for the nested subject-creation loop, app.models.subject's own
     # create_subject_document per item.
     semesters: List[Dict[str, Any]]
+    _semesters = field_validator("semesters")(validate_semesters)
 
 
 class UpdateBatchRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    semesters: Optional[List[Dict[str, Any]]] = None
+    total_semesters: Optional[int] = Field(default=None, ge=1)
+    subjectsToBeDeleted: List[str] = Field(default_factory=list)
+
+    @field_validator("semesters")
+    @classmethod
+    def checked_semesters(cls, value):
+        if value is None:
+            raise ValueError("semesters cannot be null")
+        return validate_semesters(value)
 
 
 class CreateSubjectRequest(BaseModel):
@@ -97,6 +124,11 @@ class CreateSubjectRequest(BaseModel):
     school_id: str
     programme_id: str
     subject_name: str
+    semester: int = Field(ge=1)
+    credits: float = Field(default=0, ge=0, allow_inf_nan=False)
+    teaching_periods: int = Field(default=0, ge=0)
+    co_list: List[Dict[str, Any]] = Field(default_factory=list)
+    co_po_matrix: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("subject_name")
     @classmethod
@@ -108,3 +140,16 @@ class CreateSubjectRequest(BaseModel):
 
 class UpdateSubjectRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    subject_name: Optional[str] = Field(default=None, min_length=1)
+    credits: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    teaching_periods: Optional[int] = Field(default=None, ge=0)
+    semester: Optional[int] = Field(default=None, ge=1)
+    co_list: Optional[List[Dict[str, Any]]] = None
+    co_po_matrix: Optional[Dict[str, Any]] = None
+
+    @field_validator("subject_name", "credits", "teaching_periods", "semester", "co_list", "co_po_matrix")
+    @classmethod
+    def explicit_null_not_allowed(cls, value):
+        if value is None:
+            raise ValueError("Field cannot be null")
+        return value

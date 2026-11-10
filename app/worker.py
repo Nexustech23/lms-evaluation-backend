@@ -166,6 +166,8 @@ async def _on_startup(ctx) -> None:
     connect_to_redis()
     ctx['resource_log_task'] = asyncio.create_task(resource_monitor())
     ctx['dependency_log_task'] = asyncio.create_task(dependency_monitor())
+    from app.services.process_lease import process_lease
+    ctx['lease_task'] = asyncio.create_task(process_lease())
     logger.info("arq worker started — Mongo + Redis connected")
 
 
@@ -173,6 +175,13 @@ async def _on_shutdown(ctx) -> None:
     from app.core.redis_client import close_redis_connection
     from app.db.mongodb import close_mongo_connection
 
+    lease_task = ctx.pop('lease_task', None)
+    if lease_task:
+        lease_task.cancel()
+        try:
+            await lease_task
+        except asyncio.CancelledError:
+            pass
     dependency_task = ctx.pop('dependency_log_task',None)
     if dependency_task:
         dependency_task.cancel()
@@ -207,6 +216,8 @@ class WorkerSettings:
     max_jobs = settings.ARQ_MAX_JOBS
     job_timeout = settings.ARQ_JOB_TIMEOUT_SECONDS
     keep_result = 3600
+    health_check_interval = 15
+    health_check_key = "lms:worker:health"
     # Jobs bill AI calls and write marks — never auto-retry (matches the old
     # BackgroundTasks behaviour and the zero-accuracy-risk constraint).
     max_tries = 1

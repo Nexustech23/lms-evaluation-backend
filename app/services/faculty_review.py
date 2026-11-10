@@ -71,14 +71,10 @@ async def publish_faculty_review(db, exam, answer, questions, identity, revision
     except Exception:
         log_event("report.publication_unconfirmed",answer_id=str(answer["_id"]),exam_id=str(exam["_id"]),
                   report_file_id=upload.get("file_id"),target_revision=current_revision+1)
-        # An unknown commit outcome may have saved the report. Only remove a
-        # fresh upload if a database read confirms it was not committed.
-        try:
-            current = await db["answerDetails"].find_one({"_id": answer["_id"]})
-            if current is not None and upload["file_id"] not in current.get("verified_storage_ids", []):
-                await asyncio.to_thread(delete_imagekit_file, upload["file_id"])
-        except Exception:
-            pass
+        # Even a successful read can race an uncertain commit. Keep the fresh
+        # artifact until an operator can establish that it is unreferenced.
+        log_event("report.cleanup_deferred", answer_id=str(answer["_id"]),
+                  file_ids=[upload.get("file_id")], reason="publication_unconfirmed")
         raise
     # Source revision invalidation is in the transaction. Existing transcripts
     # are refreshed before returning; failed refreshes remain explicitly stale.

@@ -28,7 +28,9 @@ from app.core.queue import enqueue
 from app.core.rate_limit import bulk_grading_rate_limit
 from app.db.mongodb import get_database
 from app.utils.net import safe_get
-from app.schemas.grading import EvaluateAnswerScriptRequest
+from app.schemas.grading import EvaluateAnswerScriptRequest, RecoverEvaluationRequest
+from app.core.config import settings
+from app.services.process_lease import PROCESS_INSTANCE, process_present, execution_is_orphaned
 from app.services.grading import (
     extract_answer_text_with_gemini,
     generate_evaluation_report_html,
@@ -100,6 +102,7 @@ async def _run_evaluation_job(
         return
     evaluation_upload = transcript_upload = None
     saved = False
+    save_attempted = False
     interrupted = False
 
     try:
@@ -133,6 +136,13 @@ async def _run_evaluation_job(
         if not answer:
             await _fail(job_id, "Answer script not found")
             return
+
+        if job_id in answer.get("abandoned_evaluation_jobs", []):
+            await _fail(job_id, "This interrupted evaluation was explicitly abandoned; no AI calls were started.")
+            return
+        await db["answerDetails"].update_one({"_id": answer_object_id}, {"$set": {
+            "evaluation_execution": {"job_id": job_id, "process_instance": PROCESS_INSTANCE,
+                                     "started_at": datetime.now(timezone.utc)}}})
 
         if answer.get("exam_id") != exam_object_id:
             await _fail(job_id, "Answer script does not belong to this folder")
@@ -386,9 +396,10 @@ async def _run_evaluation_job(
         now = datetime.now(timezone.utc)
         revision_guard = {"result_revision": answer["result_revision"]} if "result_revision" in answer else {
             "result_revision": {"$exists": False}}
+        save_attempted = True
         save_result = await update_answer_result(db, exam,
             {"_id": answer_object_id, "exam_id": exam_object_id,
-             "reviewed_by_professor": {"$ne": True}, **revision_guard},
+             "reviewed_by_professor": {"$ne": True}, "abandoned_evaluation_jobs": {"$ne": job_id}, **revision_guard},
             {"$set": {
                 "evaluated_report_url": evaluation_upload["url"],
                 "evaluated_report_fileId": evaluation_upload["file_id"],
@@ -399,6 +410,7 @@ async def _run_evaluation_job(
                 "total_max_marks": total_max_marks,
                 "total_final_marks": total_ai_marks,
                 "evaluation_status": "evaluated",
+                "evaluation_job_id": job_id,
                 "review_policy": OPTIONAL_REVIEW_POLICY,
                 "review_pending_count": pending_questions,
                 "report_is_draft": False,
@@ -478,10 +490,20 @@ async def _run_evaluation_job(
             "message": "Evaluation was interrupted. Verify this job before starting another paid evaluation."})
         raise
     except RuntimeError as e:
+        if save_attempted and await _recover_committed_evaluation(db, answer_id, job_id):
+            saved = True
+            return
         logging.error("[%s] Job stopped (runtime): %s", job_id, e)
         await update_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": str(e), "user_message": str(e)})
 
     except Exception as e:
+        if save_attempted and await _recover_committed_evaluation(db, answer_id, job_id):
+            saved = True
+            return
+        if isinstance(e, HTTPException) and e.status_code == 409:
+            # A rejected revision/ownership guard is a confirmed abort, unlike
+            # a lost commit acknowledgement. These fresh uploads are unused.
+            save_attempted = False
         logging.error("[%s] Job failed: %s", job_id, e, exc_info=True)
         await update_job(EVAL_JOB_PREFIX, job_id, {
             "status": "error",
@@ -489,7 +511,14 @@ async def _run_evaluation_job(
             "user_message": "Something went wrong during evaluation. Please try again later.",
         })
     finally:
-        if not saved:
+        if not saved and save_attempted:
+            # A read cannot prove rollback while a commit acknowledgement is
+            # uncertain. Retain fresh files; a later reconciliation may find
+            # them referenced by the committed result. Never delete on doubt.
+            log_event("report.cleanup_deferred", answer_id=str(answer_id), job_id=job_id,
+                      reason="publication_unconfirmed", file_ids=[u.get("file_id") for u in
+                      (evaluation_upload, transcript_upload) if u and u.get("file_id")])
+        if not saved and not save_attempted:
             for uploaded in (evaluation_upload, transcript_upload):
                 if uploaded and uploaded.get("file_id"):
                     try:
@@ -506,6 +535,23 @@ async def _run_evaluation_job(
 # ============================================================
 # ROUTES
 # ============================================================
+
+async def _recover_committed_evaluation(db, answer_id, job_id):
+    try:
+        current = await db["answerDetails"].find_one({"_id": ObjectId(answer_id), "evaluation_job_id": job_id})
+        if current is None:
+            return False
+        fields = ("evaluation_status", "review_policy", "review_pending_count", "result_revision",
+                  "filename", "evaluated_report_url", "evaluated_report_fileId", "html_content",
+                  "transcript_pdf_fileId", "total_ai_marks", "total_final_marks", "total_max_marks",
+                  "questionwise_marking", "co", "report_is_draft", "token_usage")
+        result = {key: current[key] for key in fields if key in current}
+        result.update(success=True, answer_id=answer_id, message="Evaluation saved. Result recovered after a publication interruption.")
+        await update_job(EVAL_JOB_PREFIX, job_id, {"status": "done", "progress": 100, "result": result})
+        return True
+    except Exception:
+        logging.exception("Could not confirm evaluation publication; artifacts retained")
+        return False
 
 @router.post("/evaluate-answer-script", dependencies=[Depends(bulk_grading_rate_limit)])
 async def evaluate_answer_script(
@@ -550,6 +596,9 @@ async def evaluate_answer_script(
         return JSONResponse(status_code=402, content={"error": budget["message"]})
 
     try:
+        if settings.QUEUE_MODE in {"inline", "inline_sync"}:
+            await db["answerDetails"].update_one({"_id": answer["_id"], "active_evaluation.job_id": job_id},
+                {"$set": {"active_evaluation.process_instance": PROCESS_INSTANCE}})
         await lock_exam_for_marks(db, answer["exam_id"])
         await enqueue(
             "run_evaluation_job", job_id, exam_id, answer_id, generate_transcript_pdf, str(faculty_id),
@@ -573,8 +622,62 @@ async def evaluate_answer_script(
 @router.get("/evaluate-answer-script/status/{job_id}")
 async def get_evaluation_status(
     job_id: str, identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     job = await get_owned_job(EVAL_JOB_PREFIX, job_id, identity)
+    # Recover committed results even if final Redis publication was lost.
+    if job is None or job.get("status") not in {"done", "completed", "error", "failed"}:
+        answer = await db["answerDetails"].find_one({"active_evaluation.job_id": job_id,
+            "active_evaluation.owner_user_id": str(identity["user_id"])})
+        if answer:
+            await require_answer_access(identity, db, str(answer["_id"]))
+            if answer.get("evaluation_job_id") == job_id:
+                return {"status": "done", "progress": 100, "result": _saved_result(answer)}
+            if await _execution_orphaned(answer):
+                return {"status": "recovery_required", "message":
+                    "Evaluation process stopped. Use Recover on this answer sheet. No automatic paid retry was started."}
     if job is None:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
     return job
+
+
+def _saved_result(answer):
+    fields = ("evaluation_status", "review_policy", "review_pending_count", "result_revision", "filename",
+        "evaluated_report_url", "evaluated_report_fileId", "html_content", "transcript_pdf_fileId", "total_ai_marks",
+        "total_final_marks", "total_max_marks", "questionwise_marking", "co", "report_is_draft", "token_usage")
+    return {**{key: answer[key] for key in fields if key in answer}, "success": True, "answer_id": str(answer["_id"])}
+
+
+async def _execution_orphaned(answer):
+    return await execution_is_orphaned(answer.get("active_evaluation") or {},
+        answer.get("evaluation_execution"), presence=process_present)
+
+
+@router.post("/evaluate-answer-script/recover/{answer_id}")
+async def recover_evaluation(answer_id: str, payload: RecoverEvaluationRequest,
+    identity: dict = Depends(get_current_identity), db: AsyncIOMotorDatabase = Depends(get_database)):
+    answer = await require_answer_access(identity, db, answer_id)
+    active = answer.get("active_evaluation") or {}
+    job_id = active.get("job_id")
+    if not job_id:
+        return {"success": True, "message": "No interrupted evaluation to recover."}
+    if active.get("owner_user_id") != str(identity["user_id"]):
+        raise HTTPException(404, "Evaluation not found")
+    if answer.get("evaluation_job_id") == job_id:
+        await release_submission(db, "answerDetails", {"_id": answer["_id"]}, "active_evaluation", job_id)
+        return {"success": True, "recovered": True, "result": _saved_result(answer)}
+    if not await _execution_orphaned(answer):
+        raise HTTPException(409, "The evaluation may still be running. Its guard was retained; no retry was started.")
+    if not payload.acknowledge_new_evaluation_cost:
+        return {"success": False, "confirmation_required": True, "message":
+            "No committed result was found. The previous AI call may have incurred cost. Resetting permits a new paid evaluation; marks already saved will be preserved."}
+    changed = await db["answerDetails"].update_one({"_id": answer["_id"], "active_evaluation.job_id": job_id,
+        "evaluation_job_id": {"$ne": job_id}},
+        {"$addToSet": {"abandoned_evaluation_jobs": job_id}, "$unset": {"active_evaluation": ""}})
+    if changed.matched_count != 1:
+        raise HTTPException(409, "Evaluation state changed. Refresh before recovery.")
+    try:
+        await update_job(EVAL_JOB_PREFIX, job_id, {"status": "error", "message": "Interrupted evaluation explicitly abandoned by its owner."})
+    except Exception:
+        logging.exception("Old job status unavailable after guarded recovery")
+    return {"success": True, "ready_for_retry": True, "message": "Recovery complete. Click Evaluate to start a new evaluation when ready."}

@@ -91,10 +91,17 @@ async def lifespan(app: FastAPI):
     usage_reconciler = asyncio.create_task(usage_reconciliation_loop(get_database()))
     resource_task = asyncio.create_task(resource_monitor())
     dependency_task = asyncio.create_task(dependency_monitor())
+    from app.services.process_lease import process_lease
+    lease_task = asyncio.create_task(process_lease())
     event("application.ready", queue_mode=settings.QUEUE_MODE)
     try:
         yield
     finally:
+        lease_task.cancel()
+        try:
+            await lease_task
+        except asyncio.CancelledError:
+            pass
         dependency_task.cancel()
         try:
             await dependency_task
@@ -207,24 +214,25 @@ async def index():
 
 @app.get("/health")
 async def health():
-    try:
-        db = get_database()
-        await db.command("ping")
-        database_status = "connected"
-    except Exception:
-        database_status = "disconnected"
-
-    return {
-        "status": "healthy",
-        "database": database_status,
+    from app.services.readiness import readiness
+    from app.services.grading import CLAUDE_GRADING_MODEL, GEMINI_OCR_MODEL
+    checks = await readiness(get_database())
+    body = {
+        **checks,
         "imagekit": "configured" if settings.IMAGEKIT_PUBLIC_KEY and settings.IMAGEKIT_PRIVATE_KEY else "not configured",
-        "ai_models": {"gemini": "gemini-2.5-flash", "claude": "claude-sonnet-4-6"},
+        "ai_models": {"gemini": GEMINI_OCR_MODEL, "claude": CLAUDE_GRADING_MODEL},
         "collections": {
             "newsaved": "newsavedDocs",
             "answer": "answerDetails",
             "evaluation": "evaluationDetails",
         },
     }
+    return JSONResponse(status_code=200 if checks["status"] == "healthy" else 503, content=body)
+
+
+@app.get("/live")
+async def live():
+    return {"status": "alive"}
 
 
 @app.exception_handler(RequestValidationError)

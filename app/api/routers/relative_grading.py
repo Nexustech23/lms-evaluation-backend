@@ -16,6 +16,8 @@ from app.models.relative_grading import (
     validate_percentage_total,
 )
 from app.schemas.relative_grading import RelativeGradingRequest
+from app.services.result_revision import transaction
+from app.services.academic_configuration import invalidate_policy
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["relative-grading"])
 
@@ -42,7 +44,10 @@ async def create_or_update_relative_grading(
 
     if existing:
         update_fields = build_relative_grading_update_fields(data)
-        await db["relativeGradings"].update_one({"_id": existing["_id"]}, {"$set": update_fields})
+        async def save(session):
+            await invalidate_policy(db, institute_id, session)
+            await db["relativeGradings"].update_one({"_id": existing["_id"]}, {"$set": update_fields}, session=session)
+        await transaction(db, save)
         return {
             "success": True,
             "message": "Relative grading configuration updated successfully",
@@ -50,7 +55,10 @@ async def create_or_update_relative_grading(
         }
 
     grading_doc = create_relative_grading_document(data)
-    result = await db["relativeGradings"].insert_one(grading_doc)
+    async def create(session):
+        await invalidate_policy(db, institute_id, session)
+        return await db["relativeGradings"].insert_one(grading_doc, session=session)
+    result = await transaction(db, create)
 
     return {
         "success": True,
@@ -109,8 +117,12 @@ async def update_relative_grading(
         raise HTTPException(status_code=400, detail=validation_error)
 
     update_fields = build_relative_grading_update_fields(data)
-    await db["relativeGradings"].update_one(
-        {"_id": ObjectId(grading_id), "university_id": institute_id}, {"$set": update_fields}
-    )
+    async def save(session):
+        await invalidate_policy(db, institute_id, session)
+        changed = await db["relativeGradings"].update_one(
+            {"_id": ObjectId(grading_id), "university_id": institute_id}, {"$set": update_fields}, session=session)
+        if changed.matched_count != 1:
+            raise HTTPException(409, "Grading configuration changed or was deleted")
+    await transaction(db, save)
 
     return {"success": True, "message": "Relative grading configuration updated successfully"}

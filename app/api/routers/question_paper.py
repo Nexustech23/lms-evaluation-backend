@@ -359,8 +359,16 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
     faculty_id = params["faculty_id"]
     user_id = params.get("user_id")
     interrupted = False
+    recovery_enabled = bool(params.get("_submission_field") and user_id)
 
     try:
+        if recovery_enabled:
+            from app.services.process_lease import PROCESS_INSTANCE
+            claim = await db["lmsJobRecovery"].update_one({"_id": job_id, "owner_user_id": user_id,
+                "abandoned": {"$ne": True}}, {"$set": {"process_instance": PROCESS_INSTANCE,
+                    "started_at": datetime.now(timezone.utc)}})
+            if claim.matched_count != 1:
+                return  # Explicitly abandoned before execution; never spend.
         extracted_text = ""
         course_planner_text = ""
 
@@ -411,7 +419,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             f"/question_papers/{faculty_id}", ["question_paper", params["subject_name"]],
         )
 
-        await update_job(QP_JOB_PREFIX, job_id, {
+        completed = {
             "status": "completed",
             "step": "done",
             "paperText": paper_text,
@@ -431,7 +439,13 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             "duration": params["duration"],
             "generationSource": "pdf" if file_bytes.get("questionBank") else "prompt",
             "tokenUsage": c_usage,
-        })
+        }
+        if recovery_enabled:
+            stored = await db["lmsJobRecovery"].update_one({"_id": job_id, "owner_user_id": user_id,
+                "abandoned": {"$ne": True}}, {"$set": {"result": completed}})
+            if stored.matched_count != 1:
+                raise RuntimeError("This interrupted generation was abandoned; late output was not published.")
+        await update_job(QP_JOB_PREFIX, job_id, completed)
         logging.info("[qp:%s] Job completed.", job_id)
 
     except asyncio.CancelledError:
@@ -556,6 +570,11 @@ async def generate_question_paper_ai(
         params["_submission_field"] = field
         budget = {"warnings": []}
         if is_new:
+            from app.services.process_lease import PROCESS_INSTANCE
+            from app.core.config import settings
+            await db["lmsJobRecovery"].insert_one({"_id": job_id, "owner_user_id": str(user["_id"]),
+                "submission_field": field, "started_at": datetime.now(timezone.utc),
+                "process_instance": PROCESS_INSTANCE if settings.QUEUE_MODE in {"inline", "inline_sync"} else None})
             budget = await check_institute_token_budget(db, str(faculty_id), ["gemini", "claude"])
             if not budget["allowed"]:
                 await update_job(QP_JOB_PREFIX, job_id, {"status": "failed", "error": budget["message"]})
@@ -586,8 +605,17 @@ async def generate_question_paper_ai(
 @router.get("/question-paper/generate-ai/status/{job_id}")
 async def generate_question_paper_status(
     job_id: str, identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     job = await get_owned_job(QP_JOB_PREFIX, job_id, identity)
+    recovery = await db["lmsJobRecovery"].find_one({"_id": job_id, "owner_user_id": str(identity["user_id"])})
+    if recovery and recovery.get("result") and not recovery.get("abandoned"):
+        job = recovery["result"]
+    elif recovery and not recovery.get("abandoned") and (not job or job.get("status") not in {"completed", "failed"}):
+        from app.services.process_lease import execution_is_orphaned
+        if await execution_is_orphaned(recovery):
+            return JSONResponse(status_code=409, content={"status": "recovery_required", "error":
+                "Generation process stopped. Use Recover generation; no automatic paid retry was started."})
     if job is None:
         return JSONResponse(status_code=404, content={"error": "Job not found or expired."})
 
@@ -625,6 +653,32 @@ async def generate_question_paper_status(
     return JSONResponse(status_code=202, content={
         "success": True, "status": status, "step": job.get("step", ""), "message": "Generation in progress...",
     })
+
+
+@router.post("/question-paper/generate-ai/recover/{job_id}")
+async def recover_question_paper(job_id: str, payload: dict,
+    identity: dict = Depends(get_current_identity), db: AsyncIOMotorDatabase = Depends(get_database)):
+    from app.services.process_lease import execution_is_orphaned
+    row = await db["lmsJobRecovery"].find_one({"_id": job_id, "owner_user_id": str(identity["user_id"])})
+    if not row:
+        raise HTTPException(404, "Generation not found")
+    if row.get("result") and not row.get("abandoned"):
+        return {"success": True, "recovered": True}
+    if not await execution_is_orphaned(row):
+        raise HTTPException(409, "Generation may still be running. No retry was enabled.")
+    if payload.get("acknowledge_new_evaluation_cost") is not True:
+        return {"confirmation_required": True, "message": "No saved paper was found. The previous AI call may have incurred cost. Resetting allows another paid generation when you click Generate."}
+    async def abandon(session):
+        changed = await db["lmsJobRecovery"].update_one({"_id": job_id,
+            "owner_user_id": str(identity["user_id"]), "result": {"$exists": False}},
+            {"$set": {"abandoned": True}}, session=session)
+        if changed.matched_count != 1:
+            raise HTTPException(409, "Generation finished during recovery. Resume the saved output.")
+        await db["users"].update_one({"_id": ObjectId(identity["user_id"]),
+            f"{row['submission_field']}.job_id": job_id}, {"$unset": {row['submission_field']: ""}}, session=session)
+    from app.services.result_revision import transaction
+    await transaction(db, abandon)
+    return {"success": True, "ready_for_retry": True}
 
 
 @router.post("/question-paper/render-diagram")

@@ -12,3 +12,7 @@ class EvaluateAnswerScriptRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("must not be blank")
         return v
+
+
+class RecoverEvaluationRequest(BaseModel):
+    acknowledge_new_evaluation_cost: bool = False

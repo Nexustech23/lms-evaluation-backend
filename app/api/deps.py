@@ -62,17 +62,17 @@ async def get_current_identity(
     # still exist and be active, must not predate a logout / forced-logout /
     # password change, and (when flagged) must have changed a temporary
     # password before doing anything else. This state is cached in Redis for
-    # ACCOUNT_STATE_TTL seconds so it isn't a Mongo round-trip on every
-    # request; a Redis/Mongo error fails OPEN (unknown -> not blocked).
+    # Account state is authoritative in Mongo; dependency failures are 503,
+    # never an authorization grant. Do not use a stale cache for revocation.
     state = await _resolve_account_state(db, user_id)
     if state.get("blocked"):
         event('auth.denied', reason='inactive_account', user_id=user_id)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive")
 
-    cutoff = await tokens_revoked_after(user_id)
+    cutoff = max(state.get("tokens_revoked_before", 0), await tokens_revoked_after(user_id) or 0)
     if cutoff is not None:
         iat = payload.get("iat", 0)
-        if isinstance(iat, (int, float)) and iat < cutoff:
+        if not isinstance(iat, (int, float)) or iat < cutoff:
             event('auth.denied', reason='revoked_session', user_id=user_id)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
 
@@ -83,7 +83,7 @@ async def get_current_identity(
             detail="Password change required. Set a new password to continue.",
         )
 
-    identity = {"user_id": user_id, "role": payload.get("role", state.get("role"))}
+    identity = {"user_id": user_id, "role": state.get("role")}
     bind(**identity)
     request.state.diagnostic_identity = identity
     event("auth.authenticated")
@@ -96,18 +96,14 @@ _PASSWORD_CHANGE_EXEMPT_PATHS = {"/me", "/logout", "/profile", "/profile/change-
 
 
 async def _resolve_account_state(db: AsyncIOMotorDatabase, user_id: str) -> dict:
-    cached = await get_cached_account_state(user_id)
-    if cached is not None:
-        return cached
-
     try:
         user = await db["users"].find_one(
             {"_id": ObjectId(user_id)},
-            {"is_active": 1, "is_deleted": 1, "role": 1, "must_change_password": 1},
+            {"is_active": 1, "is_deleted": 1, "role": 1, "must_change_password": 1, "tokens_revoked_before": 1},
         )
     except Exception:
-        logging.warning("get_current_identity: users lookup failed for %s — failing open", user_id)
-        return {}  # fail open — unknown state, not treated as blocked
+        event("auth.state_unavailable", user_id=user_id)
+        raise HTTPException(503, "Account verification is temporarily unavailable. Please retry.")
 
     if not user:
         state = {"blocked": True}
@@ -116,6 +112,7 @@ async def _resolve_account_state(db: AsyncIOMotorDatabase, user_id: str) -> dict
             "blocked": user.get("is_deleted") is True or not user.get("is_active", True),
             "must_change_password": bool(user.get("must_change_password", False)),
             "role": user.get("role"),
+            "tokens_revoked_before": user.get("tokens_revoked_before", 0),
         }
     await set_cached_account_state(user_id, state)
     return state

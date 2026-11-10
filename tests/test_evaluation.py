@@ -7,8 +7,8 @@ VALID_QUESTION = {
     "maxMarks": 10,
     "minMarks": 0,
     "guidelines": "Be thorough",
-    "parameters": [{"name": "Clarity", "percentage": 50}],
-    "cos": [{"co_code": "CO1", "marks": 5}],
+    "parameters": [{"name": "Clarity", "percentage": 100}],
+    "cos": [{"co_code": "CO1", "marks": 10}],
 }
 
 
@@ -80,8 +80,8 @@ async def test_save_and_get_evaluation_details_roundtrip(superadmin_client, clie
 
     # saving again updates in place rather than duplicating
     resaved = await fc.post(f"/evaluation-details/{folder_id}", json={
-        "questionEvaluationDetails": [VALID_QUESTION], "totalMarks": 20,
+        "questionEvaluationDetails": [{**VALID_QUESTION, "guidelines": "Updated"}], "totalMarks": 10,
     })
     assert resaved.status_code == 200
     fetched_again = await fc.get(f"/evaluation-details/{folder_id}")
-    assert fetched_again.json()["evaluation"]["totalMarks"] == 20
+    assert fetched_again.json()["evaluation"]["questionEvaluationDetails"][0]["guidelines"] == "Updated"
