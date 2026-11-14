@@ -32,6 +32,7 @@ from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
 from app.models.ai_usage_event import FACULTY_FEATURES, STUDENT_FEATURES, feature_label
 from app.utils.ai_pricing import to_inr
+from app.models.institute import institute_type_of, normalize_institute_type
 from app.models.user import serialize_doc
 from app.schemas.profile import (
     ChangePasswordRequest,
@@ -106,6 +107,7 @@ async def get_profile(
         institute = await db["instituteDetails"].find_one({"user_id": ObjectId(user_id)})
         if institute:
             profile["institute_profile"] = serialize_doc(institute)
+            profile["institute_profile"]["institute_type"] = institute_type_of(institute)
 
     elif role == 3:
         faculty = await db["facultyDetails"].find_one({"user_id": ObjectId(user_id)})
@@ -115,6 +117,7 @@ async def get_profile(
             if institute:
                 profile["institute_id"] = str(institute["_id"])
                 profile["institute_name"] = institute.get("institute_name", "")
+                profile["institute_type"] = institute_type_of(institute)
 
     elif role == 4:
         student = await db["studentDetails"].find_one({"user_id": ObjectId(user_id)})
@@ -329,9 +332,10 @@ async def get_all_institutes(
     user_ids = [u["_id"] for u in users]
     inst_map = {}
     async for inst in db["instituteDetails"].find(
-        {"user_id": {"$in": user_ids}}, {"user_id": 1, "token_usage": 1, "token_limit": 1}
+        {"user_id": {"$in": user_ids}}, {"user_id": 1, "token_usage": 1, "token_limit": 1, "institute_type": 1}
     ):
         inst_map[str(inst["user_id"])] = {
+            "institute_type": institute_type_of(inst),
             "token_usage": inst.get("token_usage", {}),
             "token_limit": inst.get("token_limit"),  # None = unlimited (pre-existing institute)
         }
@@ -354,6 +358,7 @@ async def get_all_institutes(
             "email": user.get("email"),
             "created_at": user.get("created_at"),
             "is_active": user.get("is_active", True),
+            "institute_type": entry.get("institute_type", "college"),
             "gemini_total_tokens": gemini_used,
             "claude_total_tokens": claude_used,
             "gemini_token_limit": gemini_limit,
@@ -388,6 +393,7 @@ async def get_institute(
 
     institute["_id"] = str(institute["_id"])
     institute["user_id"] = str(institute["user_id"])
+    institute["institute_type"] = institute_type_of(institute)
 
     return {
         "success": True,
@@ -438,6 +444,11 @@ async def update_institute(
         "color": institute_data.get("color"),
     }
     update_fields = {k: v for k, v in field_map.items() if v is not None}
+    if institute_data.get("institute_type") is not None:
+        try:
+            update_fields["institute_type"] = normalize_institute_type(institute_data["institute_type"])
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
     update_fields["updated_at"] = datetime.now(timezone.utc)
 
     # Top-up: superadmin sets a new total limit (not an amount to add).
