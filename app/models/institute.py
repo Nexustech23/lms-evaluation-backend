@@ -19,6 +19,27 @@ def validate_institute_data(data: Dict[str, Any]):
     return ObjectId(user_id), institute_name.strip()
 
 
+# What kind of institution this is. Later features (words, structure, exams) follow it. An institute with no
+# type saved (every institute created before this field) is a college, exactly as before.
+INSTITUTE_TYPES = ("college", "school", "coaching")
+DEFAULT_INSTITUTE_TYPE = "college"
+
+
+def normalize_institute_type(value: Any) -> str:
+    """The institute type to store: blank means college; anything else must be one of INSTITUTE_TYPES."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return DEFAULT_INSTITUTE_TYPE
+    if not isinstance(value, str) or value.strip().lower() not in INSTITUTE_TYPES:
+        raise ValueError(f"institute_type must be one of: {', '.join(INSTITUTE_TYPES)}")
+    return value.strip().lower()
+
+
+def institute_type_of(doc: Dict[str, Any] | None) -> str:
+    """The type of a stored institute; a missing or unknown value reads as college."""
+    value = (doc or {}).get("institute_type")
+    return value if value in INSTITUTE_TYPES else DEFAULT_INSTITUTE_TYPE
+
+
 def _empty_institute_token_usage() -> Dict[str, Any]:
     return {
         "gemini": {
@@ -63,6 +84,7 @@ def create_institute_document(data: Dict[str, Any]) -> Dict[str, Any]:
         "institute_name": institute_name,
         "short_name": data.get("short_name"),
         "institute_code": data.get("institute_code"),
+        "institute_type": normalize_institute_type(data.get("institute_type")),
 
         "email": data.get("email"),
         "phone": data.get("phone"),
@@ -109,6 +131,9 @@ def update_institute_document(data: Dict[str, Any]) -> Dict[str, Any]:
         if field in data:
             update_fields[field] = data[field]
 
+    if "institute_type" in data:
+        update_fields["institute_type"] = normalize_institute_type(data["institute_type"])
+
     return {"$set": update_fields}
 
 
@@ -148,6 +173,7 @@ def serialize_institute(doc: Dict[str, Any], user_data: Dict[str, Any] = None) -
         "institute_name": doc.get("institute_name"),
         "short_name": doc.get("short_name"),
         "institute_code": doc.get("institute_code"),
+        "institute_type": institute_type_of(doc),
 
         "email": doc.get("email"),
         "phone": doc.get("phone"),

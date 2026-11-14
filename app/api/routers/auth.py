@@ -20,7 +20,7 @@ from app.core.redis_client import revoke_user_tokens
 from app.core.security import create_access_token, hash_password, set_access_cookie, unset_access_cookie, verify_password
 from app.db.mongodb import get_database
 from app.models.faculty import create_faculty_document
-from app.models.institute import create_institute_document
+from app.models.institute import create_institute_document, normalize_institute_type
 from app.models.student import create_student_document
 from app.models.user import create_user_document, serialize_user
 from app.schemas.auth import BulkStudentEnrollmentRequest, LoginRequest, RegisterPayload
@@ -91,6 +91,11 @@ async def _register_institute(db, data, password_hash, current_user_identity):
     institute_data = data.get("institute")
     if not institute_data:
         return {"error": "Institute details are required in the 'institute' field"}, 400
+
+    try:
+        normalize_institute_type(institute_data.get("institute_type"))
+    except ValueError as error:
+        return {"error": str(error)}, 400
 
     color = _validate_color(data.get("color"))
     language = _validate_language(data.get("language"))
