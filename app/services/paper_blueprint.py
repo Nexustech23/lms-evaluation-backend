@@ -39,6 +39,12 @@ def _clean_answer(value):
 def allocate_sections(sections, total):
     if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
         raise validation_error('PAPER_TOTAL_INVALID', "Paper total must be a positive integer")
+    if sections and all(s.get('pattern') for s in sections):
+        # A board blueprint fixes every question's marks, so the section marks come from it, not from percentages.
+        marks = [sum(m * c for m, c in s['pattern']) for s in sections]
+        if sum(marks) != total:
+            raise validation_error('PAPER_SECTION_PERCENTAGES_INVALID', "Blueprint marks must add up to the paper total")
+        return marks
     if not sections or sum(s['percent'] for s in sections) != 100:
         raise validation_error('PAPER_SECTION_PERCENTAGES_INVALID', "Section percentages must total 100")
     exact = [total * s['percent'] / 100 for s in sections]
@@ -106,6 +112,9 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
         attempt = generated.get('attempt_count')
         if not isinstance(questions,list) or not 1 <= len(questions) <= 100 or type(attempt) is not int or not 1 <= attempt <= len(questions):
             raise validation_error('PAPER_ATTEMPT_COUNT_INVALID', "Invalid section questions or attempt count", section_index=section_index)
+        pattern = configured.get('pattern')
+        if pattern and len(questions) != sum(c for _, c in pattern):
+            raise validation_error('PAPER_SECTION_PATTERN_MISMATCH', "Section question count does not match the board blueprint", section_index=section_index)
         marks=[]; section_lines=[]
         for q in questions:
             n, score = q.get('number'), q.get('marks')
@@ -149,6 +158,10 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
                     raise validation_error('PAPER_DIAGRAM_PAYLOAD_INVALID', "Diagram requires a supported type and complete payload; faculty must supply unsupported visuals", question_no=n, section_index=section_index)
                 section_lines.extend(['<<<DIAGRAM>>>',json.dumps(spec),'<<<END_DIAGRAM>>>'])
             marks.append(score)
+        if pattern and sorted(marks) != sorted(m for m, c in pattern for _ in range(c)):
+            raise validation_error('PAPER_SECTION_PATTERN_MISMATCH', "Question marks do not match the board blueprint", section_index=section_index)
+        if pattern and attempt != len(questions):
+            raise validation_error('PAPER_SECTION_PATTERN_MISMATCH', "Board papers attempt every question; choices are written inside the question", section_index=section_index)
         if attempt < len(questions):
             if not allow_choices: raise validation_error('PAPER_CHOICES_NOT_APPROVED', "Optional choices require an explicit faculty request", section_index=section_index)
             if len(set(marks)) != 1: raise validation_error('PAPER_CHOICE_MARKS_UNEQUAL', "Choice alternatives must carry equal marks", section_index=section_index)
