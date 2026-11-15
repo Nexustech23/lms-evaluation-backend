@@ -6,6 +6,7 @@
 
 import base64
 import logging
+import re
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, Optional
@@ -34,6 +35,37 @@ from app.services.docx_common import (
     set_cell_bg,
     set_cell_border_all,
 )
+
+
+TEXT_WIDTH_IN = 6.85          # A4 less the 1.8 cm side margins
+DEFAULT_IMAGE_WIDTH_IN = 5.0  # pictures with no size of their own (generated diagrams) keep this width
+_WIDTH = re.compile(r"(?<![\w-])width\s*:\s*([\d.]+)\s*(px|%)", re.I)
+_MARGIN = re.compile(r"(?<![\w-])margin\s*:\s*([^;]+)", re.I)
+
+
+def image_layout(el) -> tuple:
+    """(width in inches, paragraph alignment) for an editor <img>, from the size and margin the editor wrote on it.
+    A width in % is of the text width; in px it is at 96 dpi. No size keeps the old 5 inch default; no margin centres."""
+    style = el.get("style", "") or ""
+    width = DEFAULT_IMAGE_WIDTH_IN
+    found = _WIDTH.search(style)
+    if found:
+        value = float(found.group(1))
+        inches = value / 96.0 if found.group(2).lower() == "px" else TEXT_WIDTH_IN * value / 100.0
+        width = min(max(inches, 0.6), TEXT_WIDTH_IN)
+    align = WD_ALIGN_PARAGRAPH.CENTER
+    margin = _MARGIN.search(style)
+    if margin:
+        parts = margin.group(1).split()
+        left_auto = (len(parts) == 4 and parts[3] == "auto") or (len(parts) == 2 and parts[1] == "auto") or parts == ["auto"]
+        right_auto = (len(parts) == 4 and parts[1] == "auto") or (len(parts) == 2 and parts[1] == "auto") or parts == ["auto"]
+        if left_auto and right_auto:
+            align = WD_ALIGN_PARAGRAPH.CENTER
+        elif left_auto:
+            align = WD_ALIGN_PARAGRAPH.RIGHT
+        else:
+            align = WD_ALIGN_PARAGRAPH.LEFT
+    return width, align
 
 
 def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, Any]] = None) -> bytes:
@@ -122,11 +154,12 @@ def generate_docx_from_html(html_content: str, header_data: Optional[Dict[str, A
             img_pil.save(out_io, format="PNG")
             png_bytes = out_io.getvalue()
 
+            width_in, align = image_layout(el)
             p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.alignment = align
             p.paragraph_format.space_before = Pt(6)
             p.paragraph_format.space_after = Pt(6)
-            p.add_run().add_picture(BytesIO(png_bytes), width=Inches(5.0))
+            p.add_run().add_picture(BytesIO(png_bytes), width=Inches(width_in))
         except Exception:
             logging.exception("Failed to embed image from html to docx")
 
