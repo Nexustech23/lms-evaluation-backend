@@ -20,7 +20,7 @@ from app.core.redis_client import revoke_user_tokens
 from app.core.security import create_access_token, hash_password, set_access_cookie, unset_access_cookie, verify_password
 from app.db.mongodb import get_database
 from app.models.faculty import create_faculty_document
-from app.models.institute import create_institute_document, normalize_institute_type
+from app.models.institute import create_institute_document, institute_type_of, normalize_institute_type
 from app.models.student import create_student_document
 from app.models.user import create_user_document, serialize_user
 from app.schemas.auth import BulkStudentEnrollmentRequest, LoginRequest, RegisterPayload
@@ -531,6 +531,7 @@ async def get_me(
             )
             if institute:
                 serialized_user["institute_id"] = str(institute["_id"])
+                serialized_user["institute_type"] = institute_type_of(institute)
                 serialized_user["banner_url"] = institute.get("banner_url", "")
                 serialized_user["logo_url"] = institute.get("logo_url", "")
 
@@ -544,6 +545,7 @@ async def get_me(
                 )
                 if institute:
                     serialized_user["institute_id"] = str(institute["_id"])
+                    serialized_user["institute_type"] = institute_type_of(institute)
                     serialized_user["banner_url"] = institute.get("banner_url", "")
                     serialized_user["logo_url"] = institute.get("logo_url", "")
 
@@ -561,6 +563,11 @@ async def get_me(
             )
             if student:
                 serialized_user["institute_id"] = str(student.get("institute_id", ""))
+                institute_id = student.get("institute_id")
+                if isinstance(institute_id, str) and ObjectId.is_valid(institute_id):
+                    institute_id = ObjectId(institute_id)
+                institute = await db["instituteDetails"].find_one({"_id": institute_id}) if institute_id else None
+                serialized_user["institute_type"] = institute_type_of(institute)
 
         elif role == 6:
             student = await db["studentDetails"].find_one(
