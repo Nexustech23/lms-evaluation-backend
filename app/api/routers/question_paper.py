@@ -47,7 +47,8 @@ from app.schemas.question_paper import (
 from app.services.claude import generate_text
 from app.services.paper_blueprint import allocate_sections, validate_paper, PAPER_PROMPT_VERSION
 from app.services.cbse_blueprints import (
-    COMPETENCY_PERCENT, catalog as cbse_catalog, describe_pattern, get_blueprint, pattern_count,
+    COMPETENCY_PERCENT, LayoutError, catalog as cbse_catalog, custom_sections, describe_pattern, get_blueprint,
+    is_customised, pattern_count,
 )
 from app.models.institute import institute_type_of
 from app.services.library_figures import catalog_text as library_catalog_text
@@ -406,6 +407,9 @@ def _build_claude_prompt(
             "(an OR alternative of equal marks) inside the question text as the section rules say; the number of questions "
             "and attempt_count stay as the section rules state. Case-based questions state the passage first, then sub-parts."
         )
+        if board.get("customised"):
+            board_line += (" The teacher has changed the section layout from the official sample paper, so follow the "
+                           "section rules below exactly, even where they differ from the official paper.")
     else:
         board_line = "Generate a professional university-style examination paper."
 
@@ -643,6 +647,9 @@ async def generate_question_paper_ai(
     checkAnswers: bool = Form(True),
     # A CBSE board blueprint key (school institutes only). It sets the sections, marks and duration on the server.
     cbsePreset: Optional[str] = Form(None),
+    # The teacher's edits to that blueprint: JSON [{"pattern": [[marks, count], ...], "choice": n}, ...], one per section.
+    # Left out, the official blueprint is used as it is.
+    cbseLayout: Optional[str] = Form(None),
     questionBank: Optional[UploadFile] = File(None),
     coursePlanner: Optional[UploadFile] = File(None),
     identity: dict = Depends(get_current_identity),
@@ -659,7 +666,16 @@ async def generate_question_paper_ai(
                 return JSONResponse(status_code=400, content={"error": "Unknown CBSE blueprint"})
             if await _get_institute_type(db, faculty_id) != "school":
                 return JSONResponse(status_code=400, content={"error": "CBSE blueprints are only for school institutes"})
-            totalMarks, duration = board["total"], board["duration"]
+            board["customised"] = False
+            if cbseLayout:
+                try:
+                    board["sections"] = custom_sections(cbsePreset, json.loads(cbseLayout), totalMarks)
+                except (LayoutError, ValueError) as exc:
+                    return JSONResponse(status_code=400, content={"error": f"CBSE layout: {exc}"})
+                board["customised"] = is_customised(cbsePreset, json.loads(cbseLayout), totalMarks)
+                board["total"] = totalMarks
+            totalMarks = board["total"]
+            duration = (duration or "").strip()[:30] or board["duration"]
             semester = semester or f"Class {board['class']}"
             subjectName = board["subject"] if subjectName in ("", "Subject") else subjectName
 
@@ -721,7 +737,7 @@ async def generate_question_paper_ai(
             "user_id": str(user["_id"]),
             "co_list": co_list,
             "check_answers": checkAnswers,
-            "board": ({k: board[k] for k in ("key", "code", "class", "subject")} if board else None),
+            "board": ({k: board[k] for k in ("key", "code", "class", "subject", "customised")} if board else None),
         }
         job_file_bytes = {
             "questionBank": qb_bytes, "questionBankFilename": qb_filename,
