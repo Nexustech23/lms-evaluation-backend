@@ -258,6 +258,40 @@ payload, not just type/title.
       Example: {"type":"mermaid_diagram","title":"Process Scheduling Flow",
         "mermaid":"flowchart TD\\n  A[Process Arrives] --> B{CPU Free?}\\n  B -- Yes --> C[Dispatch]\\n  B -- No --> D[Ready Queue]"}
 
+  MATHS FIGURES — drawn exactly from your numbers, so give real coordinates and values. Never label a
+  quantity the question asks the student to find (no solved angle, length or total in the figure).
+
+  "type": "geometry_figure"     ALSO requires: "points": {"A": [x, y], "B": [x, y], ...} (max 15, names up to 3 letters;
+      choose coordinates so given lengths and angles are true to scale, e.g. a 6-8-10 right triangle at
+      A [0,0], B [6,0], C [0,8]) and at least one of
+      "segments": [["A","B"], ["B","C"], {"from":"A","to":"C","dashed":true}],
+      "circles": [{"center":"O","radius":3}]  (O must be one of the points).
+      Optional: "labels": [{"at":["A","B"],"text":"6 cm"}, {"at":"P","text":"x"}]   (a segment or one point),
+      "angles": [{"vertex":"A","from":"B","to":"C","text":"60°","right":false}]   ("right":true draws a square),
+      "show_point_names": true.
+      Example: {"type":"geometry_figure","title":"Triangle ABC","points":{"A":[0,0],"B":[6,0],"C":[0,8]},
+        "segments":[["A","B"],["B","C"],["A","C"]],"labels":[{"at":["A","B"],"text":"6 cm"}],
+        "angles":[{"vertex":"A","from":"B","to":"C","right":true}]}
+
+  "type": "bar_chart"           ALSO requires: "categories": ["Mon","Tue",...] (max 12),
+      "series": [{"label":"Sales","values":[5,8,...]}] (1 to 4 series; one value per category); optional "xlabel","ylabel"
+
+  "type": "pie_chart"           ALSO requires: "labels": [...], "values": [...] (positive; 2 to 10); optional "show_values": false
+      (use false when the question asks for percentages or central angles)
+
+  "type": "histogram"           ALSO requires: "edges": [0,10,20,30] (increasing class limits),
+      "frequencies": [5,8,3] (one per class); optional "xlabel","ylabel"
+
+  "type": "ogive"               ALSO requires: "series": [{"label":"Less than type","x":[10,20,30],"y":[5,13,16]}, ...]
+      (1 or 2 cumulative curves, equal-length x and y lists)
+
+  "type": "number_line"         ALSO requires: "min", "max"; optional "step",
+      "points": [{"value":2,"label":"A","open":false}], "intervals": [{"from":-1,"to":3}]
+
+  "type": "coordinate_plane"    ALSO requires: "xrange": [-5,5], "yrange": [-5,5], "points": [{"name":"A","x":1,"y":2}, ...];
+      optional "segments": [["A","B"]], "polygons": [["A","B","C"]], "lines": [{"through":[[0,1],[2,5]],"label":"l"}]
+      (use "graph" for a curve y = f(x); use this to plot points, lines and shapes)
+
   "type": "plant_cell" (or any other illustrative/anatomical diagram — a
                          labeled cross-section, an organ, a physical
                          apparatus) — these CANNOT be auto-drawn accurately,
