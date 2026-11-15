@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from docx import Document
 from app.services.math_figures import FIGURE_TYPES, draw_figure
+from app.services.physics_figures import PHYSICS_FIGURE_TYPES, draw_figure as draw_physics_figure
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -721,6 +722,8 @@ def draw_diagram(spec: Dict[str, Any]) -> bytes:
             return _render_network_graph(spec)
         elif dtype in FIGURE_TYPES:
             return draw_figure(spec)
+        elif dtype in PHYSICS_FIGURE_TYPES:
+            return draw_physics_figure(spec)
         else:
             return _render_biology_placeholder(spec)
     except Exception as e:
@@ -739,6 +742,9 @@ _WIDTH_MAP = {
     "electrical_circuit": Inches(5.5),
     "graph": Inches(6.0),
     "geometry_figure": Inches(3.6),
+    "ray_diagram": Inches(5.8),
+    "refraction": Inches(4.2),
+    "magnetic_field": Inches(4.6),
     "bar_chart": Inches(5.0),
     "pie_chart": Inches(3.4),
     "histogram": Inches(5.0),
