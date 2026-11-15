@@ -52,6 +52,7 @@ from app.services.cbse_blueprints import (
 from app.models.institute import institute_type_of
 from app.services.library_figures import catalog_text as library_catalog_text
 from app.services.paper_check import check_paper, compare_answers, parse_checks
+from app.services.figure_check import check_figures, merge_flags
 from app.services.math_text import tidy_math
 from app.services.equation_writer import EQUATION_MAX_TOKENS, EQUATION_MODEL, parse_equation_reply, write_equation
 from app.services.diagram_render import draw_diagram
@@ -535,6 +536,12 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             except Exception as check_error:  # the paper is still good; only the second opinion is missing
                 logging.warning("[qp:%s] Answer check could not run: %s", job_id, check_error)
                 answer_check = "failed"
+
+        # Figures against their questions: plain code, no AI call, so it runs whether or not answers are checked.
+        try:
+            review_flags = merge_flags(review_flags, check_figures(blueprint["sections"]))
+        except Exception as figure_error:  # a missed check must never cost the faculty their paper
+            logging.warning("[qp:%s] Figure check could not run: %s", job_id, figure_error)
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "building_docx"})
         docx_bytes = await asyncio.to_thread(
