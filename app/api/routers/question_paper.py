@@ -46,10 +46,8 @@ from app.schemas.question_paper import (
 )
 from app.services.claude import generate_text
 from app.services.paper_blueprint import allocate_sections, validate_paper, PAPER_PROMPT_VERSION
-from app.services.cbse_blueprints import (
-    COMPETENCY_PERCENT, LayoutError, catalog as cbse_catalog, custom_sections, describe_pattern, get_blueprint,
-    is_customised, pattern_count,
-)
+from app.services.cbse_blueprints import catalog as cbse_catalog, describe_pattern, pattern_count
+from app.services.school_paper import SchoolPaperError, apply_cbse_preset, board_instructions
 from app.models.institute import institute_type_of
 from app.services.library_figures import catalog_text as library_catalog_text
 from app.services.paper_check import check_paper, compare_answers, parse_checks
@@ -400,16 +398,7 @@ def _build_claude_prompt(
         instr_num += 1
     section_instrs_text = "\n".join(section_instr_lines)
     if board:
-        board_line = (
-            f"Generate a CBSE Class {board['class']} {board['subject']} (subject code {board['code']}) examination paper "
-            f"in the style of the CBSE 2026-27 sample question paper. Keep roughly {COMPETENCY_PERCENT}% of the marks on "
-            "competency-focused questions (application, analysis, real-life and case-based). Write internal choices "
-            "(an OR alternative of equal marks) inside the question text as the section rules say; the number of questions "
-            "and attempt_count stay as the section rules state. Case-based questions state the passage first, then sub-parts."
-        )
-        if board.get("customised"):
-            board_line += (" The teacher has changed the section layout from the official sample paper, so follow the "
-                           "section rules below exactly, even where they differ from the official paper.")
+        board_line = board_instructions(board)
     else:
         board_line = "Generate a professional university-style examination paper."
 
@@ -661,23 +650,15 @@ async def generate_question_paper_ai(
 
         board = None
         if cbsePreset:
-            board = get_blueprint(cbsePreset)
-            if not board:
-                return JSONResponse(status_code=400, content={"error": "Unknown CBSE blueprint"})
-            if await _get_institute_type(db, faculty_id) != "school":
-                return JSONResponse(status_code=400, content={"error": "CBSE blueprints are only for school institutes"})
-            board["customised"] = False
-            if cbseLayout:
-                try:
-                    board["sections"] = custom_sections(cbsePreset, json.loads(cbseLayout), totalMarks)
-                except (LayoutError, ValueError) as exc:
-                    return JSONResponse(status_code=400, content={"error": f"CBSE layout: {exc}"})
-                board["customised"] = is_customised(cbsePreset, json.loads(cbseLayout), totalMarks)
-                board["total"] = totalMarks
-            totalMarks = board["total"]
-            duration = (duration or "").strip()[:30] or board["duration"]
-            semester = semester or f"Class {board['class']}"
-            subjectName = board["subject"] if subjectName in ("", "Subject") else subjectName
+            try:
+                school = apply_cbse_preset(
+                    cbsePreset, cbseLayout, institute_type=await _get_institute_type(db, faculty_id),
+                    total_marks=totalMarks, duration=duration, semester=semester, subject_name=subjectName,
+                )
+            except SchoolPaperError as exc:
+                return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+            board, totalMarks, duration, semester, subjectName = (
+                school.board, school.total_marks, school.duration, school.semester, school.subject_name)
 
         co_list: list = []
         if subjectId:
