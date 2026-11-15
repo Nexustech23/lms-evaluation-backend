@@ -3,6 +3,7 @@ from app.core.diagnostics import event, trace_function
 from app.core.diagnostic_details import validation_error
 from app.services.math_text import tidy_math
 from app.services.math_figures import FIGURE_TYPES, check_figure
+from app.services.physics_figures import PHYSICS_FIGURE_TYPES, check_figure as check_physics_figure
 import json
 import logging
 import math
@@ -151,8 +152,8 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
                 if isinstance(spec, dict) and spec.get('type') == 'math_expression':
                     dropped_formulas += 1  # a formula picture under a question gives the solution away
                     continue
-                if isinstance(spec, dict) and spec.get('type') in FIGURE_TYPES:
-                    reason = check_figure(spec)
+                if isinstance(spec, dict) and spec.get('type') in FIGURE_TYPES + PHYSICS_FIGURE_TYPES:
+                    reason = (check_figure if spec.get('type') in FIGURE_TYPES else check_physics_figure)(spec)
                     if reason:
                         # One bad figure must not cost the whole paper: leave a labelled gap for the faculty to fill in.
                         event('paper.figure_replaced', level=logging.WARNING, figure_type=spec.get('type'), reason=reason, question_no=n)

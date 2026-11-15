@@ -292,6 +292,24 @@ payload, not just type/title.
       optional "segments": [["A","B"]], "polygons": [["A","B","C"]], "lines": [{"through":[[0,1],[2,5]],"label":"l"}]
       (use "graph" for a curve y = f(x); use this to plot points, lines and shapes)
 
+  PHYSICS FIGURES — drawn from your numbers by the lens/mirror formula and Snell's law. A question figure shows only
+  what is given: leave "show_rays", "show_image" and "show_path" false (or out) when the student must draw the rays,
+  find the image or find the angle. Set them true only in an explanation or answer.
+
+  "type": "ray_diagram"         ALSO requires: "element": "convex_lens" | "concave_lens" | "concave_mirror" | "convex_mirror" |
+      "plane_mirror", "object_distance": 30 (positive, object on the left); "focal_length": 10 (positive number, not for
+      plane_mirror; the sign comes from the element). Optional: "object_height": 2, "unit": "cm", "mark_points": true
+      (shows F, 2F or C, and O or P), "show_rays": false, "show_image": false.
+      Example: {"type":"ray_diagram","title":"Convex lens","element":"convex_lens","focal_length":10,"object_distance":30}
+
+  "type": "refraction"          ALSO requires: "kind": "slab" | "prism", "angle_of_incidence": 40 (degrees from the normal),
+      "n": 1.5; for a prism also "prism_angle": 60. Optional "show_path": false when the student must trace the ray
+      (the incident ray and given angles are then drawn alone). Total internal reflection is refused.
+      Example: {"type":"refraction","title":"Glass slab","kind":"slab","angle_of_incidence":40,"n":1.5,"show_path":false}
+
+  "type": "magnetic_field"      ALSO requires: "kind": "bar_magnet" | "solenoid" | "straight_wire"; optional "north": "left"|"right"
+      (bar magnet), "direction": "out"|"in" (current in a straight wire, out of or into the page). Field lines are drawn.
+
   "type": "plant_cell" (or any other illustrative/anatomical diagram — a
                          labeled cross-section, an organ, a physical
                          apparatus) — these CANNOT be auto-drawn accurately,
