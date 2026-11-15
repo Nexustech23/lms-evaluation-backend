@@ -2,6 +2,7 @@
 from app.core.diagnostics import event, trace_function
 from app.core.diagnostic_details import validation_error
 from app.services.math_text import tidy_math
+from app.services.math_figures import FIGURE_TYPES, check_figure
 import json
 import logging
 import math
@@ -149,6 +150,16 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
             for spec in diagrams:
                 if isinstance(spec, dict) and spec.get('type') == 'math_expression':
                     dropped_formulas += 1  # a formula picture under a question gives the solution away
+                    continue
+                if isinstance(spec, dict) and spec.get('type') in FIGURE_TYPES:
+                    reason = check_figure(spec)
+                    if reason:
+                        # One bad figure must not cost the whole paper: leave a labelled gap for the faculty to fill in.
+                        event('paper.figure_replaced', level=logging.WARNING, figure_type=spec.get('type'), reason=reason, question_no=n)
+                        spec = {'type': 'placeholder', 'title': str(spec.get('title') or 'Figure'),
+                                'labels': {}, 'notes': ['This figure could not be drawn automatically: ' + reason,
+                                                        'Please insert the figure here while editing.']}
+                    section_lines.extend(['<<<DIAGRAM>>>', json.dumps(spec), '<<<END_DIAGRAM>>>'])
                     continue
                 fields={'data_table':['headers','rows'],'math_expression':['expressions'],
                     'chemical_equation':['equations'],'electrical_circuit':['elements'],

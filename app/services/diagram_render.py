@@ -29,6 +29,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 from docx import Document
+from app.services.math_figures import FIGURE_TYPES, draw_figure
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -718,6 +719,8 @@ def draw_diagram(spec: Dict[str, Any]) -> bytes:
             return _render_binary_tree(spec)
         elif dtype in ("network_graph", "directed_graph", "undirected_graph"):
             return _render_network_graph(spec)
+        elif dtype in FIGURE_TYPES:
+            return draw_figure(spec)
         else:
             return _render_biology_placeholder(spec)
     except Exception as e:
@@ -735,6 +738,13 @@ _WIDTH_MAP = {
     "chemical_equation": Inches(6.0),
     "electrical_circuit": Inches(5.5),
     "graph": Inches(6.0),
+    "geometry_figure": Inches(3.6),
+    "bar_chart": Inches(5.0),
+    "pie_chart": Inches(3.4),
+    "histogram": Inches(5.0),
+    "ogive": Inches(5.0),
+    "number_line": Inches(5.5),
+    "coordinate_plane": Inches(4.0),
     "mermaid_diagram": Inches(6.0),
     "mermaid": Inches(6.0),
     "flowchart": Inches(6.0),
