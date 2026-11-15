@@ -4,6 +4,7 @@ from app.core.diagnostic_details import validation_error
 from app.services.math_text import tidy_math
 from app.services.math_figures import FIGURE_TYPES, check_figure
 from app.services.physics_figures import PHYSICS_FIGURE_TYPES, check_figure as check_physics_figure
+from app.services.library_figures import LIBRARY_TYPE, check_figure as check_library_figure, lettered_parts
 import json
 import logging
 import math
@@ -148,18 +149,23 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
                 answer_key.append({"number": n, "answer": answer, "working": working})
             diagrams=q.get('diagrams',[])
             if not isinstance(diagrams,list): raise validation_error('PAPER_DIAGRAMS_INVALID', "Invalid diagrams", question_no=n, section_index=section_index)
+            key_notes = []
             for spec in diagrams:
                 if isinstance(spec, dict) and spec.get('type') == 'math_expression':
                     dropped_formulas += 1  # a formula picture under a question gives the solution away
                     continue
-                if isinstance(spec, dict) and spec.get('type') in FIGURE_TYPES + PHYSICS_FIGURE_TYPES:
-                    reason = (check_figure if spec.get('type') in FIGURE_TYPES else check_physics_figure)(spec)
+                if isinstance(spec, dict) and spec.get('type') in FIGURE_TYPES + PHYSICS_FIGURE_TYPES + (LIBRARY_TYPE,):
+                    checker = check_figure if spec.get('type') in FIGURE_TYPES else (check_physics_figure if spec.get('type') in PHYSICS_FIGURE_TYPES else check_library_figure)
+                    reason = checker(spec)
                     if reason:
                         # One bad figure must not cost the whole paper: leave a labelled gap for the faculty to fill in.
                         event('paper.figure_replaced', level=logging.WARNING, figure_type=spec.get('type'), reason=reason, question_no=n)
                         spec = {'type': 'placeholder', 'title': str(spec.get('title') or 'Figure'),
                                 'labels': {}, 'notes': ['This figure could not be drawn automatically: ' + reason,
                                                         'Please insert the figure here while editing.']}
+                    elif spec.get('type') == LIBRARY_TYPE and lettered_parts(spec):
+                        # The letters follow the figure's own part order, so the key is exact and not the AI's recollection.
+                        key_notes.append(', '.join(f'{letter} = {name}' for letter, name in lettered_parts(spec)))
                     section_lines.extend(['<<<DIAGRAM>>>', json.dumps(spec), '<<<END_DIAGRAM>>>'])
                     continue
                 fields={'data_table':['headers','rows'],'math_expression':['expressions'],
@@ -169,6 +175,13 @@ def validate_paper(text, sections, total, co_list, *, allow_choices=False):
                 if not isinstance(spec,dict) or not spec.get('title') or spec.get('type') not in fields or any(not spec.get(f) for f in fields[spec['type']]):
                     raise validation_error('PAPER_DIAGRAM_PAYLOAD_INVALID', "Diagram requires a supported type and complete payload; faculty must supply unsupported visuals", question_no=n, section_index=section_index)
                 section_lines.extend(['<<<DIAGRAM>>>',json.dumps(spec),'<<<END_DIAGRAM>>>'])
+            if key_notes:
+                note = 'Figure key: ' + '; '.join(key_notes)
+                entry = next((e for e in answer_key if e['number'] == n), None)
+                if entry:
+                    entry['working'] = ((entry.get('working') or '') + ' ' + note).strip()
+                else:
+                    answer_key.append({'number': n, 'answer': None, 'working': note})
             marks.append(score)
         if pattern and sorted(marks) != sorted(m for m, c in pattern for _ in range(c)):
             raise validation_error('PAPER_SECTION_PATTERN_MISMATCH', "Question marks do not match the board blueprint", section_index=section_index)

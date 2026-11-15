@@ -50,6 +50,7 @@ from app.services.cbse_blueprints import (
     COMPETENCY_PERCENT, catalog as cbse_catalog, describe_pattern, get_blueprint, pattern_count,
 )
 from app.models.institute import institute_type_of
+from app.services.library_figures import catalog_text as library_catalog_text
 from app.services.paper_check import check_paper, compare_answers, parse_checks
 from app.services.math_text import tidy_math
 from app.services.equation_writer import EQUATION_MAX_TOKENS, EQUATION_MODEL, parse_equation_reply, write_equation
@@ -310,7 +311,18 @@ payload, not just type/title.
   "type": "magnetic_field"      ALSO requires: "kind": "bar_magnet" | "solenoid" | "straight_wire"; optional "north": "left"|"right"
       (bar magnet), "direction": "out"|"in" (current in a straight wire, out of or into the page). Field lines are drawn.
 
-  "type": "plant_cell" (or any other illustrative/anatomical diagram — a
+  STANDARD BIOLOGY AND CHEMISTRY FIGURES — a library of ready-drawn textbook figures. Name one; you cannot draw these yourself.
+  "type": "library_figure"      ALSO requires: "figure": one of the keys below. Optional: "labels": "names" (default: every part
+      is labelled) or "letters" (every part shows A, B, C ... instead of its name); or "hide": ["Nucleus", "Vacuole"] to show
+      only those parts as letters and label the rest. Use letters or hide for a "name the parts" question; the letters follow
+      the numbered part order below (hide: only the hidden parts get letters, A, B, C ... in that same order), and the answer
+      key for the figure is added automatically. Use the exact part names below.
+      Example: {"type":"library_figure","title":"Plant cell","figure":"plant_cell","hide":["Nucleus","Vacuole","Chloroplast"]}
+      The figures (parts in order):
+@@LIBRARY_FIGURES@@
+      Maps are not available: ask the faculty to insert an official map in the editor.
+
+  "type": "plant_cell" (or any other illustrative/anatomical diagram NOT in the library above — a
                          labeled cross-section, an organ, a physical
                          apparatus) — these CANNOT be auto-drawn accurately,
                          so instead of a picture you get a labeled checklist
@@ -320,6 +332,7 @@ payload, not just type/title.
 ═══════════════════════════════════════════════════════
 END OF DIAGRAM RULES
 ═══════════════════════════════════════════════════════"""
+_DIAGRAM_SPEC_BLOCK = _DIAGRAM_SPEC_BLOCK.replace("@@LIBRARY_FIGURES@@", library_catalog_text())
 
 
 def _build_source_block(prompt: str, extracted_text: str, course_planner_text: str, sections, total_marks) -> str:
