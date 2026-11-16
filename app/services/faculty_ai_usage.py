@@ -1,6 +1,8 @@
 """Track each LMS AI step before downstream parsing, rendering or persistence."""
 import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 from bson import ObjectId
 from app.core.diagnostics import event as log_event, scope, stage
 from app.core.diagnostic_details import external_error_details
@@ -88,7 +90,25 @@ async def tracked_faculty_call(db, function, *args, faculty_id, user_id, provide
         raise
 
 
+async def _record_call_timing(db, event_id, started, usage, feature, model, job_id, call_status):
+    """Keep how long the provider call took on its usage record (it survives a redeploy; container logs do not).
+    Measurement only: a failure here is logged and never touches the call."""
+    try:
+        seconds = time.perf_counter() - started
+        tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+        fields = {"duration_ms": round(seconds * 1000), "ended_at": datetime.now(timezone.utc)}
+        if isinstance(tokens, (int, float)) and tokens > 0 and seconds > 0:
+            fields["tokens_per_second"] = round(tokens / seconds, 1)
+        await db["aiUsageEvents"].update_one({"_id": event_id}, {"$set": fields})
+        log_event("ai.call_timing", ai_event_id=str(event_id), feature=feature, model=model, job_id=job_id,
+                  call_status=call_status, duration_ms=fields["duration_ms"], output_tokens=tokens,
+                  tokens_per_second=fields.get("tokens_per_second"))
+    except Exception:
+        logger.exception("Could not record the timing of AI attempt %s", event_id)
+
+
 async def _execute_call(db, function, args, user_id, provider, model, feature, job_id, institute_id, event_id):
+    started = time.perf_counter()
     try:
         with scope(ai_event_id=str(event_id), provider=provider, model=model, feature=feature,
                    user_id=str(user_id), job_id=job_id, institute_id=str(institute_id) if institute_id else None):
@@ -106,6 +126,8 @@ async def _execute_call(db, function, args, user_id, provider, model, feature, j
             )
         else:
             await _mark_unknown(db, event_id, "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
+        if not isinstance(exc, asyncio.CancelledError):
+            await _record_call_timing(db, event_id, started, usage, feature, model, job_id, "failed")
         raise
 
     if not usage or (
@@ -122,6 +144,7 @@ async def _execute_call(db, function, args, user_id, provider, model, feature, j
         )
     log_event("ai.call_accounted", ai_event_id=str(event_id), provider=provider, model=model,
               feature=feature, job_id=job_id, usage_status=(usage or {}).get("usage_status", "known"))
+    await _record_call_timing(db, event_id, started, usage, feature, model, job_id, "completed")
     return result, usage
 
 

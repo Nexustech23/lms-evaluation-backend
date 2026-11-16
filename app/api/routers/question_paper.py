@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -51,6 +52,7 @@ from app.services.school_paper import SchoolPaperError, apply_cbse_preset, board
 from app.models.institute import institute_type_of
 from app.services.library_figures import catalog_text as library_catalog_text
 from app.services.paper_check import check_paper, compare_answers, parse_checks
+from app.services.paper_timing import JobTimings, composition_of, log_delivery, record_job_timings
 from app.services.figure_check import check_figures, merge_flags
 from app.services.math_text import tidy_math
 from app.services.equation_writer import EQUATION_MAX_TOKENS, EQUATION_MODEL, parse_equation_reply, write_equation
@@ -481,6 +483,8 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
     faculty_id = params["faculty_id"]
     user_id = params.get("user_id")
     interrupted = False
+    timings = JobTimings(job_id)       # measurement only: where the time and the tokens go
+    outcome, error_type = "unknown", None
 
     try:
         extracted_text = ""
@@ -488,19 +492,21 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
         if file_bytes.get("questionBank"):
             await update_job(QP_JOB_PREFIX, job_id, {"status": "processing", "step": "extracting_question_bank"})
-            extracted_text, g_usage = await tracked_faculty_call(
-                db, _extract_file_text, file_bytes["questionBank"], file_bytes["questionBankFilename"], "question bank",
-                faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
-                feature=Feature.QP_QUESTION_BANK_EXTRACTION, job_id=job_id,
-            )
+            with timings.stage("extract_question_bank"):
+                extracted_text, g_usage = await tracked_faculty_call(
+                    db, _extract_file_text, file_bytes["questionBank"], file_bytes["questionBankFilename"], "question bank",
+                    faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                    feature=Feature.QP_QUESTION_BANK_EXTRACTION, job_id=job_id,
+                )
 
         if file_bytes.get("coursePlanner"):
             await update_job(QP_JOB_PREFIX, job_id, {"step": "extracting_course_planner"})
-            course_planner_text, g_usage2 = await tracked_faculty_call(
-                db, _extract_file_text, file_bytes["coursePlanner"], file_bytes["coursePlannerFilename"], "course planner",
-                faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
-                feature=Feature.QP_COURSE_PLANNER_EXTRACTION, job_id=job_id,
-            )
+            with timings.stage("extract_course_planner"):
+                course_planner_text, g_usage2 = await tracked_faculty_call(
+                    db, _extract_file_text, file_bytes["coursePlanner"], file_bytes["coursePlannerFilename"], "course planner",
+                    faculty_id=faculty_id, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
+                    feature=Feature.QP_COURSE_PLANNER_EXTRACTION, job_id=job_id,
+                )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "generating_paper"})
         full_prompt = _build_claude_prompt(
@@ -509,15 +515,21 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             params["total_marks"], params["duration"], params["sections"], params.get("co_list") or [],
             board=params.get("board"), school=params.get("institute_type") == "school",
         )
-        paper_text_raw, c_usage = await tracked_faculty_call(
-            db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
-            faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
-            feature=Feature.QP_GENERATION, job_id=job_id,
-            prompt_version=PAPER_PROMPT_VERSION,
-        )
-        paper_text, blueprint = validate_paper(paper_text_raw, params["sections"],
-            params["total_marks"], params.get("co_list") or [],
-            allow_choices=bool(re.search(r'(?i)\b(optional|choice|attempt\s+any|answer\s+any)\b', params["prompt"])))
+        timings.facts["prompt_chars"] = len(full_prompt)
+        with timings.stage("generate_paper"):
+            paper_text_raw, c_usage = await tracked_faculty_call(
+                db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
+                faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
+                feature=Feature.QP_GENERATION, job_id=job_id,
+                prompt_version=PAPER_PROMPT_VERSION,
+            )
+        timings.note_call(Feature.QP_GENERATION, c_usage, model=PAPER_MODEL, seconds=timings.stages.get("generate_paper", 0),
+                          max_tokens=PAPER_MAX_OUTPUT_TOKENS)
+        timings.composition = composition_of(paper_text_raw, (c_usage or {}).get("output_tokens") if isinstance(c_usage, dict) else None)
+        with timings.stage("validate_paper"):
+            paper_text, blueprint = validate_paper(paper_text_raw, params["sections"],
+                params["total_marks"], params.get("co_list") or [],
+                allow_choices=bool(re.search(r'(?i)\b(optional|choice|attempt\s+any|answer\s+any)\b', params["prompt"])))
 
         review_flags, answer_check = [], "skipped"
         if params.get("check_answers"):
@@ -525,11 +537,14 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             try:
                 questions = [{"number": q["number"], "marks": q["marks"], "text": tidy_math(q["text"])}
                              for sec in blueprint["sections"] for q in sec["questions"]]
-                reply, _ = await tracked_faculty_call(
-                    db, check_paper, questions, PAPER_MODEL, ANSWER_CHECK_MAX_TOKENS, ANSWER_CHECK_EFFORT,
-                    faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
-                    feature=Feature.QP_ANSWER_CHECK, job_id=job_id, prompt_version=PAPER_PROMPT_VERSION,
-                )
+                with timings.stage("check_answers"):
+                    reply, check_usage = await tracked_faculty_call(
+                        db, check_paper, questions, PAPER_MODEL, ANSWER_CHECK_MAX_TOKENS, ANSWER_CHECK_EFFORT,
+                        faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
+                        feature=Feature.QP_ANSWER_CHECK, job_id=job_id, prompt_version=PAPER_PROMPT_VERSION,
+                    )
+                timings.note_call(Feature.QP_ANSWER_CHECK, check_usage, model=PAPER_MODEL,
+                                  seconds=timings.stages.get("check_answers", 0), max_tokens=ANSWER_CHECK_MAX_TOKENS)
                 review_flags = compare_answers(blueprint.get("answer_key") or [], parse_checks(reply))
                 answer_check = "done"
             except asyncio.CancelledError:
@@ -540,29 +555,34 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
         # Figures against their questions: plain code, no AI call, so it runs whether or not answers are checked.
         try:
-            review_flags = merge_flags(review_flags, check_figures(blueprint["sections"]))
+            with timings.stage("check_figures"):
+                review_flags = merge_flags(review_flags, check_figures(blueprint["sections"]))
         except Exception as figure_error:  # a missed check must never cost the faculty their paper
             logging.warning("[qp:%s] Figure check could not run: %s", job_id, figure_error)
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "building_docx"})
-        docx_bytes = await asyncio.to_thread(
-            build_docx, paper_text, params["institute_name"], params["department_name"],
-            params["subject_name"], params["exam_type"], params["semester"], params["academic_year"],
-            params["total_marks"], params["duration"], params.get("co_list") or [],
-            _semester_label(params.get("institute_type")),
-        )
+        with timings.stage("build_docx"):
+            docx_bytes = await asyncio.to_thread(
+                build_docx, paper_text, params["institute_name"], params["department_name"],
+                params["subject_name"], params["exam_type"], params["semester"], params["academic_year"],
+                params["total_marks"], params["duration"], params.get("co_list") or [],
+                _semester_label(params.get("institute_type")),
+            )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "uploading"})
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"question_paper_{ts}.docx"
-        upload = await asyncio.to_thread(
-            upload_file_to_imagekit, docx_bytes, filename,
-            f"/question_papers/{faculty_id}", ["question_paper", params["subject_name"]],
-        )
+        with timings.stage("upload"):
+            upload = await asyncio.to_thread(
+                upload_file_to_imagekit, docx_bytes, filename,
+                f"/question_papers/{faculty_id}", ["question_paper", params["subject_name"]],
+            )
 
+        outcome = "completed"
         await update_job(QP_JOB_PREFIX, job_id, {
             "status": "completed",
             "step": "done",
+            "finished_at": time.time(),
             "paperText": paper_text,
             "blueprint": blueprint,
             "answerKey": blueprint.get("answer_key") or [],
@@ -588,13 +608,16 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
 
     except asyncio.CancelledError:
         interrupted = True
+        outcome = "interrupted"
         await update_job(QP_JOB_PREFIX, job_id, {"status": "interrupted",
             "step": "Generation interrupted. Verify this job before starting another paid generation."})
         raise
     except Exception as e:
+        outcome, error_type = "failed", type(e).__name__
         logging.error("[qp:%s] Job failed: %s", job_id, e, exc_info=True)
         await update_job(QP_JOB_PREFIX, job_id, {"status": "failed", "step": "error", "error": str(e)})
     finally:
+        await record_job_timings(db, timings, params, outcome, error_type)
         if not interrupted and params.get("_submission_field") and params.get("user_id"):
             try:
                 await release_submission(db, "users", {"_id": ObjectId(params["user_id"])},
@@ -781,6 +804,7 @@ async def generate_question_paper_status(
     status = job.get("status", "unknown")
 
     if status == "completed":
+        log_delivery(job_id, job)          # how long the finished paper waited for the page to ask
         return {
             "success": True,
             "status": "completed",
