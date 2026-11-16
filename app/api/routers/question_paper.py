@@ -112,6 +112,11 @@ async def _get_institute_name(db: AsyncIOMotorDatabase, faculty_id: str) -> Opti
     return institute.get("institute_name") or institute.get("name") or institute.get("instituteName")
 
 
+def _semester_label(institute_type: str) -> str:
+    """The header word for the semester line: a school's papers say CLASS, a college's say SEMESTER."""
+    return "CLASS" if institute_type == "school" else "SEMESTER"
+
+
 async def _get_institute_type(db: AsyncIOMotorDatabase, faculty_id: str) -> str:
     faculty = await db["facultyDetails"].find_one({"_id": ObjectId(faculty_id)})
     institute_id = (faculty or {}).get("institute_id")
@@ -375,7 +380,7 @@ the faculty instructions or reference content explicitly restrict scope to a sub
 
 def _build_claude_prompt(
     prompt, extracted_text, course_planner_text, institute_name, subject_name,
-    exam_type, semester, academic_year, total_marks, duration, sections, co_list=None, board=None,
+    exam_type, semester, academic_year, total_marks, duration, sections, co_list=None, board=None, school=False,
 ) -> str:
     source_block = _build_source_block(prompt, extracted_text, course_planner_text, sections, total_marks)
     section_heading_list = "\n".join(f"   - {s['label']}" for s in sections)
@@ -402,13 +407,16 @@ def _build_claude_prompt(
     else:
         board_line = "Generate a professional university-style examination paper."
 
+    level_label = "Class" if school else "Semester"
+    level_line = f"* {level_label}:".ljust(18) + str(semester)
+
     return f"""You are an expert academic question paper designer.
 
 PAPER DETAILS:
 * Institute:      {institute_name}
 * Subject:        {subject_name}
 * Exam Type:      {exam_type}
-* Semester:       {semester}
+{level_line}
 * Academic Year:  {academic_year}
 * Total Marks:    {total_marks}
 * Duration:       {duration}
@@ -428,7 +436,7 @@ QUESTION PAPER GENERATION GUIDELINES
 3. Respect the section distribution above — both marks AND Bloom's levels.
 4. The paper MUST contain exactly these sections (in order):
 {section_heading_list}
-5. Create questions appropriate to the subject, semester level, exam type, and marks.
+5. Create questions appropriate to the subject, {level_label.lower()} level, exam type, and marks.
 6. Include a mix of question types where appropriate.
 7. Use a diagrams JSON object only for a table of data, graph, circuit or figure that the question needs.
    Never show a formula or a solution step in a diagram.
@@ -499,7 +507,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             params["prompt"], extracted_text, course_planner_text, params["institute_name"],
             params["subject_name"], params["exam_type"], params["semester"], params["academic_year"],
             params["total_marks"], params["duration"], params["sections"], params.get("co_list") or [],
-            board=params.get("board"),
+            board=params.get("board"), school=params.get("institute_type") == "school",
         )
         paper_text_raw, c_usage = await tracked_faculty_call(
             db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
@@ -541,6 +549,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             build_docx, paper_text, params["institute_name"], params["department_name"],
             params["subject_name"], params["exam_type"], params["semester"], params["academic_year"],
             params["total_marks"], params["duration"], params.get("co_list") or [],
+            _semester_label(params.get("institute_type")),
         )
 
         await update_job(QP_JOB_PREFIX, job_id, {"step": "uploading"})
@@ -648,11 +657,12 @@ async def generate_question_paper_ai(
         user, faculty_id = await _require_faculty(identity, db)
         prompt = prompt.strip()
 
+        institute_type = await _get_institute_type(db, faculty_id)
         board = None
         if cbsePreset:
             try:
                 school = apply_cbse_preset(
-                    cbsePreset, cbseLayout, institute_type=await _get_institute_type(db, faculty_id),
+                    cbsePreset, cbseLayout, institute_type=institute_type,
                     total_marks=totalMarks, duration=duration, semester=semester, subject_name=subjectName,
                 )
             except SchoolPaperError as exc:
@@ -718,6 +728,7 @@ async def generate_question_paper_ai(
             "user_id": str(user["_id"]),
             "co_list": co_list,
             "check_answers": checkAnswers,
+            "institute_type": institute_type,
             "board": ({k: board[k] for k in ("key", "code", "class", "subject", "customised")} if board else None),
         }
         job_file_bytes = {
@@ -831,7 +842,7 @@ async def export_question_paper_docx(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """The Word file for what is in the editor right now (edits and equations included). Nothing is saved."""
-    await _require_faculty(identity, db)
+    _, faculty_id = await _require_faculty(identity, db)
     if not payload.editorContent.strip():
         raise HTTPException(status_code=400, detail="The paper is empty")
     data = payload.model_dump()
@@ -841,6 +852,7 @@ async def export_question_paper_docx(
         "examType": data.get("examType", ""),
         "subjectName": data.get("subjectName", ""),
         "semester": data.get("semester", ""),
+        "semesterLabel": _semester_label(await _get_institute_type(db, faculty_id)),
         "academicYear": data.get("academicYear", ""),
         "duration": data.get("duration", ""),
         "totalMarks": data.get("totalMarks", ""),
@@ -899,6 +911,7 @@ async def save_question_paper(
         "examType": data.get("examType", ""),
         "subjectName": data.get("subjectName", ""),
         "semester": data.get("semester", ""),
+        "semesterLabel": _semester_label(await _get_institute_type(db, faculty_id)),
         "academicYear": data.get("academicYear", ""),
         "duration": data.get("duration", ""),
         "totalMarks": data.get("totalMarks", ""),
@@ -1043,6 +1056,7 @@ async def update_question_paper(
             "examType": update_fields.get("exam_type", existing.get("exam_type", "")),
             "subjectName": update_fields.get("subject_name", existing.get("subject_name", "")),
             "semester": update_fields.get("semester", existing.get("semester", "")),
+            "semesterLabel": _semester_label(await _get_institute_type(db, faculty_id)),
             "academicYear": update_fields.get("academic_year", existing.get("academic_year", "")),
             "duration": update_fields.get("duration", existing.get("duration", "")),
             "totalMarks": update_fields.get("total_marks", existing.get("total_marks", "")),
