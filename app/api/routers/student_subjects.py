@@ -86,10 +86,22 @@ async def link_student_subjects(
     return {"message": f"{linked_count} subjects linked successfully"}
 
 
+def subject_query(batch: str, semester: Optional[str], department: Optional[str]) -> Dict[str, Any]:
+    """The subjects a student can enrol in: a batch's, for one semester when given.
+
+    A school has classes, not semesters, so its students ask without a semester and get every subject of the class."""
+    query: Dict[str, Any] = {"batch_id": ObjectId(batch), "is_deleted": {"$ne": True}}
+    if semester not in (None, ""):
+        query["semester"] = int(semester)
+    if department and ObjectId.is_valid(department):
+        query["department_id"] = ObjectId(department)
+    return query
+
+
 @router.get("/student-subjects")
 async def get_subjects_by_filters(
     batch: str = Query(...),
-    semester: str = Query(...),
+    semester: Optional[str] = Query(None),
     department: Optional[str] = Query(None),
     identity: dict = Depends(get_current_identity),
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -103,13 +115,7 @@ async def get_subjects_by_filters(
     if not ObjectId.is_valid(batch):
         raise HTTPException(status_code=400, detail="Invalid batch id")
 
-    query: Dict[str, Any] = {
-        "semester": int(semester),
-        "batch_id": ObjectId(batch),
-        "is_deleted": {"$ne": True},
-    }
-    if department and ObjectId.is_valid(department):
-        query["department_id"] = ObjectId(department)
+    query = subject_query(batch, semester, department)
 
     subject_rows = [s async for s in db["subjectDetails"].find(query)]
 
