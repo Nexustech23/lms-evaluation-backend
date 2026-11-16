@@ -116,6 +116,7 @@ def build_exam_header(doc, header_data: Optional[Dict[str, Any]] = None) -> None
     h_exam_type = header_data.get("examType", "EXAMINATION")
     h_subject = header_data.get("subjectName", "")
     h_semester = header_data.get("semester", "")
+    h_semester_label = header_data.get("semesterLabel") or "SEMESTER"      # a school's papers say CLASS
     h_acad_year = header_data.get("academicYear", "")
     h_duration = header_data.get("duration", "")
     h_max_marks = header_data.get("totalMarks", "")
@@ -178,7 +179,7 @@ def build_exam_header(doc, header_data: Optional[Dict[str, Any]] = None) -> None
     if h_duration:
         grid_cols.append(("DURATION", h_duration))
     if h_semester:
-        grid_cols.append(("SEMESTER", h_semester))
+        grid_cols.append((h_semester_label, h_semester))
     if not grid_cols:
         grid_cols = [("SUBJECT", "—"), ("EXAM TYPE", h_exam_type or "—"), ("DURATION", "—")]
 

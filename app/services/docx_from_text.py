@@ -101,6 +101,7 @@ def build_docx(
     total_marks: Any,
     duration: str,
     co_list: Optional[List[Dict[str, Any]]] = None,
+    semester_label: str = "SEMESTER",
 ) -> bytes:
     doc = Document()
     for sec in doc.sections:
@@ -115,6 +116,7 @@ def build_docx(
         "examType": exam_type,
         "subjectName": subject_name,
         "semester": semester,
+        "semesterLabel": semester_label,
         "academicYear": academic_year,
         "duration": duration,
         "totalMarks": total_marks,
