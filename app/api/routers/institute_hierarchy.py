@@ -1194,7 +1194,8 @@ async def get_faculty_filter_data(
         subjects = [s for s in subjects if str(s.get("semester")) == str(semester)]
 
     subject_list = [
-        {"id": str(s["_id"]), "subject_name": s.get("subject_name"), "subject_code": s.get("subject_code"), "co": s.get("co")}
+        {"id": str(s["_id"]), "subject_name": s.get("subject_name"), "subject_code": s.get("subject_code"), "co": s.get("co"),
+         "semester": s.get("semester")}
         for s in subjects
     ]
 
