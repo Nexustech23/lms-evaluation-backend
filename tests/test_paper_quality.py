@@ -158,7 +158,7 @@ class JobHarness:
 
         async def tracked(db, function, *args, **kwargs):
             self.calls.append(kwargs["feature"])
-            if function is qp.generate_text:
+            if getattr(function, "func", function) is qp.generate_text:     # the writer, with or without its effort
                 return paper(questions), {"output_tokens": 10}
             if check_error:
                 raise check_error

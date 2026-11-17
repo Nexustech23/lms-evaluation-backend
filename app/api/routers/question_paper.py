@@ -17,6 +17,7 @@
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import re
@@ -494,6 +495,12 @@ If constraints cannot be satisfied, return {{"error":"explain the conflict"}}.
 # BACKGROUND JOB
 # ============================================================
 
+def _paper_writer():
+    """The function that writes the paper, with the configured thinking effort (none when set to "default")."""
+    effort = settings.PAPER_WRITER_EFFORT
+    return generate_text if effort == "default" else functools.partial(generate_text, effort=effort)
+
+
 async def _write_paper_plan_first(db, job_id, params, timings, extracted_text, course_planner_text):
     """Plan every question, write the questions in parallel batches, and return the joined reply and its summed tokens.
     The reply has the single call's format, so it goes through the same validation. Raises when it cannot; the caller
@@ -508,9 +515,11 @@ async def _write_paper_plan_first(db, job_id, params, timings, extracted_text, c
     )
     board_line = board_instructions(board) if board else "Generate a professional university-style examination paper."
 
+    writer = _paper_writer()
+
     async def call(prompt, max_tokens, kind):
         return await tracked_faculty_call(
-            db, generate_text, prompt, PAPER_MODEL, max_tokens,
+            db, writer, prompt, PAPER_MODEL, max_tokens,
             faculty_id=params["faculty_id"], user_id=params.get("user_id"), provider=Provider.CLAUDE, model=PAPER_MODEL,
             feature=Feature.QP_PLAN if kind == "plan" else Feature.QP_GENERATION, job_id=job_id,
             prompt_version=PAPER_PROMPT_VERSION,
@@ -584,7 +593,7 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
         if paper_text_raw is None:
             with timings.stage("generate_paper"):
                 paper_text_raw, c_usage = await tracked_faculty_call(
-                    db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
+                    db, _paper_writer(), full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
                     faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
                     feature=Feature.QP_GENERATION, job_id=job_id,
                     prompt_version=PAPER_PROMPT_VERSION,
