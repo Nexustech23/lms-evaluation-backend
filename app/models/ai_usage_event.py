@@ -59,6 +59,7 @@ class Feature:
     QP_QUESTION_BANK_EXTRACTION = "qp_question_bank_extraction"
     QP_COURSE_PLANNER_EXTRACTION = "qp_course_planner_extraction"
     QP_GENERATION = "qp_generation"
+    QP_PLAN = "qp_plan"
     QP_ANSWER_CHECK = "qp_answer_check"
     EQUATION_ASSIST = "equation_assist"
 
@@ -105,6 +106,7 @@ FEATURE_LABELS: Dict[str, str] = {
     Feature.QP_QUESTION_BANK_EXTRACTION: "Extracted question bank",
     Feature.QP_COURSE_PLANNER_EXTRACTION: "Extracted course planner",
     Feature.QP_GENERATION: "Generated question paper",
+    Feature.QP_PLAN: "Planned question paper",
     Feature.QP_ANSWER_CHECK: "Checked question paper answers",
     Feature.EQUATION_ASSIST: "Wrote an equation from a description",
     Feature.GRADING_ANSWER_OCR: "Extracted answer script text",
@@ -129,6 +131,7 @@ FACULTY_FEATURES = frozenset({
     Feature.QP_QUESTION_BANK_EXTRACTION,
     Feature.QP_COURSE_PLANNER_EXTRACTION,
     Feature.QP_GENERATION,
+    Feature.QP_PLAN,
     Feature.QP_ANSWER_CHECK,
     Feature.EQUATION_ASSIST,
     Feature.GRADING_ANSWER_OCR,

@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     # renders each page to an image at that dpi (typed papers are vector, so more dpi = more detail)
     # and sends the images at high resolution. Off until verified against real papers.
     PAPER_EXTRACT_RENDER_DPI: int = 0
+    # Question-paper generation: plan every question first, then write the questions in parallel batches (much faster
+    # for a big paper). Off by default: the paper is written in one call, as before. Papers below the marks threshold
+    # always use one call, and any failure of the plan falls back to one call.
+    PAPER_PLAN_FIRST: bool = False
+    PAPER_PLAN_MIN_MARKS: int = 40
+    PAPER_PLAN_BATCH_SIZE: int = 5
+    PAPER_PLAN_MAX_PARALLEL: int = 6
     IMAGEKIT_PUBLIC_KEY: str = ""
     IMAGEKIT_PRIVATE_KEY: str = ""
     IMAGEKIT_URL_ENDPOINT: str = ""
