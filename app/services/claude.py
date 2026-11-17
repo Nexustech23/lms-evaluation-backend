@@ -57,6 +57,17 @@ def _response_text(message):
     return text
 
 
+def _thinking_tokens(message):
+    """The API's own count of output tokens spent thinking (usage.output_tokens_details.thinking_tokens), or None
+    when the response does not carry it. Older SDK versions keep unknown fields in model_extra."""
+    usage = getattr(message, "usage", None)
+    details = getattr(usage, "output_tokens_details", None)
+    if details is None:
+        details = (getattr(usage, "model_extra", None) or {}).get("output_tokens_details")
+    value = details.get("thinking_tokens") if isinstance(details, dict) else getattr(details, "thinking_tokens", None)
+    return value if isinstance(value, int) else None
+
+
 def content_breakdown(message):
     """How many blocks of each kind the reply held, and the size of the text and of any reasoning.
     Counts only, never the words: it answers whether output tokens beyond the visible text are the model's reasoning."""
@@ -72,7 +83,8 @@ def content_breakdown(message):
             reasoning = getattr(block, "thinking", None)
             if isinstance(reasoning, str):
                 sizes["thinking_chars"] += len(reasoning)
-        return {"blocks": kinds, **sizes, "stop_reason": getattr(message, "stop_reason", None)}
+        return {"blocks": kinds, **sizes, "thinking_tokens": _thinking_tokens(message),
+                "stop_reason": getattr(message, "stop_reason", None)}
     except Exception:
         return {"error": "breakdown_failed"}
 

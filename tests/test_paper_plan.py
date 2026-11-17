@@ -385,7 +385,8 @@ class Message:
 def test_the_content_breakdown_tells_text_from_reasoning_without_keeping_words():
     from app.services.claude import content_breakdown
     message = Message([Block("thinking", thinking="x" * 120), Block("text", text="y" * 30)])
-    assert content_breakdown(message) == {"blocks": {"thinking": 1, "text": 1}, "text_chars": 30, "thinking_chars": 120, "stop_reason": "end_turn"}
+    assert content_breakdown(message) == {"blocks": {"thinking": 1, "text": 1}, "text_chars": 30, "thinking_chars": 120,
+                                         "thinking_tokens": None, "stop_reason": "end_turn"}
     assert content_breakdown(Message([Block("text", text="abc")]))["blocks"] == {"text": 1}
     assert content_breakdown(Message([Block("redacted_thinking", data="zz")]))["blocks"] == {"redacted_thinking": 1}
     assert content_breakdown(object())["blocks"] == {}                                        # an odd reply never raises
