@@ -62,9 +62,37 @@ class JobTimings:
                 cost = estimate_cost_usd(model, tokens_in, tokens_out)
                 if cost is not None:
                     call["cost_usd"] = round(cost, 4)
+            if isinstance(usage.get("content_breakdown"), dict):
+                call["content_breakdown"] = usage["content_breakdown"]
             self.calls[feature] = call
         except Exception:
             logger.exception("Could not note the %s call's timing", feature)
+
+    def note_batches(self, outcome, *, model):
+        """The plan call and the parallel batches of a plan-first paper: wall time, the slowest batch, tokens and cost."""
+        try:
+            self.note_call("qp_plan", outcome.plan_usage, model=model, seconds=outcome.plan_seconds)
+            rows, tokens_in, tokens_out = [], 0, 0
+            for batch in outcome.batches:
+                usage = batch.get("usage") if isinstance(batch.get("usage"), dict) else {}
+                used_in, used_out = _whole(usage.get("input_tokens")) or 0, _whole(usage.get("output_tokens")) or 0
+                tokens_in, tokens_out = tokens_in + used_in, tokens_out + used_out
+                row = {"questions": f"{batch['first']}-{batch['last']}", "seconds": batch["seconds"], "output_tokens": used_out}
+                if batch.get("attempts", 1) > 1:
+                    row["attempts"] = batch["attempts"]
+                if isinstance(usage.get("content_breakdown"), dict):
+                    row["content_breakdown"] = usage["content_breakdown"]
+                rows.append(row)
+            seconds = [row["seconds"] for row in rows] or [0]
+            summary = {"model": model, "batches": len(rows), "retries": outcome.retries, "wall_seconds": outcome.wall_seconds,
+                       "slowest_seconds": max(seconds), "fastest_seconds": min(seconds), "input_tokens": tokens_in,
+                       "output_tokens": tokens_out, "per_batch": rows}
+            cost = estimate_cost_usd(model, tokens_in, tokens_out)
+            if cost is not None:
+                summary["cost_usd"] = round(cost, 4)
+            self.calls["qp_generation_batches"] = summary
+        except Exception:
+            logger.exception("Could not note the plan-first calls' timing")
 
     def total_seconds(self):
         return round(time.perf_counter() - self.started, 3)

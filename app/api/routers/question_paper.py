@@ -45,6 +45,7 @@ from app.schemas.question_paper import (
     QuestionPaperUpdateRequest,
     RenderDiagramRequest,
 )
+from app.core.config import settings
 from app.services.claude import generate_text
 from app.services.paper_blueprint import allocate_sections, validate_paper, PAPER_PROMPT_VERSION
 from app.services.cbse_blueprints import catalog as cbse_catalog, describe_pattern, pattern_count
@@ -52,6 +53,7 @@ from app.services.school_paper import SchoolPaperError, apply_cbse_preset, board
 from app.models.institute import institute_type_of
 from app.services.library_figures import catalog_text as library_catalog_text
 from app.services.paper_check import check_paper, compare_answers, parse_checks
+from app.services import paper_plan
 from app.services.paper_timing import JobTimings, composition_of, log_delivery, record_job_timings
 from app.services.figure_check import check_figures, merge_flags
 from app.services.math_text import tidy_math
@@ -380,16 +382,10 @@ Distribute questions across the COs above — do not leave any CO with zero cove
 the faculty instructions or reference content explicitly restrict scope to a subset of COs."""
 
 
-def _build_claude_prompt(
-    prompt, extracted_text, course_planner_text, institute_name, subject_name,
-    exam_type, semester, academic_year, total_marks, duration, sections, co_list=None, board=None, school=False,
-) -> str:
-    source_block = _build_source_block(prompt, extracted_text, course_planner_text, sections, total_marks)
-    section_heading_list = "\n".join(f"   - {s['label']}" for s in sections)
-    co_block = _build_co_block(co_list or [])
-
-    instr_num = 3
-    section_instr_lines = []
+def _section_rule_lines(sections, first_number=3):
+    """One instruction line per section (counts for a board pattern, marks % and Bloom's levels otherwise)."""
+    instr_num = first_number
+    lines = []
     for sec in sections:
         bloom_levels = sec.get("bloomLevels") or []
         level_desc = (
@@ -397,21 +393,25 @@ def _build_claude_prompt(
             if bloom_levels else ""
         )
         if sec.get("pattern"):
-            section_instr_lines.append(
+            lines.append(
                 f"{instr_num}. {sec['label']} has exactly {pattern_count(sec['pattern'])} questions "
                 f"({describe_pattern(sec['pattern'])}). {sec.get('kind', '')}")
         else:
-            section_instr_lines.append(f"{instr_num}. {sec['label']} carries {sec['percent']}% of total marks{level_desc}.")
+            lines.append(f"{instr_num}. {sec['label']} carries {sec['percent']}% of total marks{level_desc}.")
         instr_num += 1
-    section_instrs_text = "\n".join(section_instr_lines)
-    if board:
-        board_line = board_instructions(board)
-    else:
-        board_line = "Generate a professional university-style examination paper."
+    return lines
 
+
+def _prompt_front(
+    prompt, extracted_text, course_planner_text, institute_name, subject_name,
+    exam_type, semester, academic_year, total_marks, duration, sections, co_list=None, school=False,
+) -> str:
+    """The part of every paper prompt that is the same whoever writes which question: the paper's details, the reference
+    content and the figure rules. The single-call prompt and the plan-first prompts both start with exactly this."""
+    source_block = _build_source_block(prompt, extracted_text, course_planner_text, sections, total_marks)
+    co_block = _build_co_block(co_list or [])
     level_label = "Class" if school else "Semester"
     level_line = f"* {level_label}:".ljust(18) + str(semester)
-
     return f"""You are an expert academic question paper designer.
 
 PAPER DETAILS:
@@ -428,7 +428,25 @@ REFERENCE CONTENT:
 {source_block}
 
 {_DIAGRAM_SPEC_BLOCK}
+"""
 
+
+def _build_claude_prompt(
+    prompt, extracted_text, course_planner_text, institute_name, subject_name,
+    exam_type, semester, academic_year, total_marks, duration, sections, co_list=None, board=None, school=False,
+) -> str:
+    front = _prompt_front(prompt, extracted_text, course_planner_text, institute_name, subject_name, exam_type,
+                          semester, academic_year, total_marks, duration, sections, co_list, school)
+    section_heading_list = "\n".join(f"   - {s['label']}" for s in sections)
+    section_instrs_text = "\n".join(_section_rule_lines(sections))
+    if board:
+        board_line = board_instructions(board)
+    else:
+        board_line = "Generate a professional university-style examination paper."
+
+    level_label = "Class" if school else "Semester"
+
+    return f"""{front}
 QUESTION PAPER GENERATION GUIDELINES
 
 1. {board_line}
@@ -476,6 +494,39 @@ If constraints cannot be satisfied, return {{"error":"explain the conflict"}}.
 # BACKGROUND JOB
 # ============================================================
 
+async def _write_paper_plan_first(db, job_id, params, timings, extracted_text, course_planner_text):
+    """Plan every question, write the questions in parallel batches, and return the joined reply and its summed tokens.
+    The reply has the single call's format, so it goes through the same validation. Raises when it cannot; the caller
+    then writes the paper in one call."""
+    school = params.get("institute_type") == "school"
+    board = params.get("board")
+    sections = params["sections"]
+    front = _prompt_front(
+        params["prompt"], extracted_text, course_planner_text, params["institute_name"], params["subject_name"],
+        params["exam_type"], params["semester"], params["academic_year"], params["total_marks"], params["duration"],
+        sections, params.get("co_list") or [], school,
+    )
+    board_line = board_instructions(board) if board else "Generate a professional university-style examination paper."
+
+    async def call(prompt, max_tokens, kind):
+        return await tracked_faculty_call(
+            db, generate_text, prompt, PAPER_MODEL, max_tokens,
+            faculty_id=params["faculty_id"], user_id=params.get("user_id"), provider=Provider.CLAUDE, model=PAPER_MODEL,
+            feature=Feature.QP_PLAN if kind == "plan" else Feature.QP_GENERATION, job_id=job_id,
+            prompt_version=PAPER_PROMPT_VERSION,
+        )
+
+    with timings.stage("plan_and_write"):
+        outcome = await paper_plan.write_paper(
+            call, front, board_line, _section_rule_lines(sections, first_number=1), sections, params["total_marks"],
+            batch_size=settings.PAPER_PLAN_BATCH_SIZE, max_parallel=settings.PAPER_PLAN_MAX_PARALLEL,
+        )
+    timings.stages["plan"] = round(outcome.plan_seconds, 3)
+    timings.stages["write_batches"] = round(outcome.wall_seconds - outcome.plan_seconds, 3)
+    timings.note_batches(outcome, model=PAPER_MODEL)
+    return outcome.text, paper_plan.total_usage(outcome)
+
+
 async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> None:
     db = get_database()
     if not await claim_job_execution(QP_JOB_PREFIX, job_id):
@@ -516,20 +567,35 @@ async def _run_generation_job(job_id: str, params: dict, file_bytes: dict) -> No
             board=params.get("board"), school=params.get("institute_type") == "school",
         )
         timings.facts["prompt_chars"] = len(full_prompt)
-        with timings.stage("generate_paper"):
-            paper_text_raw, c_usage = await tracked_faculty_call(
-                db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
-                faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
-                feature=Feature.QP_GENERATION, job_id=job_id,
-                prompt_version=PAPER_PROMPT_VERSION,
-            )
-        timings.note_call(Feature.QP_GENERATION, c_usage, model=PAPER_MODEL, seconds=timings.stages.get("generate_paper", 0),
-                          max_tokens=PAPER_MAX_OUTPUT_TOKENS)
+        choices_requested = bool(re.search(r'(?i)\b(optional|choice|attempt\s+any|answer\s+any)\b', params["prompt"]))
+        paper_text_raw, c_usage = None, None
+        timings.facts["mode"] = "single_call"
+        if paper_plan.applies(params["sections"], params["total_marks"], params["prompt"], enabled=settings.PAPER_PLAN_FIRST,
+                              min_marks=settings.PAPER_PLAN_MIN_MARKS, choices_requested=choices_requested):
+            try:
+                paper_text_raw, c_usage = await _write_paper_plan_first(
+                    db, job_id, params, timings, extracted_text, course_planner_text)
+                timings.facts["mode"] = "plan_first"
+            except asyncio.CancelledError:
+                raise
+            except Exception as plan_error:      # the paper is still written, the old way, in one call
+                timings.facts["plan_first_fallback"] = f"{type(plan_error).__name__}: {plan_error}"[:160]
+                logging.warning("[qp:%s] Plan-first writing could not be used (%s); writing the paper in one call", job_id, plan_error)
+        if paper_text_raw is None:
+            with timings.stage("generate_paper"):
+                paper_text_raw, c_usage = await tracked_faculty_call(
+                    db, generate_text, full_prompt, PAPER_MODEL, PAPER_MAX_OUTPUT_TOKENS,
+                    faculty_id=faculty_id, user_id=user_id, provider=Provider.CLAUDE, model=PAPER_MODEL,
+                    feature=Feature.QP_GENERATION, job_id=job_id,
+                    prompt_version=PAPER_PROMPT_VERSION,
+                )
+            timings.note_call(Feature.QP_GENERATION, c_usage, model=PAPER_MODEL, seconds=timings.stages.get("generate_paper", 0),
+                              max_tokens=PAPER_MAX_OUTPUT_TOKENS)
         timings.composition = composition_of(paper_text_raw, (c_usage or {}).get("output_tokens") if isinstance(c_usage, dict) else None)
         with timings.stage("validate_paper"):
             paper_text, blueprint = validate_paper(paper_text_raw, params["sections"],
                 params["total_marks"], params.get("co_list") or [],
-                allow_choices=bool(re.search(r'(?i)\b(optional|choice|attempt\s+any|answer\s+any)\b', params["prompt"])))
+                allow_choices=choices_requested)
 
         review_flags, answer_check = [], "skipped"
         if params.get("check_answers"):

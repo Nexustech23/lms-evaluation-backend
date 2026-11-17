@@ -57,6 +57,26 @@ def _response_text(message):
     return text
 
 
+def content_breakdown(message):
+    """How many blocks of each kind the reply held, and the size of the text and of any reasoning.
+    Counts only, never the words: it answers whether output tokens beyond the visible text are the model's reasoning."""
+    try:
+        kinds, sizes = {}, {"text_chars": 0, "thinking_chars": 0}
+        for block in getattr(message, "content", None) or []:
+            kind = getattr(block, "type", None)
+            kind = kind if isinstance(kind, str) else "unknown"
+            kinds[kind] = kinds.get(kind, 0) + 1
+            text = getattr(block, "text", None)
+            if kind == "text" and isinstance(text, str):
+                sizes["text_chars"] += len(text)
+            reasoning = getattr(block, "thinking", None)
+            if isinstance(reasoning, str):
+                sizes["thinking_chars"] += len(reasoning)
+        return {"blocks": kinds, **sizes, "stop_reason": getattr(message, "stop_reason", None)}
+    except Exception:
+        return {"error": "breakdown_failed"}
+
+
 def _message_usage(message):
     usage = {"input_tokens": message.usage.input_tokens,
             "output_tokens": message.usage.output_tokens,
@@ -162,6 +182,7 @@ def generate_text(
         message = _send_with_connect_retry(send)
 
         token_usage = _message_usage(message)
+        token_usage["content_breakdown"] = content_breakdown(message)
         if getattr(message, "stop_reason", None) in {"max_tokens", "refusal"}:
             raise RuntimeError("AI text output is incomplete or refused; it cannot be published")
         text = _response_text(message)
