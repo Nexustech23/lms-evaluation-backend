@@ -30,6 +30,7 @@ from app.utils.composite_helper import compute_weighted_composite
 from app.utils.grade_points import get_grade_point
 from app.models.exam_validation import finite_number
 from app.utils.grading_helper import assign_relative_grades
+from app.utils.school_grading import assign_school_grades, config_if_school, grade_for
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["subject-results"])
 
@@ -178,7 +179,18 @@ async def _get_subject_results(
         ]
         student.update(compute_weighted_composite(exam_results))
 
-    grading = await db["relativeGradings"].find_one({"university_id": institute_id})
+    school_config = await config_if_school(db, institute_id)
+    if school_config is not None:
+        # A school grades each student by their own percentage (CBSE bands by default); no ranking, no setup needed.
+        for student in students_list:
+            if student.get("composite_percentage") is None or student.get("is_partial"):
+                continue
+            band = grade_for(student["composite_percentage"], school_config)
+            student["course_grade"] = band["grade"]
+            student["grade_point"] = band["grade_point"]
+        grading = None
+    else:
+        grading = await db["relativeGradings"].find_one({"university_id": institute_id})
     if grading:
         grading_config = build_grading_config(grading)
         gradable_students = [s for s in students_list if s.get("composite_percentage") is not None and not s.get("is_partial")]
@@ -251,11 +263,20 @@ async def _get_combined_results(
     if not str(semester).isdigit():
         return {"error": "Invalid semester"}, 400
 
-    grading = await db["relativeGradings"].find_one({"university_id": institute_id})
-    if not grading:
-        return {"error": "Relative grading configuration not found"}, 404
+    school_config = await config_if_school(db, institute_id)
+    if school_config is None:
+        grading = await db["relativeGradings"].find_one({"university_id": institute_id})
+        if not grading:
+            return {"error": "Relative grading configuration not found"}, 404
+        grading_config = build_grading_config(grading)
 
-    grading_config = build_grading_config(grading)
+        def grade_rows(rows, max_marks=100):
+            return assign_relative_grades(rows, grading_config, max_marks=max_marks)
+        missing_grade = "U"
+    else:
+        def grade_rows(rows, max_marks=100):
+            return assign_school_grades(rows, school_config, max_marks=max_marks)
+        missing_grade = school_config["bands"][-1]["grade"]
 
     # ── Source 1: imported Excel marks ──────────────────────────────────
     imported_docs = [
@@ -273,7 +294,7 @@ async def _get_combined_results(
         for index, student in enumerate(combined_result, start=1):
             student["rank"] = index
 
-        combined_result = assign_relative_grades(combined_result, grading_config)
+        combined_result = grade_rows(combined_result)
 
         # This view only has this one semester's imported marks to work from —
         # no verified prior-semester history is available here (that's what
@@ -333,7 +354,7 @@ async def _get_combined_results(
             composite = (student or {}).get("composite_percentage")
             if student is None or composite is None or student.get("is_partial"):
                 return {"error": "Evaluation is pending or a subject result is missing; combined results cannot be finalized"}, 409
-            grade = (student or {}).get("course_grade") or "U"
+            grade = (student or {}).get("course_grade") or missing_grade
             grade_point = (student or {}).get("grade_point") or 0
             if composite is None:
                 composite = 0
@@ -359,7 +380,7 @@ async def _get_combined_results(
         student["rank"] = index
 
     semester_max_marks = 100 * len(subjects) if subjects else 100
-    combined_result = assign_relative_grades(combined_result, grading_config, max_marks=semester_max_marks)
+    combined_result = grade_rows(combined_result, semester_max_marks)
 
     for student in combined_result:
         total_credit_points = round(student.get("total_credit_points", 0), 2)

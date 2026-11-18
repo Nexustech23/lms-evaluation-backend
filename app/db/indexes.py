@@ -88,6 +88,9 @@ _INDEXES: dict[str, list[list[tuple[str, int]]]] = {
     "relativeGradings": [
         [("university_id", 1)],
     ],
+    "schoolGradings": [
+        [("institute_id", 1)],
+    ],
     "importedMarks": [
         [("institute_id", 1), ("batch_id", 1), ("semester", 1)],
     ],
