@@ -495,6 +495,11 @@ If constraints cannot be satisfied, return {{"error":"explain the conflict"}}.
 # BACKGROUND JOB
 # ============================================================
 
+def _answer_check_wanted(requested: bool) -> bool:
+    """The answer check runs only when the faculty asked for it and it is switched on for the server."""
+    return bool(requested) and settings.PAPER_ANSWER_CHECK
+
+
 def _paper_writer():
     """The function that writes the paper, with the configured thinking effort (none when set to "default")."""
     effort = settings.PAPER_WRITER_EFFORT
@@ -825,7 +830,7 @@ async def generate_question_paper_ai(
             "faculty_id": str(faculty_id),
             "user_id": str(user["_id"]),
             "co_list": co_list,
-            "check_answers": checkAnswers,
+            "check_answers": _answer_check_wanted(checkAnswers),
             "institute_type": institute_type,
             "board": ({k: board[k] for k in ("key", "code", "class", "subject", "customised")} if board else None),
         }

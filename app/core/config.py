@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     PAPER_PLAN_MIN_MARKS: int = 40
     PAPER_PLAN_BATCH_SIZE: int = 5
     PAPER_PLAN_MAX_PARALLEL: int = 6
+    # The answer check: a second Claude call that re-solves every question and flags answers that differ from the key.
+    # Switched off for now (saves about 11 s and 2 rupees a paper, but nothing warns about a wrong answer). When off, the
+    # faculty's "check answers" box is ignored and the paper reports the check as skipped. Set true to bring it back.
+    PAPER_ANSWER_CHECK: bool = False
     # How hard the model thinks while it writes the paper (cost and time follow the thinking). "default" sends no
     # effort, which is the old behaviour (the model's own default, high on Sonnet 5.5).
     PAPER_WRITER_EFFORT: Literal["default", "low", "medium", "high"] = "low"
