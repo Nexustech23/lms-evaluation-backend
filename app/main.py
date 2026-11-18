@@ -36,6 +36,7 @@ from app.api.routers import (
     relative_grading,
     roadmap,
     roles,
+    school_grading,
     self_learner_analytics,
     self_learner_course_material,
     student_subjects,
@@ -189,6 +190,7 @@ app.include_router(marks_import.router)
 app.include_router(mock_tests.router)
 app.include_router(mycareerguru_auth.router)
 app.include_router(relative_grading.router)
+app.include_router(school_grading.router)
 app.include_router(roadmap.router)
 app.include_router(self_learner_analytics.router)
 app.include_router(subject_results.router)
