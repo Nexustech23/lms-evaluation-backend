@@ -11,8 +11,8 @@ from app.services.claude import content_breakdown
 from tests.test_paper_timing import job_params, patch_job, physics_reply, run
 
 
-def test_the_default_effort_is_low():
-    assert type(settings).model_fields["PAPER_WRITER_EFFORT"].default == "low"
+def test_the_default_effort_is_medium():
+    assert type(settings).model_fields["PAPER_WRITER_EFFORT"].default == "medium"
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
