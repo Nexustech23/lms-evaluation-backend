@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     PAPER_ANSWER_CHECK: bool = False
     # How hard the model thinks while it writes the paper (cost and time follow the thinking). "default" sends no
     # effort, which is the old behaviour (the model's own default, high on Sonnet 5.5).
-    PAPER_WRITER_EFFORT: Literal["default", "low", "medium", "high"] = "low"
+    PAPER_WRITER_EFFORT: Literal["default", "low", "medium", "high"] = "medium"
     IMAGEKIT_PUBLIC_KEY: str = ""
     IMAGEKIT_PRIVATE_KEY: str = ""
     IMAGEKIT_URL_ENDPOINT: str = ""
