@@ -12,10 +12,25 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, resolve_current_institute_id
 from app.db.mongodb import get_database
+from app.services.result_revision import transaction
 from app.utils.excel_import_helper import read_marks_excel
 from app.utils.uploads import read_upload_capped
 
 router = APIRouter(dependencies=[Depends(get_current_identity)], tags=["marks-import"])
+
+
+async def replace_imported_marks(db, institute_id, batch_object_id, semester, documents, run=None):
+    """Swap a batch's imported marks for the new file's, as ONE all-or-nothing step: either the old marks are replaced by the
+    new ones, or (if anything fails) the old marks stay exactly as they were. Before, the old marks were deleted first and a
+    failure while saving the new ones would have left the batch with no marks at all."""
+    run = run or transaction
+
+    async def operation(session):
+        await db["importedMarks"].delete_many(
+            {"institute_id": institute_id, "batch_id": batch_object_id, "semester": semester}, session=session)
+        await db["importedMarks"].insert_many(documents, session=session)
+
+    await run(db, operation)
 
 
 @router.post("/import-marks-excel")
@@ -57,10 +72,7 @@ async def import_marks_excel(
         for s in students
     ]
 
-    await db["importedMarks"].delete_many(
-        {"institute_id": institute_id, "batch_id": batch_object_id, "semester": semester_int}
-    )
-    await db["importedMarks"].insert_many(documents)
+    await replace_imported_marks(db, institute_id, batch_object_id, semester_int, documents)
 
     return {
         "success": True,

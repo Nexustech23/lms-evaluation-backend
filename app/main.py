@@ -20,6 +20,7 @@ from app.api.routers import (
     ai_tutor,
     answers,
     auth,
+    bulk_update,
     client_diagnostics,
     contact,
     course_material,
@@ -191,6 +192,7 @@ app.include_router(mock_tests.router)
 app.include_router(mycareerguru_auth.router)
 app.include_router(relative_grading.router)
 app.include_router(school_grading.router)
+app.include_router(bulk_update.router)
 app.include_router(roadmap.router)
 app.include_router(self_learner_analytics.router)
 app.include_router(subject_results.router)

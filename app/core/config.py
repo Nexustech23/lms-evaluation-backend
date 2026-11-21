@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_BULK_GRADING_PER_MINUTE: int = 60      # per user, /evaluate-answer-script only —
     # its "Evaluate All" button fires one request per ungraded answer script at once
     RATE_LIMIT_AUTH_PER_MINUTE: int = 10              # per IP, on public unauthenticated endpoints
+    RATE_LIMIT_BULK_UPDATE_PER_MINUTE: int = 10       # per user, on bulk-update uploads
+
+    # Bulk update of existing records from a file (app/services/bulk_update.py).
+    BULK_UPDATE_MAX_ROWS: int = 2000                  # rows in one file
+    BULK_UPDATE_PREVIEW_HOURS: int = 24               # a preview can be applied for this long
+    BULK_UPDATE_UNDO_DAYS: int = 7                    # an applied update can be undone for this long
 
     # Set true ONLY when the app sits behind a trusted reverse proxy / load
     # balancer that sets X-Forwarded-For. When false, rate-limit keys use the
