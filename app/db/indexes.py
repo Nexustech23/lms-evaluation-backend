@@ -91,6 +91,10 @@ _INDEXES: dict[str, list[list[tuple[str, int]]]] = {
     "schoolGradings": [
         [("institute_id", 1)],
     ],
+    "bulkUpdateBatches": [
+        [("institute_id", 1), ("created_at", -1)],
+        [("institute_id", 1), ("file_sha256", 1)],
+    ],
     "importedMarks": [
         [("institute_id", 1), ("batch_id", 1), ("semester", 1)],
     ],
