@@ -41,7 +41,8 @@ async def _transcripts(db, student: Dict[str, Any], batch_ids: set) -> List[Dict
     if not keys:
         return []
     projection = {"_id": 0, "student_id": 1, "batch_id": 1, "semester_no": 1, "term_label": 1,
-                  "subjects": 1, "tgpa": 1, "cgpa": 1, "is_stale": 1}
+                  "subjects": 1, "tgpa": 1, "cgpa": 1, "is_stale": 1,
+                  "overall_total": 1, "total_credits": 1, "total_credit_points": 1}
     found = [doc async for doc in db[TRANSCRIPT_COLLECTION].find(
         {"institute_id": student["institute_id"], "student_id": {"$in": keys}}, projection).sort("semester_no", 1)]
     return [doc for doc in found
