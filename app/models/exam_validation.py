@@ -33,6 +33,16 @@ def weightage_number(value):
     return number
 
 
+def min_clear_percent_number(value):
+    """Minimum percentage needed to clear a mandatory exam; blank means no minimum."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    number = finite_number(value, "min_clear_percent")
+    if not 0 <= number <= 100:
+        raise ValueError("min_clear_percent must be between 0 and 100")
+    return number
+
+
 def exam_datetime(value):
     if value is None or isinstance(value, datetime):
         return value

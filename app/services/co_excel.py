@@ -25,6 +25,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.attendance import counts_for_attainment
+
 
 class CoReportError(Exception):
     """Raised for guard conditions the router turns into (400/404, payload) responses."""
@@ -347,7 +349,8 @@ async def fetch_exams(db: AsyncIOMotorDatabase, subject_id: str) -> List[Dict[st
             raw = await _try_find(db, "answerDetails", "evaluation_id", ev["_id"])
         if not raw:
             raw = await _try_find(db, "answerDetails", "newsaved_id", ev["_id"])
-        students = [_normalise_answer(a) for a in raw]
+        # Absent / malpractice students are not part of CO attainment (services/attendance.py).
+        students = [_normalise_answer(a) for a in raw if counts_for_attainment(a)]
         students.sort(key=lambda s: (s["student_name"].lower() if s["student_name"] else s["filename"].lower()))
         exams.append({
             "exam_id": str(ev["_id"]),

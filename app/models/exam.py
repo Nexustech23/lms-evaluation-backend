@@ -3,7 +3,7 @@ from typing import Any, Dict
 from bson import ObjectId
 from app.models.exam_validation import (
     boolean_value, covered_co_list, exam_datetime, nonblank_text,
-    semester_number, weightage_number,
+    min_clear_percent_number, semester_number, weightage_number,
 )
 
 
@@ -21,6 +21,9 @@ def validate_exam_data(data: Dict[str, Any]) -> bool:
     semester_number(data.get("semester"))
     covered_co_list(data.get("covered_cos"))
     weightage_number(data.get("weightage"))
+    min_clear_percent_number(data.get("min_clear_percent"))
+    if data.get("is_mandatory") is not None:
+        boolean_value(data["is_mandatory"], "is_mandatory")
     exam_datetime(data.get("exam_date"))
     for field in ("department_id", "batch_id"):
         if data.get(field) not in (None, "", "null") and not ObjectId.is_valid(str(data[field])):
@@ -57,6 +60,10 @@ def create_exam_document(data: Dict[str, Any], created_by: ObjectId) -> Dict[str
         "covered_cos": covered_co_list(data.get("covered_cos")),
         "is_course_exit_summary": boolean_value(data.get("is_course_exit_summary", False), "is_course_exit_summary"),
         "weightage": weightage_number(data.get("weightage")),
+        # Mandatory exam: a student must clear min_clear_percent (None = no
+        # minimum, attendance only). Defaults keep every existing exam unchanged.
+        "is_mandatory": boolean_value(data.get("is_mandatory", False), "is_mandatory"),
+        "min_clear_percent": min_clear_percent_number(data.get("min_clear_percent")),
         "exam_title": nonblank_text(data["exam_title"], "exam_title") if data.get("exam_title") is not None else None,
         "exam_type": nonblank_text(data["exam_type"], "exam_type"),
         "exam_date": exam_datetime(data.get("exam_date")),
@@ -118,6 +125,11 @@ def update_exam_document(data: Dict[str, Any]) -> Dict[str, Any]:
     if "is_course_exit_summary" in data:
         update_fields["is_course_exit_summary"] = boolean_value(data["is_course_exit_summary"], "is_course_exit_summary")
 
+    if "is_mandatory" in data:
+        update_fields["is_mandatory"] = boolean_value(data["is_mandatory"], "is_mandatory")
+    if "min_clear_percent" in data:
+        update_fields["min_clear_percent"] = min_clear_percent_number(data["min_clear_percent"])
+
     return {"$set": update_fields}
 
 
@@ -144,6 +156,8 @@ def serialize_exam(doc: Dict[str, Any]) -> Dict[str, Any] | None:
         "covered_cos": doc.get("covered_cos", []),
         "weightage": doc.get("weightage", 0),
         "is_course_exit_summary": doc.get("is_course_exit_summary", False),
+        "is_mandatory": doc.get("is_mandatory", False),
+        "min_clear_percent": doc.get("min_clear_percent"),
 
         "question_paper": doc.get("question_paper"),
 

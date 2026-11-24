@@ -24,6 +24,9 @@ from app.api.deps import get_current_identity, get_current_user_and_faculty_deta
 from app.api.answer_access import require_exam_access
 from app.api.subject_access import require_subject_report_access
 from app.api.exam_hierarchy import require_exam_hierarchy
+from app.services.answer_identity import answer_student_id
+from app.services.attendance import attendance_status, is_not_cleared
+from app.services.evaluation_review import pending_review
 from app.services.exam_paper_lock import require_replaceable_paper
 from app.services.paper_version import paper_snapshot_filter
 from app.services.result_revision import touch_result_source, transaction
@@ -92,6 +95,8 @@ async def create_folder(
         "covered_cos": data.get("covered_cos"),
         "faculty_id": faculty_id,
         "is_course_exit_summary": data.get("is_course_exit_summary", False),
+        "is_mandatory": data.get("is_mandatory", False),
+        "min_clear_percent": data.get("min_clear_percent"),
     }
 
     try:
@@ -298,6 +303,8 @@ async def get_all_folders(
             "question_paper": doc.get("question_paper"),
             "weightage": doc.get("weightage"),
             "is_course_exit_summary": doc.get("is_course_exit_summary", False),
+            "is_mandatory": doc.get("is_mandatory", False),
+            "min_clear_percent": doc.get("min_clear_percent"),
             "school_name": doc.get("school", {}).get("school_code"),
             "programme_name": doc.get("programme", {}).get("programme_code"),
             "department_name": doc.get("department", {}).get("code"),
@@ -454,6 +461,8 @@ async def get_exam_using_examid(
         "covered_cos": folder.get("covered_cos"),
         "weightage": folder.get("weightage"),
         "is_course_exit_summary": folder.get("is_course_exit_summary", False),
+        "is_mandatory": folder.get("is_mandatory", False),
+        "min_clear_percent": folder.get("min_clear_percent"),
         "exam_title": folder.get("exam_title"),
         "exam_type": folder.get("exam_type"),
         "exam_date": folder.get("exam_date").isoformat() if folder.get("exam_date") else None,
@@ -489,6 +498,7 @@ async def update_exam(
         "folder_name": "folderName", "semester": "semester", "exam_title": "examdetails",
         "weightage": "weightage", "covered_cos": "covered_cos",
         "is_course_exit_summary": "is_course_exit_summary", "exam_type": "examtype", "exam_date": "examdate",
+        "is_mandatory": "is_mandatory", "min_clear_percent": "min_clear_percent",
     })
     try:
         update_data = update_exam_document({
@@ -510,7 +520,8 @@ async def update_exam(
             {"$set": update_data}, session=session)
         if result.matched_count != 1:
             raise HTTPException(409, "Exam changed while saving")
-        if {"weightage", "subject_id", "semester", "is_course_exit_summary"}.intersection(update_data):
+        if {"weightage", "subject_id", "semester", "is_course_exit_summary",
+                "is_mandatory", "min_clear_percent"}.intersection(update_data):
             await touch_result_source(db, current, session)
             if update_data.get("subject_id", current.get("subject_id")) != current.get("subject_id"):
                 await touch_result_source(db, {**current, **update_data}, session)
@@ -632,6 +643,49 @@ async def download_folder(
 
 
 # =====================================================
+# NOT CLEARED (mandatory exams)
+# =====================================================
+
+@router.get("/not-cleared/{folder_id}")
+async def get_not_cleared(
+    folder_id: str,
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Students who have not cleared a mandatory exam: absent, malpractice, or below the minimum.
+
+    Only students who already have a saved answer row can be listed; knowing who
+    *should* have sat the exam needs an enrolment roster (a later step)."""
+    folder = await require_exam_access(identity, db, folder_id, allow_institute_read=True)
+    exam_info = {
+        "is_mandatory": bool(folder.get("is_mandatory", False)),
+        "min_clear_percent": folder.get("min_clear_percent"),
+    }
+    students = []
+    if exam_info["is_mandatory"]:
+        async for answer in db["answerDetails"].find({"exam_id": folder["_id"]}):
+            status = attendance_status(answer)
+            maximum = answer.get("total_max_marks") or 0
+            final = answer.get("total_final_marks")
+            percentage = None
+            if status == "present" and final is not None and maximum > 0 and not pending_review(answer):
+                percentage = round(final / maximum * 100, 2)
+            if not is_not_cleared(folder, status, percentage):
+                continue
+            students.append({
+                "answer_id": str(answer["_id"]),
+                "student_id": answer_student_id(answer),
+                "student_name": answer.get("student_name"),
+                "attendance_status": status,
+                "status_note": answer.get("status_note"),
+                "percentage": percentage,
+                "reason": status if status != "present" else "below_minimum",
+            })
+        students.sort(key=lambda student: str(student["student_id"]))
+    return {"exam_id": str(folder["_id"]), **exam_info, "students": students, "count": len(students)}
+
+
+# =====================================================
 # FOLDER DETAILS (answers + rubric)
 # =====================================================
 
@@ -667,6 +721,8 @@ async def get_folder_details(
             "result_revision": answer.get("result_revision", 0),
             "report_is_draft": answer.get("report_is_draft", False),
             "student_name": answer.get("student_name"),
+            "attendance_status": attendance_status(answer),
+            "status_note": answer.get("status_note"),
             "created_at": answer.get("created_at"),
             "evaluated_at": answer.get("evaluated_at"),
             "updated_at": answer.get("updated_at"),

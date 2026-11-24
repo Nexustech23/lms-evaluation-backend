@@ -110,3 +110,69 @@ async def test_set_archive_status_success(superadmin_client, client_factory, tes
     assert resp.status_code == 200
     updated = await test_db["newsavedDocs"].find_one({"_id": folder.inserted_id})
     assert updated["is_archived"] is True
+
+
+# ---- Step A1: mandatory exam fields -------------------------------------
+
+async def _folder_form(test_db, faculty_id, **extra):
+    """A form whose subject/school/programme really exist and belong to the faculty,
+    so the exam-hierarchy check passes (random ObjectIds are rejected as unknown)."""
+    faculty = await test_db["facultyDetails"].find_one({"_id": faculty_id})
+    institute_id = faculty["institute_id"]
+    school_id, programme_id, subject_id = ObjectId(), ObjectId(), ObjectId()
+    await test_db["schoolDetails"].insert_one({"_id": school_id, "institute_id": institute_id})
+    await test_db["programmeDetails"].insert_one(
+        {"_id": programme_id, "institute_id": institute_id, "school_id": school_id})
+    await test_db["subjectDetails"].insert_one({
+        "_id": subject_id, "institute_id": institute_id, "school_id": school_id,
+        "programme_id": programme_id, "faculty_id": faculty_id, "semester": 1,
+    })
+    return {
+        "folderName": "Mandatory CA", "school": str(school_id), "programme": str(programme_id),
+        "subject_id": str(subject_id), "semester": "1", "examtype": "Midterm Exam",
+        "covered_cos": "[]", "weightage": "10", **extra,
+    }
+
+
+async def test_create_folder_defaults_not_mandatory(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    resp = await fc.post("/createSaveFolder", data=await _folder_form(test_db, faculty_id))
+    assert resp.status_code == 200, resp.text
+    doc = await test_db["newsavedDocs"].find_one({"_id": ObjectId(resp.json()["folder_id"])})
+    assert doc["is_mandatory"] is False
+    assert doc["min_clear_percent"] is None
+
+
+async def test_create_folder_stores_mandatory_minimum(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    form = await _folder_form(test_db, faculty_id, is_mandatory="true", min_clear_percent="40")
+    resp = await fc.post("/createSaveFolder", data=form)
+    assert resp.status_code == 200, resp.text
+    doc = await test_db["newsavedDocs"].find_one({"_id": ObjectId(resp.json()["folder_id"])})
+    assert doc["is_mandatory"] is True
+    assert doc["min_clear_percent"] == 40.0
+
+
+async def test_create_folder_rejects_bad_minimum(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    for bad in ("101", "-1", "abc"):
+        form = await _folder_form(test_db, faculty_id, is_mandatory="true", min_clear_percent=bad)
+        assert (await fc.post("/createSaveFolder", data=form)).status_code == 400, bad
+    form = await _folder_form(test_db, faculty_id, is_mandatory="maybe")
+    assert (await fc.post("/createSaveFolder", data=form)).status_code == 400
+
+
+async def test_update_exam_sets_and_clears_mandatory(superadmin_client, client_factory, test_db):
+    fc, faculty_id = await _faculty_client(superadmin_client, client_factory, test_db)
+    created = await fc.post("/createSaveFolder", data=await _folder_form(test_db, faculty_id))
+    folder_id = created.json()["folder_id"]
+
+    resp = await fc.put(f"/update-exam/{folder_id}", data={"is_mandatory": "true", "min_clear_percent": "35"})
+    assert resp.status_code == 200, resp.text
+    doc = await test_db["newsavedDocs"].find_one({"_id": ObjectId(folder_id)})
+    assert doc["is_mandatory"] is True and doc["min_clear_percent"] == 35.0
+
+    resp = await fc.put(f"/update-exam/{folder_id}", data={"is_mandatory": "false", "min_clear_percent": ""})
+    assert resp.status_code == 200, resp.text
+    doc = await test_db["newsavedDocs"].find_one({"_id": ObjectId(folder_id)})
+    assert doc["is_mandatory"] is False and doc["min_clear_percent"] is None

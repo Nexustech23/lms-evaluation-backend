@@ -5,7 +5,23 @@ from fractions import Fraction
 from app.models.answer import validate_questionwise
 from app.models.evaluation import validate_evaluation_details, _validate_total_marks
 from app.models.exam_validation import finite_number
+from app.services.attendance import ATTENDANCE_STATUSES
 from app.services.choice_groups import attach_groups, counted_sum, reselect_counted, validate_groups
+
+
+def _attendance(entry, row):
+    """The entry's attendance status and optional note; blank status means present."""
+    status = entry.get("attendance_status")
+    status = "present" if status in (None, "") else status
+    if status not in ATTENDANCE_STATUSES:
+        raise ValueError(f"Row {row}: attendance_status must be present, absent or malpractice")
+    note = entry.get("status_note")
+    if note is not None and (not isinstance(note, str) or len(note) > 500):
+        raise ValueError(f"Row {row}: status_note must be text of at most 500 characters")
+    note = (note or "").strip() or None
+    if status != "present" and (entry.get("marks") not in (None, "") or entry.get("question_marks")):
+        raise ValueError(f"Row {row}: marks cannot be entered for a student marked {status}")
+    return status, note
 
 
 def allocate_co_marks(awarded, cos):
@@ -54,7 +70,21 @@ def prepare_manual_marks(payload, evaluation):
             raise ValueError(f"Row {row}: duplicate student_id")
         seen.add(sid)
         marking = []
-        if questions:
+        status, status_note = _attendance(entry, row)
+        if status != "present":
+            # No marks for an absent / malpractice student: store zeros in the usual
+            # shape so every reader of answerDetails keeps working. Results use the
+            # attendance_status to decide how these zeros are treated.
+            if questions:
+                for index, question in enumerate(questions, 1):
+                    marking.append({"question_no": index, "max_marks": question["maxMarks"],
+                        "ai_awarded_marks": 0, "grace_marks": 0,
+                        "cos": allocate_co_marks(0, question["cos"])})
+                marking = validate_questionwise(marking)
+                attach_groups(marking, groups)
+                reselect_counted(marking)
+            total = 0.0
+        elif questions:
             marks = entry.get("question_marks")
             if not isinstance(marks, list) or len(marks) != len(questions):
                 raise ValueError(f"Row {row}: include every rubric question exactly once")
@@ -82,5 +112,6 @@ def prepare_manual_marks(payload, evaluation):
             if not 0 <= total <= maximum:
                 raise ValueError(f"Row {row}: marks must be between zero and max_marks")
         prepared.append({"student_id": sid, "total_final_marks": total,
-            "total_ai_marks": total, "total_max_marks": maximum, "questionwise_marking": marking})
+            "total_ai_marks": total, "total_max_marks": maximum, "questionwise_marking": marking,
+            "attendance_status": status, "status_note": status_note})
     return prepared

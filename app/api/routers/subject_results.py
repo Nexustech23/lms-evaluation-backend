@@ -25,6 +25,7 @@ from app.api.deps import (
 )
 from app.db.mongodb import get_database
 from app.models.relative_grading import build_grading_config
+from app.services.attendance import attendance_status, is_not_cleared
 from app.services.co_excel import CoReportError, _normalise_answer, build_co_report_workbook, fetch_co_report_data
 from app.utils.composite_helper import compute_weighted_composite
 from app.utils.grade_points import get_grade_point
@@ -97,8 +98,11 @@ async def _get_subject_results(
             "exam_date": exam_date.strftime("%Y-%m-%d") if exam_date else None,
             "weightage_percent": e.get("weightage") or 0,
             "folder_name": e.get("folder_name", ""),
+            "is_mandatory": bool(e.get("is_mandatory", False)),
+            "min_clear_percent": e.get("min_clear_percent"),
         })
     weightage_by_exam = {em["exam_id"]: em["weightage_percent"] for em in exams_meta}
+    exam_by_id = {str(e["_id"]): e for e in exams}
 
     answers = [a async for a in db["answerDetails"].find({"exam_id": {"$in": exam_oids}})]
 
@@ -134,19 +138,28 @@ async def _get_subject_results(
             return {"error": "Saved marks are outside the allowed range"}, 409
         percentage = round(final_marks / max_marks * 100, 2) if evaluated else None
 
+        attendance = attendance_status(ans)
+        if attendance == "absent":
+            # Did not sit: no marks, and not "pending" (nothing is awaited from evaluation).
+            evaluated, final_marks, percentage = False, None, None
+        status = attendance if attendance != "present" else ("evaluated" if evaluated else "pending")
+
         student_map[sid][eid] = {
             "answer_id": str(ans["_id"]),
             "final_marks": final_marks if evaluated else None,
             "max_marks": max_marks,
             "percentage": percentage,
-            "status": "evaluated" if evaluated else "pending",
+            "status": status,
+            "attendance_status": attendance,
+            "status_note": ans.get("status_note"),
+            "not_cleared": is_not_cleared(exam_by_id.get(eid), attendance, percentage),
             "filename": filename,
             "evaluated_report_url": ans.get("evaluated_report_url"),
             "reviewed_by_professor": ans.get("reviewed_by_professor", False),
         }
 
-        if not evaluated:
-            continue
+        if not evaluated or attendance != "present":
+            continue  # absent / malpractice students do not feed CO attainment
         co_totals = student_co_totals.setdefault(sid, {})
         for q in _normalise_answer(ans)["questions"]:
             for co in q["cos"]:
@@ -169,6 +182,9 @@ async def _get_subject_results(
         students_list.append({"student_id": sid, "results": results, "co_summary": co_summary})
 
     for student in students_list:
+        # An absent student on a non-mandatory exam did not sit it: that exam is
+        # left out of the weighted result (neither used nor awaited). On a
+        # mandatory exam it stays awaited, so the result remains incomplete.
         exam_results = [
             {
                 "exam_id": eid,
@@ -176,7 +192,11 @@ async def _get_subject_results(
                 "percentage": (student["results"][eid]["percentage"] if student["results"].get(eid) else None),
             }
             for eid in exam_id_str
+            if not (student["results"].get(eid) and student["results"][eid]["attendance_status"] == "absent"
+                    and not exam_by_id[eid].get("is_mandatory"))
         ]
+        student["not_cleared_exam_ids"] = [
+            eid for eid in exam_id_str if student["results"].get(eid) and student["results"][eid]["not_cleared"]]
         student.update(compute_weighted_composite(exam_results))
 
     school_config = await config_if_school(db, institute_id)
@@ -859,6 +879,8 @@ def _build_detailed_excel_workbook(folder: Dict[str, Any], eval_details: List[Di
         qw_map: Dict[Any, Dict[str, Any]] = {}
         for q in answer.get("questionwise_marking", []):
             qw_map[q.get("question_no")] = q
+        # "AB" / "MP" replace the stored zeros for absent / malpractice students.
+        status_label = {"absent": "AB", "malpractice": "MP"}.get(attendance_status(answer))
 
         col = 3
         for q_info in question_layout:
@@ -867,7 +889,9 @@ def _build_detailed_excel_workbook(folder: Dict[str, Any], eval_details: List[Di
             flags = q_data.get("flags", {}) if q_data else {}
             is_unanswered = flags.get("unanswered", False) or not q_data
 
-            if is_unanswered:
+            if status_label:
+                worksheet.write(row, col, status_label, cell_center_format)
+            elif is_unanswered:
                 worksheet.write(row, col, "Not Attempted", cell_center_format)
             else:
                 final_marks = q_data.get("final_marks")
@@ -883,7 +907,9 @@ def _build_detailed_excel_workbook(folder: Dict[str, Any], eval_details: List[Di
                     answer_co_map[c.get("co_code")] = c
 
             for co in q_info["cos"]:
-                if is_unanswered:
+                if status_label:
+                    worksheet.write(row, col, status_label, cell_center_format)
+                elif is_unanswered:
                     worksheet.write(row, col, "Not Attempted", cell_center_format)
                 else:
                     c_data = answer_co_map.get(co["co_code"])
@@ -906,6 +932,13 @@ def _build_detailed_excel_workbook(folder: Dict[str, Any], eval_details: List[Di
         if max_marks <= 0:
             for offset in range(4):
                 worksheet.write(row, summary_start_col + offset, "Pending evaluation", cell_center_format)
+            worksheet.write(row, summary_start_col + 4, "-", cell_center_format)
+            row += 1
+            continue
+
+        if status_label:
+            for offset in range(4):
+                worksheet.write(row, summary_start_col + offset, status_label, cell_center_format)
             worksheet.write(row, summary_start_col + 4, "-", cell_center_format)
             row += 1
             continue
