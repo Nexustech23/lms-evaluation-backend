@@ -41,6 +41,7 @@ from app.api.routers import (
     self_learner_analytics,
     self_learner_course_material,
     student_subjects,
+    student_dashboard,
     subject_results,
     transcripts,
 )
@@ -200,6 +201,7 @@ app.include_router(faculty_materials.router)
 app.include_router(course_material.router)
 app.include_router(self_learner_course_material.router)
 app.include_router(student_subjects.router)
+app.include_router(student_dashboard.router)
 app.include_router(transcripts.router)
 app.include_router(client_diagnostics.router)
 
