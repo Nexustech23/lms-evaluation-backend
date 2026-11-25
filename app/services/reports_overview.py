@@ -100,7 +100,7 @@ def _mean_cgpa(records: List[Dict[str, Any]]) -> Optional[float]:
 # ---- the overview ------------------------------------------------------------------------------------------------------
 
 async def load_scope(db, institute_id: ObjectId, programme: Optional[str] = None, batch: Optional[str] = None,
-                     semester: Optional[int] = None) -> Dict[str, Any]:
+                     semester: Optional[int] = None, with_exams: bool = True) -> Dict[str, Any]:
     """Everything every Reports page needs for one scope: the institute's programmes and batches, the transcripts,
     courses, exams and answer sheets inside the scope, and the semester that is in force. College institutes only."""
     institute = await db["instituteDetails"].find_one({"_id": institute_id})
@@ -146,7 +146,7 @@ async def load_scope(db, institute_id: ObjectId, programme: Optional[str] = None
     subject_ids = _ids(subjects)
     exams = ([e async for e in db["newsavedDocs"].find({"subject_id": {"$in": subject_ids}})
               if not e.get("is_archived") and (semester is None or e.get("semester") == semester)]
-             if subject_ids else [])
+             if with_exams and subject_ids else [])
     exam_ids = _ids(exams)
     answers = [a async for a in db["answerDetails"].find({"exam_id": {"$in": exam_ids}})] if exam_ids else []
     pending_answers = sum(1 for a in answers if pending_review(a))

@@ -16,7 +16,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.api.deps import get_current_identity, get_current_user_and_institute
 from app.db.mongodb import get_database
 from app.models.user import INSTITUTE
-from app.services import reports_backlog
+from app.services import reports_attainment, reports_backlog
 from app.services.reports_data_check import build_data_check
 from app.services.reports_overview import BACKLOG_LABELS, build_overview
 from app.services.reports_result_analysis import build_result_analysis, build_workbook
@@ -144,3 +144,33 @@ async def reports_settings(
         raise HTTPException(status_code=400, detail="Unknown label")
     await db["instituteDetails"].update_one({"_id": institute_id}, {"$set": {"reports_backlog_label": body.backlog_label}})
     return {"backlog_label": body.backlog_label}
+
+
+# ---- CO / PO Attainment: aggregates only, no student is named --------------------------------------------------------------
+
+@router.get("/reports/attainment")
+async def reports_attainment_summary(
+    programme: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    semester: Optional[int] = Query(None, ge=1, le=20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    return await reports_attainment.build_attainment(db, await _admin_institute(identity, db), programme, batch, semester)
+
+
+@router.get("/reports/attainment/export")
+async def reports_attainment_export(
+    programme: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    semester: Optional[int] = Query(None, ge=1, le=20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    user, institute_id = await _admin(identity, db)
+    report = await reports_attainment.build_attainment(db, institute_id, programme, batch, semester)
+    if report["too_many"]:
+        raise HTTPException(status_code=400, detail="Too many courses in this scope; choose a programme or batch first")
+    content = reports_attainment.build_workbook(report, user.get("fullName") or "-", user.get("fullName") or "-")
+    name = f"co-po-attainment-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.xlsx"
+    return Response(content=content, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{name}"'})
