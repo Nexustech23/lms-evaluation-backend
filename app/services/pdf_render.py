@@ -43,7 +43,7 @@ def _guard_request(route):
 
 
 @trace_function('report.pdf_render')
-def render_html_to_pdf(html_content: str) -> bytes:
+def render_html_to_pdf(html_content: str, footer_template: str = None) -> bytes:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -51,10 +51,15 @@ def render_html_to_pdf(html_content: str) -> bytes:
             page.route("**/*", _guard_request)
             page.set_content(html_content, wait_until="networkidle")
 
+            options = {}
+            if footer_template:                       # e.g. page numbers; callers that pass nothing render as before
+                options = {"display_header_footer": True, "header_template": "<span></span>",
+                           "footer_template": footer_template}
             pdf_bytes = page.pdf(
                 format="A4",
                 print_background=True,
                 margin={"top": "15mm", "right": "15mm", "bottom": "15mm", "left": "15mm"},
+                **options,
             )
 
             browser.close()

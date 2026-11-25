@@ -156,12 +156,12 @@ def _write_table(ws, headers: List[str], rows: List[List[Any]]):
     ws.freeze_panes = "A2"
 
 
-def scope_words(report: Dict[str, Any]) -> str:
+def scope_words(report: Dict[str, Any], no_semester: str = "No semester with results") -> str:
     """The scope in plain words, for the export and anywhere else a sentence is needed."""
     scope, filters = report["scope"], report["filters"]
     programme = next((p["name"] for p in filters["programmes"] if p["id"] == scope["programme"]), "All programmes")
     batch = next((b["name"] for b in filters["batches"] if b["id"] == scope["batch"]), "All batches")
-    semester = f"Semester {scope['semester']}" if scope["semester"] else "No semester with results"
+    semester = f"Semester {scope['semester']}" if scope["semester"] else no_semester
     return f"{semester} | {programme} | {batch}"
 
 

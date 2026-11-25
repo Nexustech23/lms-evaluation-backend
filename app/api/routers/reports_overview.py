@@ -5,6 +5,7 @@
 
 from typing import Optional
 
+import asyncio
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -17,6 +18,8 @@ from app.api.deps import get_current_identity, get_current_user_and_institute
 from app.db.mongodb import get_database
 from app.models.user import INSTITUTE
 from app.services import reports_attainment, reports_backlog
+from app.services import reports_pdf
+from app.services.pdf_render import render_html_to_pdf
 from app.services.reports_data_check import build_data_check
 from app.services.reports_overview import BACKLOG_LABELS, build_overview
 from app.services.reports_result_analysis import build_result_analysis, build_workbook
@@ -174,3 +177,57 @@ async def reports_attainment_export(
     content = reports_attainment.build_workbook(report, user.get("fullName") or "-", user.get("fullName") or "-")
     name = f"co-po-attainment-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.xlsx"
     return Response(content=content, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ---- PDF versions of the aggregate reports (counts, averages and percentages only; no student is named) ---------------------
+
+async def _pdf(html: str, filename: str) -> Response:
+    try:
+        content = await asyncio.to_thread(render_html_to_pdf, html, reports_pdf.FOOTER)
+    except Exception as exc:                                       # Chromium missing, or the render failed
+        raise HTTPException(status_code=503, detail="The PDF could not be created") from exc
+    name = f"{filename}-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.pdf"
+    return Response(content=content, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/reports/result-analysis/pdf")
+async def reports_result_analysis_pdf(
+    programme: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    semester: Optional[int] = Query(None, ge=1, le=20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    user, institute_id = await _admin(identity, db)
+    report = await build_result_analysis(db, institute_id, programme, batch, semester)
+    name = user.get("fullName") or "-"
+    return await _pdf(reports_pdf.result_analysis_html(report, name, name), "result-analysis")
+
+
+@router.get("/reports/data-check/pdf")
+async def reports_data_check_pdf(
+    programme: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    semester: Optional[int] = Query(None, ge=1, le=20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    user, institute_id = await _admin(identity, db)
+    report = await build_data_check(db, institute_id, programme, batch, semester)
+    name = user.get("fullName") or "-"
+    return await _pdf(reports_pdf.data_check_html(report, name, name), "data-check")
+
+
+@router.get("/reports/attainment/pdf")
+async def reports_attainment_pdf(
+    programme: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    semester: Optional[int] = Query(None, ge=1, le=20),
+    identity: dict = Depends(get_current_identity),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    user, institute_id = await _admin(identity, db)
+    report = await reports_attainment.build_attainment(db, institute_id, programme, batch, semester)
+    name = user.get("fullName") or "-"
+    return await _pdf(reports_pdf.attainment_html(report, name, name), "co-po-attainment")

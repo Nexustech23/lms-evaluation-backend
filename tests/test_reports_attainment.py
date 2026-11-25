@@ -219,6 +219,7 @@ def test_the_export_carries_the_roll_ups_the_courses_and_a_report_info_sheet():
     assert course_row[5] == "Worked out" and "CO2 3.0/1.8 attained" in course_row[6]
     info = {row[0]: row[1] for row in book["Report info"].iter_rows(values_only=True)}
     assert info["Institute"] == "Demo University" and "No PO target" in info["Limits"]
+    assert info["Scope"] == "All semesters | All programmes | All batches"
 
 
 def test_the_export_refuses_a_scope_with_too_many_courses(monkeypatch):
