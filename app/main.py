@@ -35,6 +35,7 @@ from app.api.routers import (
     profile,
     question_paper,
     relative_grading,
+    reports_overview,
     roadmap,
     roles,
     school_grading,
@@ -204,6 +205,7 @@ app.include_router(self_learner_course_material.router)
 app.include_router(student_subjects.router)
 app.include_router(student_dashboard.router)
 app.include_router(student_results.router)
+app.include_router(reports_overview.router)
 app.include_router(transcripts.router)
 app.include_router(client_diagnostics.router)
 
