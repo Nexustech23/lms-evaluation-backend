@@ -91,8 +91,10 @@ def _mean_cgpa(records: List[Dict[str, Any]]) -> Optional[float]:
 
 # ---- the overview ------------------------------------------------------------------------------------------------------
 
-async def build_overview(db, institute_id: ObjectId, programme: Optional[str] = None, batch: Optional[str] = None,
-                         semester: Optional[int] = None) -> Dict[str, Any]:
+async def load_scope(db, institute_id: ObjectId, programme: Optional[str] = None, batch: Optional[str] = None,
+                     semester: Optional[int] = None) -> Dict[str, Any]:
+    """Everything every Reports page needs for one scope: the institute's programmes and batches, the transcripts,
+    courses, exams and answer sheets inside the scope, and the semester that is in force. College institutes only."""
     institute = await db["instituteDetails"].find_one({"_id": institute_id})
     if not institute:
         raise HTTPException(status_code=400, detail="Institute profile not found")
@@ -140,6 +142,43 @@ async def build_overview(db, institute_id: ObjectId, programme: Optional[str] = 
     exam_ids = _ids(exams)
     answers = [a async for a in db["answerDetails"].find({"exam_id": {"$in": exam_ids}})] if exam_ids else []
     pending_answers = sum(1 for a in answers if pending_review(a))
+
+    return {
+        "institute": institute, "programme_id": programme_id, "batch_id": batch_id, "programmes": programmes,
+        "batches": batches, "batch_by_id": batch_by_id, "programme_name": programme_name,
+        "every_record": every_record, "records": records, "stale_results": stale_results,
+        "semesters_present": semesters_present, "semester": semester, "semester_defaulted": semester_defaulted,
+        "semester_records": semester_records, "previous_records": previous_records,
+        "subjects": subjects, "exams": exams, "answers": answers, "pending_answers": pending_answers,
+    }
+
+
+def scope_filters(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """What the scope bar can choose from."""
+    batches = ctx["batches"]
+    totals = [int(b["total_semesters"]) for b in batches if _number(b.get("total_semesters")) is not None]
+    return {
+        "programmes": [{"id": str(p["_id"]), "name": p.get("programme_name")} for p in ctx["programmes"]],
+        "batches": [{"id": str(b["_id"]), "name": b.get("batch_name"),
+                     "programme_id": str(b["programme_id"]) if b.get("programme_id") else None} for b in batches],
+        "semesters": list(range(1, max([*ctx["semesters_present"], *totals, 0]) + 1)),
+    }
+
+
+def scope_summary(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    return {"programme": str(ctx["programme_id"]) if ctx["programme_id"] else None,
+            "batch": str(ctx["batch_id"]) if ctx["batch_id"] else None,
+            "semester": ctx["semester"], "semester_defaulted": ctx["semester_defaulted"]}
+
+
+async def build_overview(db, institute_id: ObjectId, programme: Optional[str] = None, batch: Optional[str] = None,
+                         semester: Optional[int] = None) -> Dict[str, Any]:
+    ctx = await load_scope(db, institute_id, programme, batch, semester)
+    programme_id, batch_id, semester = ctx["programme_id"], ctx["batch_id"], ctx["semester"]
+    batch_by_id = ctx["batch_by_id"]
+    programme_name, records, stale_results = ctx["programme_name"], ctx["records"], ctx["stale_results"]
+    semester_records, previous_records = ctx["semester_records"], ctx["previous_records"]
+    subjects, exams, answers, pending_answers = ctx["subjects"], ctx["exams"], ctx["answers"], ctx["pending_answers"]
 
     # -- students
     students = [s async for s in db["studentDetails"].find({"institute_id": institute_id}) if not s.get("is_deleted")
@@ -227,19 +266,10 @@ async def build_overview(db, institute_id: ObjectId, programme: Optional[str] = 
     ) if item["count"]]
 
     dates = [d for d in (r.get("updated_at") or r.get("created_at") for r in records) if isinstance(d, datetime)]
-    batch_totals = [int(b["total_semesters"]) for b in batches
-                    if _number(b.get("total_semesters")) is not None]
     return {
-        "scope": {"programme": str(programme_id) if programme_id else None,
-                  "batch": str(batch_id) if batch_id else None,
-                  "semester": semester, "semester_defaulted": semester_defaulted},
+        "scope": scope_summary(ctx),
         "as_of": _iso(max(dates)) if dates else None,
-        "filters": {
-            "programmes": [{"id": str(p["_id"]), "name": p.get("programme_name")} for p in programmes],
-            "batches": [{"id": str(b["_id"]), "name": b.get("batch_name"),
-                         "programme_id": str(b["programme_id"]) if b.get("programme_id") else None} for b in batches],
-            "semesters": list(range(1, max([*semesters_present, *batch_totals, 0]) + 1)),
-        },
+        "filters": scope_filters(ctx),
         "coverage": {"students": len(students), "with_results": with_results},
         "rules": {"fail_grades": sorted(FAIL_GRADES), "pass_target_percent": PASS_TARGET_PERCENT,
                   "at_risk_failed_papers": AT_RISK_MIN_FAILED_PAPERS, "at_risk_min_cgpa": AT_RISK_MIN_CGPA},
