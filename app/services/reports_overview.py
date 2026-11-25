@@ -23,6 +23,9 @@ AT_RISK_MIN_FAILED_PAPERS = 2           # at risk: this many failed subjects ...
 AT_RISK_MIN_CGPA = 5.0                  # ... or a latest CGPA under this
 GRADE_ORDER = ["O", "A+", "A", "B+", "B", "C", "P", "D", "E", "F", "U"]
 RELATION_COLLECTION = "StudentSubjectRelationModel"
+# What an institute calls a failed subject carried forward. The admin chooses; the default is the plain word.
+BACKLOG_LABELS = ("Backlog", "Arrear", "Back paper", "ATKT", "Supplementary")
+DEFAULT_BACKLOG_LABEL = "Backlog"
 
 
 # ---- small helpers ----------------------------------------------------------------------------------------------------
@@ -39,6 +42,11 @@ def _percent(part: int, whole: int) -> Optional[float]:
 
 def _mean(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 2) if values else None
+
+
+def backlog_label_of(institute: Optional[Dict[str, Any]]) -> str:
+    value = (institute or {}).get("reports_backlog_label")
+    return value if value in BACKLOG_LABELS else DEFAULT_BACKLOG_LABEL
 
 
 def _object_id(value: Optional[str], name: str) -> Optional[ObjectId]:
@@ -271,6 +279,7 @@ async def build_overview(db, institute_id: ObjectId, programme: Optional[str] = 
         "as_of": _iso(max(dates)) if dates else None,
         "filters": scope_filters(ctx),
         "coverage": {"students": len(students), "with_results": with_results},
+        "labels": {"backlog": backlog_label_of(ctx["institute"])},
         "rules": {"fail_grades": sorted(FAIL_GRADES), "pass_target_percent": PASS_TARGET_PERCENT,
                   "at_risk_failed_papers": AT_RISK_MIN_FAILED_PAPERS, "at_risk_min_cgpa": AT_RISK_MIN_CGPA},
         "tiles": tiles,
